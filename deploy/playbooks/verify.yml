@@ -5,6 +5,7 @@
   gather_facts: true
   vars:
     cp_verify_rls_fixtures_owned_by_run: false
+    cp_verify_release_config_root: /etc/vivolution/releases
   tasks:
     - name: Re-run deployment preflight
       ansible.builtin.include_role:
@@ -173,7 +174,7 @@
 
     - name: Read active release immutable image registration
       ansible.builtin.slurp:
-        src: "{{ cp_controller_release_config_root }}/{{ cp_verify_active_release }}/image"
+        src: "{{ cp_verify_release_config_root }}/{{ cp_verify_active_release }}/image"
       register: cp_verify_active_image_file
 
     - name: Read live Quadlet image reference
@@ -199,7 +200,7 @@
     - name: Inspect active runtime environment
       ansible.builtin.stat:
         path: >-
-          {{ cp_controller_release_config_root }}/{{ cp_verify_active_release }}/runtime.env
+          {{ cp_verify_release_config_root }}/{{ cp_verify_active_release }}/runtime.env
         follow: false
         checksum_algorithm: sha256
       register: cp_verify_active_runtime_environment
@@ -231,7 +232,7 @@
             regex_replace('^sha256:', '')
           - >-
             cp_verify_quadlet_runtime_environment.stdout | trim ==
-            cp_controller_release_config_root ~ '/' ~ cp_verify_active_release ~ '/runtime.env'
+            cp_verify_release_config_root ~ '/' ~ cp_verify_active_release ~ '/runtime.env'
           - cp_verify_active_runtime_environment.stat.isreg | default(false)
           - not (cp_verify_active_runtime_environment.stat.islnk | default(false))
           - cp_verify_active_runtime_environment.stat.uid | default(-1) | int == 0
@@ -305,7 +306,7 @@
 
     - name: Read rollback release immutable image registration
       ansible.builtin.slurp:
-        src: "{{ cp_controller_release_config_root }}/{{ cp_verify_previous_release }}/image"
+        src: "{{ cp_verify_release_config_root }}/{{ cp_verify_previous_release }}/image"
       register: cp_verify_previous_image_file
       when: cp_verify_previous_release | length > 0
 
@@ -321,7 +322,7 @@
     - name: Inspect rollback runtime environment
       ansible.builtin.stat:
         path: >-
-          {{ cp_controller_release_config_root }}/{{ cp_verify_previous_release }}/runtime.env
+          {{ cp_verify_release_config_root }}/{{ cp_verify_previous_release }}/runtime.env
         follow: false
         checksum_algorithm: sha256
       register: cp_verify_previous_runtime_environment
