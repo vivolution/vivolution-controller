@@ -112,11 +112,20 @@
   loop_control:
     label: "{{ item.stat.path | regex_replace('^' ~ (cp_controller_source_root | regex_escape) ~ '/', '') }}"
 
+- name: Define the canonical controller manifest line feed
+  ansible.builtin.set_fact:
+    cp_controller_source_manifest_linefeed: "{{ '%c' | format(10) }}"
+
 - name: Finalise deterministic controller source manifest
   ansible.builtin.set_fact:
-    cp_controller_source_manifest: "{{ (cp_controller_source_manifest_lines | join('\n')) ~ '\n' }}"
+    cp_controller_source_manifest: >-
+      {{ (cp_controller_source_manifest_lines |
+          join(cp_controller_source_manifest_linefeed)) ~
+         cp_controller_source_manifest_linefeed }}
     cp_controller_source_manifest_sha256: >-
-      {{ ((cp_controller_source_manifest_lines | join('\n')) ~ '\n') | hash('sha256') }}
+      {{ ((cp_controller_source_manifest_lines |
+           join(cp_controller_source_manifest_linefeed)) ~
+          cp_controller_source_manifest_linefeed) | hash('sha256') }}
 
 - name: Require release ID to equal deterministic source manifest digest
   ansible.builtin.assert:
