@@ -1,0 +1,284 @@
+---
+- name: Verify Vivolution CP1 foundation
+  hosts: controllers
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Re-run deployment preflight
+      ansible.builtin.include_role:
+        name: preflight
+
+    - name: Verify controller hostname
+      ansible.builtin.assert:
+        that: ansible_facts['hostname'] == cp_expected_hostname
+        fail_msg: Controller hostname does not match its declared inventory identity.
+
+    - name: Collect required service state
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-active
+          - "{{ item }}"
+      loop: "{{ ['ssh', 'nftables', 'pgbouncer', 'caddy'] + (['postgresql'] if cp_install_local_postgres | bool else []) }}"
+      changed_when: false
+
+    - name: Collect listening TCP sockets
+      ansible.builtin.command:
+        argv: [ss, -ltnH]
+      register: cp_listeners
+      changed_when: false
+
+    - name: Require database services to remain private
+      ansible.builtin.assert:
+        that:
+          - "'0.0.0.0:5432' not in cp_listeners.stdout"
+          - "'[::]:5432' not in cp_listeners.stdout"
+          - "'0.0.0.0:6432' not in cp_listeners.stdout"
+          - "'[::]:6432' not in cp_listeners.stdout"
+          - "'0.0.0.0:' ~ (cp_controller_web_port | string) not in cp_listeners.stdout"
+          - "'[::]:' ~ (cp_controller_web_port | string) not in cp_listeners.stdout"
+        fail_msg: PostgreSQL, PgBouncer, or the controller application is exposed beyond loopback.
+
+    - name: Require intended application and ingress listeners
+      ansible.builtin.assert:
+        that:
+          - "'127.0.0.1:' ~ (cp_controller_web_port | string) in cp_listeners.stdout"
+          - "'*:' ~ (cp_ingress_https_port | string) in cp_listeners.stdout"
+          - "'127.0.0.1:2019' in cp_listeners.stdout"
+        fail_msg: The loopback application or declared HTTPS ingress listener is missing.
+
+    - name: Collect active nftables input policy
+      ansible.builtin.command:
+        argv: [nft, list, chain, inet, vivolution_filter, input]
+      register: cp_nftables_input
+      changed_when: false
+
+    - name: Collect active nftables forward policy
+      ansible.builtin.command:
+        argv: [nft, list, chain, inet, vivolution_filter, forward]
+      register: cp_nftables_forward
+      changed_when: false
+
+    - name: Require persistent default-deny host policy
+      ansible.builtin.assert:
+        that:
+          - "'policy drop' in cp_nftables_input.stdout"
+          - "'policy drop' in cp_nftables_forward.stdout"
+          - >-
+            'tcp dport { ' ~ (cp_firewall_tcp_ports | sort | join(', ')) ~ ' } ct state new accept'
+            in cp_nftables_input.stdout
+        fail_msg: Active nftables policy is not default-deny with only declared TCP ports.
+
+    - name: Verify PgBouncer database login
+      ansible.builtin.command:
+        argv:
+          - psql
+          - --host=127.0.0.1
+          - "--port={{ cp_pgbouncer_port }}"
+          - "--username={{ cp_db_runtime_user }}"
+          - "--dbname={{ cp_database_name }}"
+          - --no-password
+          - --tuples-only
+          - --command=SELECT current_database(), current_user
+      environment:
+        PGPASSWORD: "{{ cp_db_runtime_password }}"
+      register: cp_db_verify
+      changed_when: false
+      no_log: true
+
+    - name: Require the intended database identity
+      ansible.builtin.assert:
+        that:
+          - cp_database_name in cp_db_verify.stdout
+          - cp_db_runtime_user in cp_db_verify.stdout
+
+    - name: Collect failed systemd units
+      ansible.builtin.command:
+        argv: [systemctl, --failed, --no-legend, --plain]
+      register: cp_failed_units
+      changed_when: false
+      failed_when: cp_failed_units.stdout | trim | length > 0
+
+    - name: Verify controller application service
+      ansible.builtin.command:
+        argv: [systemctl, is-active, vivolution-cp-web.service]
+      changed_when: false
+
+    - name: Verify controller readiness
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ cp_controller_web_port }}/health/ready"
+        method: GET
+        status_code: 200
+        return_content: true
+      register: cp_controller_ready
+
+    - name: Require ready controller response
+      ansible.builtin.assert:
+        that: cp_controller_ready.json.status == 'ready'
+
+    - name: Verify trusted HTTPS ingress
+      ansible.builtin.uri:
+        url: "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/ready"
+        method: GET
+        status_code: 200
+        return_content: true
+        validate_certs: true
+      register: cp_ingress_ready
+
+    - name: Require secure ingress response
+      ansible.builtin.assert:
+        that:
+          - cp_ingress_ready.json.status == 'ready'
+          - cp_ingress_ready.strict_transport_security == 'max-age=3600'
+          - cp_ingress_ready.x_content_type_options == 'nosniff'
+        fail_msg: Trusted HTTPS ingress or its security headers are invalid.
+
+    - name: Verify active container is unprivileged and read-only
+      ansible.builtin.command:
+        argv:
+          - podman
+          - inspect
+          - vivolution-cp-web
+          - --format
+          - "{{ '{{' }}.Config.User{{ '}}' }}|{{ '{{' }}.HostConfig.ReadonlyRootfs{{ '}}' }}"
+      register: cp_controller_container_policy
+      changed_when: false
+
+    - name: Require container security policy
+      ansible.builtin.assert:
+        that:
+          - cp_controller_container_policy.stdout.startswith('10001:10001|true')
+
+    - name: Read controller process capability sets
+      ansible.builtin.command:
+        argv:
+          - podman
+          - exec
+          - vivolution-cp-web
+          - awk
+          - /^Cap(Eff|Bnd):/
+          - /proc/1/status
+      register: cp_controller_capabilities
+      changed_when: false
+
+    - name: Require zero effective and bounding capabilities
+      ansible.builtin.assert:
+        that:
+          - "'CapEff:\\t0000000000000000' in cp_controller_capabilities.stdout"
+          - "'CapBnd:\\t0000000000000000' in cp_controller_capabilities.stdout"
+        fail_msg: Controller process retains Linux capabilities.
+
+    - name: Read controller systemd resource limits
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - vivolution-cp-web.service
+          - --property=MemoryMax
+          - --property=CPUQuotaPerSecUSec
+      register: cp_controller_resource_limits
+      changed_when: false
+
+    - name: Require bounded controller memory and CPU
+      ansible.builtin.assert:
+        that:
+          - "'MemoryMax=' ~ (cp_controller_memory_max_bytes | string) in cp_controller_resource_limits.stdout"
+          - "'CPUQuotaPerSecUSec=1.500000s' in cp_controller_resource_limits.stdout"
+        fail_msg: Controller systemd memory or CPU limits are missing.
+
+    - name: Find protected per-release environments
+      ansible.builtin.find:
+        paths: /etc/vivolution/releases
+        recurse: true
+        file_type: file
+        patterns:
+          - runtime.env
+          - migrate.env
+      register: cp_controller_secret_files
+
+    - name: Require root-only per-release environments
+      ansible.builtin.assert:
+        that:
+          - cp_controller_secret_files.matched >= 2
+          - cp_controller_secret_files.files | rejectattr('mode', 'equalto', '0600') | list | length == 0
+          - cp_controller_secret_files.files | rejectattr('uid', 'equalto', 0) | list | length == 0
+          - cp_controller_secret_files.files | rejectattr('gid', 'equalto', 0) | list | length == 0
+        fail_msg: A controller release environment is not root-owned mode 0600.
+
+    - name: Inspect pinned controller base-image index
+      ansible.builtin.command:
+        argv: [podman, manifest, inspect, "{{ cp_controller_base_image }}"]
+      register: cp_controller_base_manifest
+      changed_when: false
+
+    - name: Require ARM64 and AMD64 base-image manifests
+      ansible.builtin.assert:
+        that:
+          - >-
+            (cp_controller_base_manifest.stdout | from_json).manifests |
+            selectattr('platform.architecture', 'equalto', 'arm64') | list | length > 0
+          - >-
+            (cp_controller_base_manifest.stdout | from_json).manifests |
+            selectattr('platform.architecture', 'equalto', 'amd64') | list | length > 0
+        fail_msg: Pinned controller base image is not available for both ARM64 and AMD64.
+
+    - name: Verify PostgreSQL row-level tenant isolation
+      when: cp_install_local_postgres | bool
+      block:
+        - name: Install deterministic RLS qualification fixtures
+          ansible.builtin.command:
+            argv:
+              - psql
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_database_name }}"
+              - --no-password
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-setup.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          changed_when: false
+          no_log: true
+
+        - name: Exercise tenant RLS through the runtime database identity
+          ansible.builtin.command:
+            argv:
+              - psql
+              - --host=127.0.0.1
+              - "--port={{ cp_pgbouncer_port }}"
+              - "--username={{ cp_db_runtime_user }}"
+              - "--dbname={{ cp_database_name }}"
+              - --no-password
+              - --no-align
+              - --tuples-only
+              - --quiet
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-check.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_runtime_password }}"
+          register: cp_rls_check
+          changed_when: false
+          no_log: true
+
+        - name: Require no-context, tenant A, tenant B, and operator isolation results
+          ansible.builtin.assert:
+            that:
+              - cp_rls_check.stdout_lines == ['0|0|0', '1|0|1|0|1|0', '0|1|0|1|0|1', '2|2|2']
+            fail_msg: PostgreSQL row-level tenant isolation did not match the expected visibility matrix.
+      always:
+        - name: Remove deterministic RLS qualification fixtures
+          ansible.builtin.command:
+            argv:
+              - psql
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_database_name }}"
+              - --no-password
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-cleanup.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          changed_when: false
+          no_log: true

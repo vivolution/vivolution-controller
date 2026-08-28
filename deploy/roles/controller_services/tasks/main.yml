@@ -1,0 +1,8 @@
+---
+- name: Build immutable controller release
+  ansible.builtin.include_tasks: build.yml
+  when: cp_controller_build | bool
+
+- name: Activate controller release
+  ansible.builtin.include_tasks: activate.yml
+

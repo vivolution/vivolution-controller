@@ -1,0 +1,22 @@
+---
+- name: Create Quadlet directory
+  ansible.builtin.file:
+    path: /etc/containers/systemd
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Check for Podman automatic image updates timer
+  ansible.builtin.command:
+    argv: [systemctl, list-unit-files, podman-auto-update.timer, --no-legend]
+  register: cp_podman_auto_update_unit
+  changed_when: false
+  failed_when: false
+
+- name: Disable unreviewed automatic container image updates
+  ansible.builtin.systemd_service:
+    name: podman-auto-update.timer
+    enabled: false
+    state: stopped
+  when: "'podman-auto-update.timer' in cp_podman_auto_update_unit.stdout"

@@ -1,0 +1,20 @@
+.DS_Store
+*.retry
+
+# Local deployment state and evidence can contain credentials or host keys.
+deploy/.state/
+deploy/evidence/
+
+# Generated installer artifacts are rebuilt from the verified Debian ISO.
+lab/utm/generated/*
+!lab/utm/generated/.gitignore
+
+# Controller development/build output.
+controller/.venv/
+controller/.pytest_cache/
+controller/**/__pycache__/
+controller/staticfiles/
+controller/*.sqlite3
+
+# Local controller test environment.
+controller/.test-venv/

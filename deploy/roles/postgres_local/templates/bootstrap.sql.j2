@@ -1,0 +1,23 @@
+\set ON_ERROR_STOP on
+
+SELECT format('CREATE ROLE %I LOGIN', '{{ cp_db_owner }}')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ cp_db_owner }}')\gexec
+ALTER ROLE {{ cp_db_owner }} PASSWORD '{{ cp_db_owner_password }}';
+
+SELECT format('CREATE ROLE %I LOGIN', '{{ cp_db_runtime_user }}')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ cp_db_runtime_user }}')\gexec
+ALTER ROLE {{ cp_db_runtime_user }} PASSWORD '{{ cp_db_runtime_password }}';
+ALTER ROLE {{ cp_db_runtime_user }} NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+
+SELECT format('CREATE DATABASE %I OWNER %I', '{{ cp_database_name }}', '{{ cp_db_owner }}')
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '{{ cp_database_name }}')\gexec
+
+REVOKE ALL ON DATABASE {{ cp_database_name }} FROM PUBLIC;
+GRANT CONNECT ON DATABASE {{ cp_database_name }} TO {{ cp_db_runtime_user }};
+
+\connect {{ cp_database_name }}
+GRANT USAGE ON SCHEMA public TO {{ cp_db_runtime_user }};
+ALTER DEFAULT PRIVILEGES FOR ROLE {{ cp_db_owner }} IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {{ cp_db_runtime_user }};
+ALTER DEFAULT PRIVILEGES FOR ROLE {{ cp_db_owner }} IN SCHEMA public
+    GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {{ cp_db_runtime_user }};

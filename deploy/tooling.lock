@@ -1,0 +1,4 @@
+# Qualified deployment-controller versions. Update only through a qualification run.
+ansible-package==14.3.1
+ansible-core==2.21.3
+controller-python==3.14.7

@@ -1,0 +1,266 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+DEPLOY_DIR="$ROOT_DIR/deploy"
+STATE_DIR="$DEPLOY_DIR/.state"
+LAB_SECRETS="$STATE_DIR/lab-secrets.yml"
+LAB_INVENTORY="${VIVO_CP_INVENTORY:-$DEPLOY_DIR/inventories/lab/hosts.yml}"
+
+controller_release_id() {
+    require_command shasum
+    source_digest="$({
+        cd "$ROOT_DIR/controller"
+        find . -type f \
+            ! -path './.venv/*' \
+            ! -path './.test-venv/*' \
+            ! -path '*/__pycache__/*' \
+            ! -name '*.pyc' \
+            ! -name '.DS_Store' \
+            -print | LC_ALL=C sort | while IFS= read -r source_file; do
+                shasum -a 256 "$source_file"
+            done
+    } | shasum -a 256 | awk '{print substr($1,1,16)}')"
+    printf 'cp1-%s\n' "$source_digest"
+}
+
+usage() {
+    printf '%s\n' \
+        'Usage: bin/cpctl <command>' \
+        '' \
+        'Commands:' \
+        '  init       Generate protected, local-only lab credentials' \
+        '  syntax     Parse and syntax-check the Ansible playbooks' \
+        '  install    Install or reconcile the local CP1 lab' \
+        '  upgrade    Build and activate the current controller source release' \
+        '  rollback   Activate the previously deployed controller release' \
+        '  failure-test  Prove a failed release restores the known-good image' \
+        '  restore-test  Prove a logical dump restores with tenant isolation' \
+        '  outage-test Prove liveness, readiness, and reconnect behavior' \
+        '  reboot-test Prove clean host reboot and complete service recovery' \
+        '  resource-test Prove the bounded local resource/endurance envelope' \
+        '  secret-test Prove secret non-exposure and record components' \
+        '  verify     Run the CP1 acceptance checks' \
+        '  qualify    Run the complete CP1 foundation qualification suite'
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || {
+        printf 'Required command is missing: %s\n' "$1" >&2
+        exit 1
+    }
+}
+
+require_inventory() {
+    [ -f "$LAB_INVENTORY" ] || {
+        printf 'Controller inventory is missing: %s\n' "$LAB_INVENTORY" >&2
+        exit 1
+    }
+}
+
+init_secrets() {
+    require_command openssl
+    umask 077
+    mkdir -p "$STATE_DIR"
+    if [ -e "$LAB_SECRETS" ]; then
+        if ! grep -q '^cp_controller_admin_password:' "$LAB_SECRETS"; then
+            admin_password="$(openssl rand -hex 24)"
+            printf 'cp_controller_admin_password: %s\n' "$admin_password" >> "$LAB_SECRETS"
+            unset admin_password
+            chmod 0600 "$LAB_SECRETS"
+            printf 'Added protected controller operator credential.\n'
+        else
+            printf 'Protected lab secrets already exist: %s\n' "$LAB_SECRETS"
+        fi
+        return 0
+    fi
+
+    owner_password="$(openssl rand -hex 32)"
+    runtime_password="$(openssl rand -hex 32)"
+    django_key="$(openssl rand -base64 48 | tr -d '\n')"
+    admin_password="$(openssl rand -hex 24)"
+    temp_file="$STATE_DIR/.lab-secrets.yml.tmp"
+    {
+        printf '%s\n' '---'
+        printf 'cp_db_owner_password: %s\n' "$owner_password"
+        printf 'cp_db_runtime_password: %s\n' "$runtime_password"
+        printf 'cp_django_secret_key: %s\n' "$django_key"
+        printf 'cp_controller_admin_password: %s\n' "$admin_password"
+    } > "$temp_file"
+    chmod 0600 "$temp_file"
+    mv "$temp_file" "$LAB_SECRETS"
+    unset owner_password runtime_password django_key admin_password
+    printf 'Created protected lab secrets: %s\n' "$LAB_SECRETS"
+}
+
+playbook() {
+    require_command ansible-playbook
+    require_inventory
+    if [ ! -f "$LAB_SECRETS" ] || ! grep -q '^cp_controller_admin_password:' "$LAB_SECRETS"; then
+        init_secrets
+    fi
+    release_id="$(controller_release_id)"
+    ANSIBLE_CONFIG="$DEPLOY_DIR/ansible.cfg" \
+        ansible-playbook \
+        --inventory "$LAB_INVENTORY" \
+        --extra-vars "@$LAB_SECRETS" \
+        --extra-vars "cp_controller_release_id=$release_id" \
+        "$@"
+}
+
+rollback_playbook() {
+    require_command ansible-playbook
+    require_inventory
+    if [ ! -f "$LAB_SECRETS" ] || ! grep -q '^cp_controller_admin_password:' "$LAB_SECRETS"; then
+        init_secrets
+    fi
+    ANSIBLE_CONFIG="$DEPLOY_DIR/ansible.cfg" \
+        ansible-playbook \
+        --inventory "$LAB_INVENTORY" \
+        --extra-vars "@$LAB_SECRETS" \
+        "$DEPLOY_DIR/playbooks/rollback.yml"
+}
+
+protected_playbook() {
+    require_command ansible-playbook
+    require_inventory
+    if [ ! -f "$LAB_SECRETS" ] || ! grep -q '^cp_controller_admin_password:' "$LAB_SECRETS"; then
+        init_secrets
+    fi
+    ANSIBLE_CONFIG="$DEPLOY_DIR/ansible.cfg" \
+        ansible-playbook \
+        --inventory "$LAB_INVENTORY" \
+        --extra-vars "@$LAB_SECRETS" \
+        "$@"
+}
+
+plain_playbook() {
+    require_command ansible-playbook
+    require_inventory
+    ANSIBLE_CONFIG="$DEPLOY_DIR/ansible.cfg" \
+        ansible-playbook \
+        --inventory "$LAB_INVENTORY" \
+        "$@"
+}
+
+run_logged() {
+    log_file="$1"
+    shift
+    if "$@" >"$log_file" 2>&1; then
+        sed -n '1,$p' "$log_file"
+        return 0
+    else
+        command_status=$?
+        sed -n '1,$p' "$log_file" >&2
+        return "$command_status"
+    fi
+}
+
+command_name="${1:-}"
+case "$command_name" in
+    init)
+        init_secrets
+        ;;
+    syntax)
+        playbook --syntax-check "$DEPLOY_DIR/playbooks/install.yml"
+        playbook --syntax-check "$DEPLOY_DIR/playbooks/verify.yml"
+        playbook --syntax-check "$DEPLOY_DIR/playbooks/rollback.yml"
+        protected_playbook --extra-vars "cp_controller_release_id=cp1-failure-probe" \
+            --syntax-check "$DEPLOY_DIR/playbooks/qualify-failed-upgrade.yml"
+        protected_playbook --syntax-check "$DEPLOY_DIR/playbooks/qualify-backup-restore.yml"
+        playbook --syntax-check "$DEPLOY_DIR/playbooks/qualify-db-outage.yml"
+        playbook --syntax-check "$DEPLOY_DIR/playbooks/qualify-reboot.yml"
+        plain_playbook --syntax-check "$DEPLOY_DIR/playbooks/qualify-resource-endurance.yml"
+        protected_playbook --syntax-check "$DEPLOY_DIR/playbooks/qualify-secret-inventory.yml"
+        ;;
+    install|upgrade)
+        playbook "$DEPLOY_DIR/playbooks/install.yml"
+        ;;
+    rollback)
+        rollback_playbook
+        ;;
+    failure-test)
+        protected_playbook --extra-vars "cp_controller_release_id=cp1-failure-probe" \
+            "$DEPLOY_DIR/playbooks/qualify-failed-upgrade.yml"
+        ;;
+    restore-test)
+        protected_playbook "$DEPLOY_DIR/playbooks/qualify-backup-restore.yml"
+        ;;
+    outage-test)
+        playbook "$DEPLOY_DIR/playbooks/qualify-db-outage.yml"
+        ;;
+    reboot-test)
+        playbook "$DEPLOY_DIR/playbooks/qualify-reboot.yml"
+        ;;
+    resource-test)
+        umask 077
+        evidence_dir="$DEPLOY_DIR/evidence/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+        mkdir -p "$evidence_dir"
+        run_logged "$evidence_dir/resource-endurance.log" plain_playbook \
+            "$DEPLOY_DIR/playbooks/qualify-resource-endurance.yml"
+        {
+            printf 'result=passed\n'
+            printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'qualification=resource-endurance\n'
+        } >"$evidence_dir/RESULT"
+        printf 'CP1 resource/endurance qualification passed. Evidence: %s\n' "$evidence_dir"
+        ;;
+    secret-test)
+        umask 077
+        evidence_dir="$DEPLOY_DIR/evidence/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+        mkdir -p "$evidence_dir"
+        run_logged "$evidence_dir/secret-inventory.log" protected_playbook \
+            "$DEPLOY_DIR/playbooks/qualify-secret-inventory.yml"
+        {
+            printf 'result=passed\n'
+            printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'qualification=secret-non-exposure-and-component-inventory\n'
+            printf 'vulnerability_scan=not-performed\n'
+        } >"$evidence_dir/RESULT"
+        printf 'CP1 secret/component qualification passed. Evidence: %s\n' "$evidence_dir"
+        ;;
+    verify)
+        playbook "$DEPLOY_DIR/playbooks/verify.yml"
+        ;;
+    qualify)
+        umask 077
+        evidence_dir="$DEPLOY_DIR/evidence/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+        mkdir -p "$evidence_dir"
+        first_log="$evidence_dir/install-first.log"
+        second_log="$evidence_dir/install-second.log"
+        run_logged "$first_log" playbook "$DEPLOY_DIR/playbooks/install.yml"
+        run_logged "$second_log" playbook "$DEPLOY_DIR/playbooks/install.yml"
+        if ! tail -n 8 "$second_log" | grep -Eq 'changed=0([[:space:]]|$)'; then
+            printf 'Second install was not idempotent. Review: %s\n' "$second_log" >&2
+            exit 1
+        fi
+        run_logged "$evidence_dir/failed-upgrade.log" protected_playbook \
+            --extra-vars "cp_controller_release_id=cp1-failure-probe" \
+            "$DEPLOY_DIR/playbooks/qualify-failed-upgrade.yml"
+        run_logged "$evidence_dir/backup-restore.log" protected_playbook \
+            "$DEPLOY_DIR/playbooks/qualify-backup-restore.yml"
+        run_logged "$evidence_dir/database-outage.log" playbook \
+            "$DEPLOY_DIR/playbooks/qualify-db-outage.yml"
+        run_logged "$evidence_dir/verify.log" playbook "$DEPLOY_DIR/playbooks/verify.yml"
+        run_logged "$evidence_dir/resource-endurance.log" plain_playbook \
+            "$DEPLOY_DIR/playbooks/qualify-resource-endurance.yml"
+        run_logged "$evidence_dir/reboot-recovery.log" playbook \
+            "$DEPLOY_DIR/playbooks/qualify-reboot.yml"
+        run_logged "$evidence_dir/secret-inventory.log" protected_playbook \
+            "$DEPLOY_DIR/playbooks/qualify-secret-inventory.yml"
+        {
+            printf 'result=passed\n'
+            printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'controller_release=%s\n' "$(controller_release_id)"
+            printf 'ansible=%s\n' "$(ansible --version | sed -n '1p')"
+        } >"$evidence_dir/RESULT"
+        printf 'CP1 foundation qualification passed. Evidence: %s\n' "$evidence_dir"
+        ;;
+    -h|--help|help|'')
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

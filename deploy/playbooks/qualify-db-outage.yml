@@ -1,0 +1,75 @@
+---
+- name: Qualify controller behavior during a local database outage
+  hosts: controllers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Restrict database-outage qualification to the local profile
+      ansible.builtin.assert:
+        that:
+          - cp_profile == 'lab'
+          - cp_install_local_postgres | bool
+        fail_msg: The destructive database-outage probe is only supported by the disposable local lab.
+
+    - name: Require healthy HTTPS readiness before outage injection
+      ansible.builtin.uri:
+        url: "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/ready"
+        method: GET
+        status_code: 200
+        return_content: true
+        validate_certs: true
+
+    - name: Exercise a bounded local PostgreSQL outage
+      block:
+        - name: Stop the concrete local PostgreSQL cluster
+          ansible.builtin.systemd_service:
+            name: postgresql@17-main.service
+            state: stopped
+
+        - name: Require HTTPS liveness to remain healthy
+          ansible.builtin.uri:
+            url: "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/live"
+            method: GET
+            status_code: 200
+            return_content: true
+            validate_certs: true
+          register: cp_outage_liveness
+          retries: 5
+          delay: 1
+          until: cp_outage_liveness.status == 200
+
+        - name: Require HTTPS readiness to report database unavailability
+          ansible.builtin.uri:
+            url: "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/ready"
+            method: GET
+            status_code: 503
+            return_content: true
+            validate_certs: true
+          register: cp_outage_readiness
+          retries: 10
+          delay: 1
+          until: cp_outage_readiness.status == 503
+      always:
+        - name: Restore the local PostgreSQL cluster
+          ansible.builtin.systemd_service:
+            name: postgresql@17-main.service
+            state: started
+
+        - name: Require automatic HTTPS readiness recovery
+          ansible.builtin.uri:
+            url: "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/ready"
+            method: GET
+            status_code: 200
+            return_content: true
+            validate_certs: true
+          register: cp_outage_recovery
+          retries: 20
+          delay: 1
+          until: cp_outage_recovery.status == 200
+
+    - name: Require no failed units after database recovery
+      ansible.builtin.command:
+        argv: [systemctl, --failed, --no-legend, --plain]
+      register: cp_outage_failed_units
+      changed_when: false
+      failed_when: cp_outage_failed_units.stdout | trim | length > 0

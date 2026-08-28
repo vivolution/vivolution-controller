@@ -1,0 +1,37 @@
+---
+- name: Create immutable controller release directory
+  ansible.builtin.file:
+    path: "/var/lib/vivolution/releases/{{ cp_controller_release_id }}/controller"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Copy controller source into immutable release directory
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../controller/"
+    dest: "/var/lib/vivolution/releases/{{ cp_controller_release_id }}/controller/"
+    owner: root
+    group: root
+    mode: preserve
+
+- name: Check for immutable controller image
+  ansible.builtin.command:
+    argv: [podman, image, exists, "{{ cp_controller_image }}"]
+  register: cp_controller_image_exists
+  changed_when: false
+  failed_when: cp_controller_image_exists.rc not in [0, 1]
+
+- name: Build immutable controller image
+  ansible.builtin.command:
+    argv:
+      - podman
+      - build
+      - --network=host
+      - --pull=missing
+      - "--tag={{ cp_controller_image }}"
+      - "/var/lib/vivolution/releases/{{ cp_controller_release_id }}/controller"
+  when: cp_controller_image_exists.rc == 1
+  register: cp_controller_image_build
+  changed_when: true
+

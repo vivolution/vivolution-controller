@@ -1,0 +1,10 @@
+.env
+.git
+.gitignore
+.venv
+.test-venv
+__pycache__
+*.pyc
+.coverage
+htmlcov
+staticfiles

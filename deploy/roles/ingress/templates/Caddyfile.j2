@@ -1,0 +1,22 @@
+{
+    admin 127.0.0.1:2019
+{% if cp_ingress_local_tls | bool %}
+    auto_https disable_redirects
+{% endif %}
+}
+
+https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }} {
+{% if cp_ingress_local_tls | bool %}
+    tls internal
+{% endif %}
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:{{ cp_controller_web_port }}
+
+    header {
+        -Server
+        Strict-Transport-Security "max-age=3600"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "same-origin"
+    }
+}

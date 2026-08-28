@@ -1,0 +1,406 @@
+---
+- name: Capture immutable target release facts
+  ansible.builtin.set_fact:
+    cp_target_controller_release: "{{ cp_controller_release_id }}"
+    cp_target_controller_image: "{{ cp_controller_image }}"
+    cp_target_controller_runtime_env: >-
+      {{ cp_controller_release_config_root }}/{{ cp_controller_release_id }}/runtime.env
+    cp_target_controller_migrate_env: >-
+      {{ cp_controller_release_config_root }}/{{ cp_controller_release_id }}/migrate.env
+
+- name: Require selected controller image
+  ansible.builtin.command:
+    argv: [podman, image, exists, "{{ cp_target_controller_image }}"]
+  changed_when: false
+
+- name: Inspect selected controller image ID
+  ansible.builtin.command:
+    argv:
+      - podman
+      - image
+      - inspect
+      - "{{ cp_target_controller_image }}"
+      - --format
+      - "{{ '{{' }}.Id{{ '}}' }}"
+  register: cp_target_controller_image_inspect
+  changed_when: false
+
+- name: Remember selected controller image ID
+  ansible.builtin.set_fact:
+    cp_target_controller_image_id: "{{ cp_target_controller_image_inspect.stdout | trim }}"
+
+- name: Read active release marker
+  ansible.builtin.slurp:
+    src: /etc/vivolution/active-release
+  register: cp_active_release_file
+  failed_when: false
+
+- name: Determine active release
+  ansible.builtin.set_fact:
+    cp_old_controller_release: >-
+      {{ (cp_active_release_file.content | default('') | b64decode | trim)
+         if not (cp_active_release_file.failed | default(false)) else '' }}
+
+- name: Validate active release marker
+  ansible.builtin.assert:
+    that:
+      - >-
+        cp_old_controller_release | length == 0 or
+        cp_old_controller_release is match('^[a-zA-Z0-9][a-zA-Z0-9_.-]{7,79}$')
+    fail_msg: The active controller release marker is invalid.
+
+- name: Determine whether automatic recovery is available
+  ansible.builtin.set_fact:
+    cp_controller_can_recover: >-
+      {{ cp_old_controller_release | length > 0 and
+         cp_old_controller_release != cp_target_controller_release }}
+    cp_old_controller_runtime_env: >-
+      {{ cp_controller_release_config_root }}/{{ cp_old_controller_release }}/runtime.env
+
+- name: Read exact active image from live Quadlet
+  ansible.builtin.command:
+    argv:
+      - awk
+      - -F=
+      - '$1 == "Image" {sub(/^[^=]*=/, ""); print; exit}'
+      - /etc/containers/systemd/vivolution-cp-web.container
+  register: cp_old_controller_image_read
+  changed_when: false
+  failed_when: false
+  when: cp_controller_can_recover | bool
+
+- name: Remember exact prior image
+  ansible.builtin.set_fact:
+    cp_old_controller_image: >-
+      {{ (cp_old_controller_image_read.stdout | trim)
+         if cp_old_controller_image_read.stdout | default('') | trim | length > 0
+         else cp_controller_image_repository ~ ':' ~ cp_old_controller_release }}
+  when: cp_controller_can_recover | bool
+
+- name: Create target release configuration directory
+  ansible.builtin.file:
+    path: "{{ cp_controller_release_config_root }}/{{ cp_target_controller_release }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Record exact target image reference
+  ansible.builtin.copy:
+    dest: "{{ cp_controller_release_config_root }}/{{ cp_target_controller_release }}/image"
+    owner: root
+    group: root
+    mode: '0600'
+    content: "{{ cp_target_controller_image }}\n"
+
+- name: Prepare prior release recovery state
+  when: cp_controller_can_recover | bool
+  block:
+    - name: Create prior release configuration directory
+      ansible.builtin.file:
+        path: "{{ cp_controller_release_config_root }}/{{ cp_old_controller_release }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Check for versioned prior runtime environment
+      ansible.builtin.stat:
+        path: "{{ cp_old_controller_runtime_env }}"
+      register: cp_old_controller_runtime_env_stat
+
+    - name: Check for legacy live runtime environment
+      ansible.builtin.stat:
+        path: /etc/vivolution/cp-runtime.env
+      register: cp_legacy_controller_runtime_env_stat
+      when: not cp_old_controller_runtime_env_stat.stat.exists
+
+    - name: Snapshot legacy runtime environment for exact recovery
+      ansible.builtin.copy:
+        src: /etc/vivolution/cp-runtime.env
+        remote_src: true
+        dest: "{{ cp_old_controller_runtime_env }}"
+        owner: root
+        group: root
+        mode: '0600'
+        force: false
+      no_log: true
+      when:
+        - not cp_old_controller_runtime_env_stat.stat.exists
+        - cp_legacy_controller_runtime_env_stat.stat.exists | default(false)
+
+    - name: Require prior runtime environment for exact recovery
+      ansible.builtin.stat:
+        path: "{{ cp_old_controller_runtime_env }}"
+      register: cp_old_controller_runtime_env_ready
+      failed_when: not cp_old_controller_runtime_env_ready.stat.exists
+
+    - name: Record exact prior image reference
+      ansible.builtin.copy:
+        dest: "{{ cp_controller_release_config_root }}/{{ cp_old_controller_release }}/image"
+        owner: root
+        group: root
+        mode: '0600'
+        content: "{{ cp_old_controller_image }}\n"
+        force: false
+
+- name: Install protected target runtime environment
+  ansible.builtin.template:
+    src: runtime.env.j2
+    dest: "{{ cp_target_controller_runtime_env }}"
+    owner: root
+    group: root
+    mode: '0600'
+  register: cp_controller_runtime_environment
+  no_log: true
+  when: cp_controller_refresh_release_environment | bool
+
+- name: Require target runtime environment
+  ansible.builtin.stat:
+    path: "{{ cp_target_controller_runtime_env }}"
+  register: cp_target_controller_runtime_env_stat
+  failed_when: not cp_target_controller_runtime_env_stat.stat.exists
+
+- name: Install protected target migration environment
+  ansible.builtin.template:
+    src: migrate.env.j2
+    dest: "{{ cp_target_controller_migrate_env }}"
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  when: cp_controller_run_migrations | bool or cp_controller_create_initial_operator | bool
+
+- name: Apply backward-compatible controller database migrations with schema owner
+  ansible.builtin.command:
+    argv:
+      - podman
+      - run
+      - --rm
+      - --network=host
+      - "--env-file={{ cp_target_controller_migrate_env }}"
+      - --entrypoint=python
+      - "{{ cp_target_controller_image }}"
+      - manage.py
+      - migrate
+      - --noinput
+  changed_when: false
+  no_log: true
+  when: cp_controller_run_migrations | bool
+
+- name: Create initial lab operator if absent
+  ansible.builtin.command:
+    argv:
+      - podman
+      - run
+      - --rm
+      - --network=host
+      - "--env-file={{ cp_target_controller_migrate_env }}"
+      - --entrypoint=python
+      - "{{ cp_target_controller_image }}"
+      - manage.py
+      - shell
+      - --command
+      - >-
+        from django.contrib.auth import get_user_model;
+        U=get_user_model();
+        u,created=U.objects.get_or_create(username='{{ cp_controller_admin_username }}',
+        defaults={'is_staff':True,'is_superuser':True});
+        created and (u.set_password(__import__('os').environ['DJANGO_SUPERUSER_PASSWORD']) or u.save())
+  changed_when: false
+  no_log: true
+  when: cp_controller_create_initial_operator | bool
+
+- name: Select target release for live Quadlet
+  ansible.builtin.set_fact:
+    cp_controller_quadlet_image: "{{ cp_target_controller_image }}"
+    cp_controller_quadlet_environment_file: "{{ cp_target_controller_runtime_env }}"
+
+- name: Activate selected controller image with automatic recovery
+  block:
+    - name: Install target controller Quadlet
+      ansible.builtin.template:
+        src: vivolution-cp-web.container.j2
+        dest: /etc/containers/systemd/vivolution-cp-web.container
+        owner: root
+        group: root
+        mode: '0644'
+      register: cp_controller_quadlet
+
+    - name: Reload systemd for Quadlet generation
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Start controller service
+      ansible.builtin.systemd_service:
+        name: vivolution-cp-web.service
+        enabled: true
+        state: started
+
+    - name: Restart controller for selected release
+      ansible.builtin.systemd_service:
+        name: vivolution-cp-web.service
+        state: restarted
+      when: >-
+        cp_controller_quadlet.changed or
+        (cp_controller_runtime_environment.changed | default(false)) or
+        cp_old_controller_release != cp_target_controller_release
+
+    - name: Wait for selected controller readiness
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ cp_controller_web_port }}/health/ready"
+        method: GET
+        status_code: 200
+      register: cp_controller_ready
+      retries: "{{ cp_controller_readiness_retries }}"
+      delay: "{{ cp_controller_readiness_delay }}"
+      until: cp_controller_ready.status == 200
+
+    - name: Inspect running controller image ID
+      ansible.builtin.command:
+        argv:
+          - podman
+          - inspect
+          - vivolution-cp-web
+          - --format
+          - "{{ '{{' }}.Image{{ '}}' }}"
+      register: cp_running_controller_image
+      changed_when: false
+
+    - name: Require selected image to be running before commit
+      ansible.builtin.assert:
+        that:
+          - cp_running_controller_image.stdout | trim == cp_target_controller_image_id
+        fail_msg: Readiness did not come from the selected controller image.
+
+    - name: Save rollback release marker after readiness
+      ansible.builtin.copy:
+        dest: /etc/vivolution/previous-release
+        owner: root
+        group: root
+        mode: '0644'
+        content: "{{ cp_old_controller_release }}\n"
+      when: cp_controller_can_recover | bool
+
+    - name: Record active controller release after readiness
+      ansible.builtin.copy:
+        dest: /etc/vivolution/active-release
+        owner: root
+        group: root
+        mode: '0644'
+        content: "{{ cp_target_controller_release }}\n"
+
+  rescue:
+    - name: Remember failed controller activation
+      ansible.builtin.set_fact:
+        cp_failed_controller_release: "{{ cp_target_controller_release }}"
+        cp_activation_recovered: false
+
+    - name: Restore prior known-good controller release
+      when: cp_controller_can_recover | bool
+      block:
+        - name: Require prior known-good controller image
+          ansible.builtin.command:
+            argv: [podman, image, exists, "{{ cp_old_controller_image }}"]
+          changed_when: false
+
+        - name: Inspect prior known-good controller image ID
+          ansible.builtin.command:
+            argv:
+              - podman
+              - image
+              - inspect
+              - "{{ cp_old_controller_image }}"
+              - --format
+              - "{{ '{{' }}.Id{{ '}}' }}"
+          register: cp_old_controller_image_inspect
+          changed_when: false
+
+        - name: Select prior release for live Quadlet
+          ansible.builtin.set_fact:
+            cp_controller_quadlet_image: "{{ cp_old_controller_image }}"
+            cp_controller_quadlet_environment_file: "{{ cp_old_controller_runtime_env }}"
+
+        - name: Restore prior controller Quadlet
+          ansible.builtin.template:
+            src: vivolution-cp-web.container.j2
+            dest: /etc/containers/systemd/vivolution-cp-web.container
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Reload systemd after controller recovery
+          ansible.builtin.systemd_service:
+            daemon_reload: true
+
+        - name: Restart prior controller release
+          ansible.builtin.systemd_service:
+            name: vivolution-cp-web.service
+            enabled: true
+            state: restarted
+
+        - name: Wait for prior controller readiness
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ cp_controller_web_port }}/health/ready"
+            method: GET
+            status_code: 200
+          register: cp_controller_recovered
+          retries: "{{ cp_controller_readiness_retries }}"
+          delay: "{{ cp_controller_readiness_delay }}"
+          until: cp_controller_recovered.status == 200
+
+        - name: Inspect recovered controller image ID
+          ansible.builtin.command:
+            argv:
+              - podman
+              - inspect
+              - vivolution-cp-web
+              - --format
+              - "{{ '{{' }}.Image{{ '}}' }}"
+          register: cp_recovered_controller_image
+          changed_when: false
+
+        - name: Require exact prior image after recovery
+          ansible.builtin.assert:
+            that:
+              - >-
+                cp_recovered_controller_image.stdout | trim ==
+                cp_old_controller_image_inspect.stdout | trim
+            fail_msg: Controller recovery did not restore the exact prior image.
+
+        - name: Preserve prior release as active after recovery
+          ansible.builtin.copy:
+            dest: /etc/vivolution/active-release
+            owner: root
+            group: root
+            mode: '0644'
+            content: "{{ cp_old_controller_release }}\n"
+
+        - name: Mark controller activation as recovered
+          ansible.builtin.set_fact:
+            cp_activation_recovered: true
+
+    - name: Fail closed when no prior release exists
+      when: not cp_controller_can_recover | bool
+      block:
+        - name: Stop unhealthy first controller release
+          ansible.builtin.systemd_service:
+            name: vivolution-cp-web.service
+            enabled: false
+            state: stopped
+          failed_when: false
+
+        - name: Remove unhealthy first-release Quadlet
+          ansible.builtin.file:
+            path: /etc/containers/systemd/vivolution-cp-web.container
+            state: absent
+
+        - name: Reload systemd after failed first release
+          ansible.builtin.systemd_service:
+            daemon_reload: true
+
+    - name: Report failed release after recovery attempt
+      ansible.builtin.fail:
+        msg: >-
+          Controller release {{ cp_failed_controller_release }} failed its health gate.
+          Automatic prior-release recovery={{ cp_activation_recovered | bool }}.

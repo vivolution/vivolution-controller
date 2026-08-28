@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+if ! id cpadmin >/dev/null 2>&1; then
+    useradd --create-home --shell /bin/bash --groups sudo cpadmin
+fi
+usermod --append --groups sudo cpadmin
+
+# Create a valid local password hash so the account is not considered locked by
+# OpenSSH. The high-entropy plaintext is never logged or retained, and SSH
+# password authentication is disabled below.
+lab_pw="$(od -An -N48 -tx1 /dev/urandom | tr -d ' \n')"
+printf 'cpadmin:%s\n' "$lab_pw" | chpasswd
+unset lab_pw
+
+install -d -m 0700 -o cpadmin -g cpadmin /home/cpadmin/.ssh
+printf '%s\n' '@@SSH_PUBLIC_KEY@@' > /home/cpadmin/.ssh/authorized_keys
+chown cpadmin:cpadmin /home/cpadmin/.ssh/authorized_keys
+chmod 0600 /home/cpadmin/.ssh/authorized_keys
+
+printf '%s\n' \
+    'cpadmin ALL=(ALL:ALL) NOPASSWD: ALL' \
+    > /etc/sudoers.d/90-vivo-cp1-lab
+chmod 0440 /etc/sudoers.d/90-vivo-cp1-lab
+visudo -cf /etc/sudoers.d/90-vivo-cp1-lab
+
+install -d -m 0755 /etc/ssh/sshd_config.d
+printf '%s\n' \
+    'PermitRootLogin no' \
+    'PasswordAuthentication no' \
+    'KbdInteractiveAuthentication no' \
+    'PubkeyAuthentication yes' \
+    'X11Forwarding no' \
+    'AllowAgentForwarding no' \
+    'AllowTcpForwarding no' \
+    'MaxAuthTries 3' \
+    'ClientAliveInterval 300' \
+    'ClientAliveCountMax 2' \
+    'AllowUsers cpadmin' \
+    > /etc/ssh/sshd_config.d/10-vivo-lab-hardening.conf
+install -d -m 0755 /run/sshd
+/usr/sbin/sshd -t
+
+printf '%s\n' \
+    'profile=local-lab' \
+    'created_by=vivolution-sbc-lab-installer' \
+    > /etc/vivolution-lab-image
+chmod 0644 /etc/vivolution-lab-image
+
+systemctl enable ssh.service
+systemctl enable qemu-guest-agent.service
+systemctl enable serial-getty@ttyAMA0.service || true

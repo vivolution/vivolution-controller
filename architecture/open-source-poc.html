@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vivolution SBC — Open Edge POC Architecture</title>
+  <style>
+    :root {
+      --ink: #162033;
+      --muted: #5e6b7f;
+      --line: #9ca9b9;
+      --teams: #3f51b5;
+      --edge: #dc6b2f;
+      --control: #148a86;
+      --customer: #23845b;
+      --evidence: #7652a8;
+      --danger: #b33a3a;
+      --paper: #f5f7fb;
+      --card: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1280px; margin: 0 auto; padding: 34px 28px 44px; }
+    h1 { margin: 0 0 6px; font-size: 30px; letter-spacing: -0.4px; }
+    .subtitle { margin: 0 0 22px; color: var(--muted); font-size: 15px; }
+    .panel {
+      background: var(--card);
+      border: 1px solid #dce2eb;
+      border-radius: 16px;
+      box-shadow: 0 8px 28px rgba(40, 54, 78, 0.08);
+      overflow: hidden;
+    }
+    svg { display: block; width: 100%; height: auto; }
+    .zone { fill: #fafbfe; stroke: #cfd7e3; stroke-width: 1.5; }
+    .zone-title { font-size: 14px; font-weight: 700; fill: #4d5b70; letter-spacing: 0.5px; }
+    .zone-subtitle { font-size: 11px; fill: #7b8798; }
+    .flow { fill: none; stroke-width: 2.5; marker-end: url(#arrow); }
+    .flow-a { stroke: #3f51b5; }
+    .flow-b { stroke: #6b74c7; }
+    .control-flow { fill: none; stroke: #148a86; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow-teal); }
+    .evidence-flow { fill: none; stroke: #7652a8; stroke-width: 2; stroke-dasharray: 4 5; marker-end: url(#arrow-purple); }
+    .node { stroke-width: 2; rx: 12; }
+    .node-title { font-size: 15px; font-weight: 700; fill: #fff; }
+    .node-line { font-size: 11.5px; fill: rgba(255,255,255,0.93); }
+    .node-dark-title { font-size: 15px; font-weight: 700; fill: var(--ink); }
+    .node-dark-line { font-size: 11.5px; fill: #4d5b70; }
+    .edge-label { font-size: 10.5px; font-weight: 600; fill: #58667a; paint-order: stroke; stroke: #fff; stroke-width: 4; }
+    .note { font-size: 11.5px; fill: #7b2f2f; font-weight: 650; }
+    .footer-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      padding: 18px 22px 22px;
+      border-top: 1px solid #e1e6ee;
+    }
+    .footer-grid h2 { margin: 0 0 7px; font-size: 14px; }
+    .footer-grid p { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+    @media (max-width: 760px) {
+      main { padding: 20px 12px; }
+      .footer-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Vivolution SBC — Open Edge POC</h1>
+  <p class="subtitle">One provider tenant, two customer tenants, two isolated PBX relays, a separate control plane, and no live PSTN traffic.</p>
+  <section class="panel" aria-label="Open Edge proof-of-concept architecture">
+    <svg viewBox="0 0 1220 670" role="img" aria-labelledby="diagramTitle diagramDesc">
+      <title id="diagramTitle">Vivolution SBC open-source proof-of-concept architecture</title>
+      <desc id="diagramDesc">A Vivolution provider tenant holds base trunks while two customer Teams tenants use derived trunks through two Azure edge nodes to separate customer PBXs. A control plane publishes versioned configuration and an evidence store receives tenant-isolated records.</desc>
+      <defs>
+        <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 Z" fill="#68778d"/>
+        </marker>
+        <marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 Z" fill="#148a86"/>
+        </marker>
+        <marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 Z" fill="#7652a8"/>
+        </marker>
+      </defs>
+
+      <!-- Trust zones -->
+      <rect class="zone" x="24" y="48" width="242" height="558" rx="18"/>
+      <rect class="zone" x="292" y="48" width="606" height="558" rx="18"/>
+      <rect class="zone" x="924" y="48" width="272" height="558" rx="18"/>
+      <text class="zone-title" x="44" y="78">MICROSOFT 365</text>
+      <text class="zone-subtitle" x="44" y="96">Provider plus two customer test tenants</text>
+      <text class="zone-title" x="312" y="78">AZURE UAE NORTH — VIVOLUTION</text>
+      <text class="zone-subtitle" x="312" y="96">Separate control and real-time data planes</text>
+      <text class="zone-title" x="944" y="78">CUSTOMER LAB BOUNDARY</text>
+      <text class="zone-subtitle" x="944" y="96">Distinct PBX identities and routes</text>
+
+      <!-- Connectors are drawn before nodes -->
+      <path class="flow flow-a" d="M230 187 C315 187 330 206 414 220"/>
+      <path class="flow flow-a" d="M230 187 C330 187 345 397 414 411"/>
+      <path class="flow flow-b" d="M230 439 C320 439 340 255 414 241"/>
+      <path class="flow flow-b" d="M230 439 C315 439 340 425 414 425"/>
+      <path class="flow flow-a" d="M626 220 C755 220 813 210 964 210"/>
+      <path class="flow flow-a" d="M626 411 C770 411 820 247 964 226"/>
+      <path class="flow flow-b" d="M626 241 C780 241 820 435 964 446"/>
+      <path class="flow flow-b" d="M626 425 C760 425 825 462 964 462"/>
+      <path class="control-flow" d="M230 548 C330 548 350 310 414 254"/>
+      <path class="control-flow" d="M230 548 C340 548 365 466 414 444"/>
+      <path class="control-flow" d="M622 151 C642 172 653 188 650 220"/>
+      <path class="control-flow" d="M570 151 C558 254 564 315 565 384"/>
+      <path class="evidence-flow" d="M520 278 C520 410 575 474 650 526"/>
+      <path class="evidence-flow" d="M572 463 C598 492 622 510 650 526"/>
+
+      <!-- Connection labels -->
+      <text class="edge-label" x="274" y="173">Tenant A derived FQDNs</text>
+      <text class="edge-label" x="275" y="455">Tenant B derived FQDNs</text>
+      <text class="edge-label" x="737" y="196">PBX A connector</text>
+      <text class="edge-label" x="742" y="476">PBX B connector</text>
+      <text class="edge-label" x="660" y="172">signed config</text>
+      <text class="edge-label" x="606" y="500">CDR + quality</text>
+      <text class="edge-label" x="256" y="566">base trunk ownership</text>
+
+      <!-- Nodes -->
+      <rect class="node" x="58" y="132" width="172" height="108" rx="13" fill="#3f51b5" stroke="#31408f"/>
+      <text class="node-title" x="76" y="160">Teams Tenant A</text>
+      <text class="node-line" x="76" y="183">2+ test users</text>
+      <text class="node-line" x="76" y="202">Teams Phone enabled</text>
+      <text class="node-line" x="76" y="221">Own routing policy</text>
+
+      <rect class="node" x="58" y="384" width="172" height="108" rx="13" fill="#5965bd" stroke="#424d9b"/>
+      <text class="node-title" x="76" y="412">Teams Tenant B</text>
+      <text class="node-line" x="76" y="435">Independent Entra tenant</text>
+      <text class="node-line" x="76" y="454">Overlapping test numbers</text>
+      <text class="node-line" x="76" y="473">Own routing policy</text>
+
+      <rect class="node" x="58" y="518" width="172" height="66" rx="13" fill="#e9eafa" stroke="#3f51b5"/>
+      <text class="node-dark-title" x="76" y="544">Provider Tenant</text>
+      <text class="node-dark-line" x="76" y="565">Owns base SBC trunks</text>
+
+      <rect class="node" x="414" y="186" width="212" height="92" rx="13" fill="#dc6b2f" stroke="#b45124"/>
+      <text class="node-title" x="434" y="214">Open Edge Node 1</text>
+      <text class="node-line" x="434" y="237">OpenSIPS + RTPengine</text>
+      <text class="node-line" x="434" y="257">Static IP · local config</text>
+
+      <rect class="node" x="414" y="384" width="212" height="92" rx="13" fill="#dc6b2f" stroke="#b45124"/>
+      <text class="node-title" x="434" y="412">Open Edge Node 2</text>
+      <text class="node-line" x="434" y="435">Alternate FQDN / new-call HA</text>
+      <text class="node-line" x="434" y="455">Static IP · local config</text>
+
+      <rect class="node" x="438" y="110" width="306" height="78" rx="13" fill="#e9f7f6" stroke="#148a86"/>
+      <text class="node-dark-title" x="458" y="138">Vivolution Control Plane</text>
+      <text class="node-dark-line" x="458" y="159">Operator portal · API · PostgreSQL · compiler</text>
+      <text class="node-dark-line" x="458" y="176">Draft → validate → approve → publish → rollback</text>
+
+      <rect class="node" x="650" y="515" width="210" height="68" rx="13" fill="#f1ebf8" stroke="#7652a8"/>
+      <text class="node-dark-title" x="669" y="543">Evidence Plane</text>
+      <text class="node-dark-line" x="669" y="563">Tenant CDR · quality · audit</text>
+
+      <rect class="node" x="964" y="166" width="196" height="104" rx="13" fill="#23845b" stroke="#176944"/>
+      <text class="node-title" x="984" y="195">Customer PBX A</text>
+      <text class="node-line" x="984" y="218">Tenant-specific TLS/ACL</text>
+      <text class="node-line" x="984" y="238">Own carrier trunk later</text>
+      <text class="node-line" x="984" y="257">No shared routing context</text>
+
+      <rect class="node" x="964" y="412" width="196" height="104" rx="13" fill="#23845b" stroke="#176944"/>
+      <text class="node-title" x="984" y="441">Customer PBX B</text>
+      <text class="node-line" x="984" y="464">Independent connector</text>
+      <text class="node-line" x="984" y="484">Overlapping extension 1001</text>
+      <text class="node-line" x="984" y="503">No shared routing context</text>
+
+      <text class="note" x="944" y="560">POC: synthetic calls only</text>
+      <text class="zone-subtitle" x="944" y="580">No live PSTN or customer traffic.</text>
+    </svg>
+    <div class="footer-grid">
+      <div>
+        <h2>Isolation first</h2>
+        <p>FQDN and trusted peer identity establish the tenant. Numbers and user-controlled SIP headers never select a tenant.</p>
+      </div>
+      <div>
+        <h2>Calls outlive the portal</h2>
+        <p>Each edge node runs a signed last-known-good configuration. A portal or database outage must not stop new calls.</p>
+      </div>
+      <div>
+        <h2>HA scope</h2>
+        <p>The alternate node protects new calls. A complete node failure is not expected to migrate an established media session.</p>
+      </div>
+    </div>
+  </section>
+</main>
+</body>
+</html>

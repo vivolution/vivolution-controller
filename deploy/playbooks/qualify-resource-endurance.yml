@@ -1,0 +1,255 @@
+---
+- name: Qualify bounded CP1 resource and HTTPS endurance envelope
+  hosts: controllers
+  become: true
+  gather_facts: false
+  vars:
+    cp_resource_service: vivolution-cp-web.service
+    cp_resource_ca_path: >-
+      {{ cp_ingress_ca_export_path |
+         default(playbook_dir + '/../../lab/utm/generated/caddy-root.crt') }}
+  tasks:
+    - name: Require the disposable local-lab profile
+      ansible.builtin.assert:
+        that:
+          - cp_profile == 'lab'
+          - ansible_host == '127.0.0.1'
+          - cp_ingress_server_name == 'vivo-cp1-lab'
+          - cp_ingress_https_port | int == 8080
+          - cp_resource_host_https_port | int >= 1
+          - cp_resource_host_https_port | int <= 65535
+        fail_msg: Resource qualification is intentionally limited to the host-forwarded local lab.
+
+    - name: Require bounded qualification inputs
+      ansible.builtin.assert:
+        that:
+          - cp_resource_soak_seconds | int >= 30
+          - cp_resource_soak_seconds | int <= 180
+          - cp_resource_idle_sample_seconds | int >= 5
+          - cp_resource_idle_sample_seconds | int <= 30
+          - cp_resource_https_concurrency | int >= 1
+          - cp_resource_https_concurrency | int <= 16
+          - cp_resource_min_system_available_bytes | int >= 134217728
+          - cp_resource_max_root_growth_bytes | int > 0
+          - cp_resource_max_journal_growth_bytes | int > 0
+          - >-
+            cp_resource_peak_cpu_limit_millipercent | int >=
+            ((cp_controller_cpu_quota | regex_replace('%$', '') | int) * 1000)
+        fail_msg: Resource qualification inputs exceed or weaken their safe operating bounds.
+
+    - name: Verify the local Caddy root certificate exists
+      ansible.builtin.stat:
+        path: "{{ cp_resource_ca_path }}"
+      delegate_to: localhost
+      become: false
+      register: cp_resource_ca
+
+    - name: Require a regular local CA certificate
+      ansible.builtin.assert:
+        that:
+          - cp_resource_ca.stat.exists
+          - cp_resource_ca.stat.isreg | default(false)
+        fail_msg: Export the trusted local Caddy root before running resource qualification.
+
+    - name: Capture idle resource baseline
+      ansible.builtin.shell:
+        cmd: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/resource-snapshot.sh') }}"
+        executable: /bin/sh
+      environment:
+        CP_RESOURCE_SERVICE: "{{ cp_resource_service }}"
+      register: cp_resource_baseline_raw
+      changed_when: false
+
+    - name: Parse idle resource baseline
+      ansible.builtin.set_fact:
+        cp_resource_baseline: "{{ cp_resource_baseline_raw.stdout | from_yaml }}"
+
+    - name: Measure bounded idle controller CPU and memory
+      ansible.builtin.shell:
+        cmd: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/resource-sampler.sh') }}"
+        executable: /bin/sh
+      environment:
+        CP_RESOURCE_SERVICE: "{{ cp_resource_service }}"
+        CP_RESOURCE_DURATION_SECONDS: "{{ cp_resource_idle_sample_seconds | string }}"
+      register: cp_resource_idle_sample_raw
+      changed_when: false
+
+    - name: Parse idle controller sample
+      ansible.builtin.set_fact:
+        cp_resource_idle_sample: "{{ cp_resource_idle_sample_raw.stdout | from_yaml }}"
+
+    - name: Start bounded controller resource sampler
+      ansible.builtin.shell:
+        cmd: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/resource-sampler.sh') }}"
+        executable: /bin/sh
+      environment:
+        CP_RESOURCE_SERVICE: "{{ cp_resource_service }}"
+        CP_RESOURCE_DURATION_SECONDS: "{{ cp_resource_soak_seconds | string }}"
+      async: "{{ (cp_resource_soak_seconds | int) + 30 }}"
+      poll: 0
+      register: cp_resource_sampler_job
+      changed_when: false
+
+    - name: Exercise trusted host-forwarded HTTPS at controlled concurrency
+      ansible.builtin.command:
+        argv:
+          - /bin/sh
+          - "{{ playbook_dir }}/../tests/https-soak.sh"
+          - "{{ cp_resource_ca_path }}"
+          - "{{ cp_ingress_server_name }}"
+          - "{{ cp_resource_host_https_port | string }}"
+          - "{{ cp_resource_soak_seconds | string }}"
+          - "{{ cp_resource_https_concurrency | string }}"
+      delegate_to: localhost
+      become: false
+      register: cp_resource_https_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for bounded controller resource sampler
+      ansible.builtin.async_status:
+        jid: "{{ cp_resource_sampler_job.ansible_job_id }}"
+      register: cp_resource_sampler_raw
+      until: cp_resource_sampler_raw.finished
+      retries: "{{ ((cp_resource_soak_seconds | int) // 2) + 20 }}"
+      delay: 2
+      changed_when: false
+
+    - name: Require parseable resource and HTTPS results
+      ansible.builtin.assert:
+        that:
+          - cp_resource_sampler_raw.rc == 0
+          - "'peak_service_memory_bytes:' in cp_resource_sampler_raw.stdout"
+          - "'successful_requests:' in cp_resource_https_raw.stdout"
+        fail_msg: The bounded sampler or HTTPS driver did not return complete metrics.
+
+    - name: Parse sampled resource and HTTPS results
+      ansible.builtin.set_fact:
+        cp_resource_sample: "{{ cp_resource_sampler_raw.stdout | from_yaml }}"
+        cp_resource_https: "{{ cp_resource_https_raw.stdout | from_yaml }}"
+
+    - name: Remove completed sampler status file
+      ansible.builtin.async_status:
+        jid: "{{ cp_resource_sampler_job.ansible_job_id }}"
+        mode: cleanup
+      changed_when: false
+
+    - name: Capture post-soak resource state
+      ansible.builtin.shell:
+        cmd: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/resource-snapshot.sh') }}"
+        executable: /bin/sh
+      environment:
+        CP_RESOURCE_SERVICE: "{{ cp_resource_service }}"
+      register: cp_resource_final_raw
+      changed_when: false
+
+    - name: Parse post-soak resource state
+      ansible.builtin.set_fact:
+        cp_resource_final: "{{ cp_resource_final_raw.stdout | from_yaml }}"
+
+    - name: Search qualification window for kernel OOM kills
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - --dmesg
+          - "--since=@{{ cp_resource_baseline.timestamp_epoch }}"
+          - --no-pager
+          - --output=cat
+          - --case-sensitive=no
+          - "--grep=Out of memory: Killed process|oom-kill:"
+      register: cp_resource_oom_events
+      changed_when: false
+      failed_when: cp_resource_oom_events.rc not in [0, 1]
+
+    - name: Verify trusted HTTPS readiness after the soak
+      ansible.builtin.command:
+        argv:
+          - curl
+          - --silent
+          - --show-error
+          - --fail
+          - --proto
+          - =https
+          - --tlsv1.2
+          - --noproxy
+          - '*'
+          - --cacert
+          - "{{ cp_resource_ca_path }}"
+          - --resolve
+          - "{{ cp_ingress_server_name }}:{{ cp_resource_host_https_port }}:127.0.0.1"
+          - --connect-timeout
+          - '2'
+          - --max-time
+          - '5'
+          - --output
+          - /dev/null
+          - "https://{{ cp_ingress_server_name }}:{{ cp_resource_host_https_port }}/health/ready"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+
+    - name: Calculate bounded growth metrics
+      ansible.builtin.set_fact:
+        cp_resource_root_growth_bytes: >-
+          {{ [((cp_resource_final.root_used_bytes | int) -
+               (cp_resource_baseline.root_used_bytes | int)), 0] | max }}
+        cp_resource_journal_growth_bytes: >-
+          {{ [((cp_resource_final.journal_bytes | int) -
+               (cp_resource_baseline.journal_bytes | int)), 0] | max }}
+
+    - name: Require the bounded endurance envelope
+      ansible.builtin.assert:
+        that:
+          - cp_resource_https_raw.rc == 0
+          - >-
+            cp_resource_https.successful_requests | int >=
+            (((cp_resource_soak_seconds | int) *
+              (cp_resource_https_concurrency | int)) // 2)
+          - cp_resource_https.failed_requests | int == 0
+          - cp_resource_https.elapsed_seconds | int >= cp_resource_soak_seconds | int
+          - cp_resource_https.elapsed_seconds | int <= (cp_resource_soak_seconds | int) + 10
+          - cp_resource_idle_sample.samples | int >= (cp_resource_idle_sample_seconds | int) - 2
+          - cp_resource_sample.samples | int >= (cp_resource_soak_seconds | int) - 5
+          - cp_resource_idle_sample.peak_service_memory_bytes | int <= cp_controller_memory_max_bytes | int
+          - cp_resource_sample.peak_service_memory_bytes | int <= cp_controller_memory_max_bytes | int
+          - cp_resource_final.service_memory_current_bytes | int <= cp_controller_memory_max_bytes | int
+          - cp_resource_sample.minimum_system_available_bytes | int >= cp_resource_min_system_available_bytes | int
+          - cp_resource_idle_sample.peak_cpu_millipercent | int <= cp_resource_peak_cpu_limit_millipercent | int
+          - cp_resource_sample.peak_cpu_millipercent | int <= cp_resource_peak_cpu_limit_millipercent | int
+          - cp_resource_baseline.service_memory_max_bytes | int == cp_controller_memory_max_bytes | int
+          - cp_resource_final.service_memory_max_bytes | int == cp_controller_memory_max_bytes | int
+          - >-
+            (cp_resource_baseline.service_cpu_quota |
+             regex_replace('s$', '') | float) ==
+            ((cp_controller_cpu_quota | regex_replace('%$', '') | float) / 100)
+          - cp_resource_final.service_cpu_quota == cp_resource_baseline.service_cpu_quota
+          - cp_resource_baseline.failed_units | int == 0
+          - cp_resource_final.failed_units | int == 0
+          - cp_resource_root_growth_bytes | int <= cp_resource_max_root_growth_bytes | int
+          - cp_resource_journal_growth_bytes | int <= cp_resource_max_journal_growth_bytes | int
+          - cp_resource_oom_events.stdout | trim | length == 0
+        fail_msg: CP1 exceeded its bounded resource/endurance qualification envelope.
+
+    - name: Report sanitized resource qualification evidence
+      ansible.builtin.debug:
+        msg:
+          - "duration_seconds={{ cp_resource_sample.duration_seconds }}"
+          - "https_concurrency={{ cp_resource_https.concurrency }}"
+          - "host_https_port={{ cp_resource_host_https_port }}"
+          - "https_successes={{ cp_resource_https.successful_requests }}"
+          - "https_failures={{ cp_resource_https.failed_requests }}"
+          - "https_max_latency_seconds={{ cp_resource_https.maximum_latency_seconds }}"
+          - "controller_idle_memory_mib={{ ((cp_resource_baseline.service_memory_current_bytes | float) / 1048576) | round(2) }}"
+          - "controller_idle_peak_memory_mib={{ ((cp_resource_idle_sample.peak_service_memory_bytes | float) / 1048576) | round(2) }}"
+          - "controller_idle_average_cpu_percent={{ (((cp_resource_idle_sample.service_cpu_usage_delta_ns | float) * 100) / (cp_resource_idle_sample.elapsed_sample_ns | float)) | round(2) }}"
+          - "controller_idle_peak_cpu_percent={{ ((cp_resource_idle_sample.peak_cpu_millipercent | float) / 1000) | round(2) }}"
+          - "controller_peak_memory_mib={{ ((cp_resource_sample.peak_service_memory_bytes | float) / 1048576) | round(2) }}"
+          - "controller_average_cpu_percent={{ (((cp_resource_sample.service_cpu_usage_delta_ns | float) * 100) / (cp_resource_sample.elapsed_sample_ns | float)) | round(2) }}"
+          - "controller_peak_cpu_percent={{ ((cp_resource_sample.peak_cpu_millipercent | float) / 1000) | round(2) }}"
+          - "minimum_system_available_mib={{ ((cp_resource_sample.minimum_system_available_bytes | float) / 1048576) | round(2) }}"
+          - "root_used_baseline_mib={{ ((cp_resource_baseline.root_used_bytes | float) / 1048576) | round(2) }}"
+          - "root_used_final_mib={{ ((cp_resource_final.root_used_bytes | float) / 1048576) | round(2) }}"
+          - "root_growth_mib={{ ((cp_resource_root_growth_bytes | float) / 1048576) | round(2) }}"
+          - "journal_baseline_mib={{ ((cp_resource_baseline.journal_bytes | float) / 1048576) | round(2) }}"
+          - "journal_final_mib={{ ((cp_resource_final.journal_bytes | float) / 1048576) | round(2) }}"
+          - "journal_growth_mib={{ ((cp_resource_journal_growth_bytes | float) / 1048576) | round(2) }}"

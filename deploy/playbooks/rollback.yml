@@ -1,0 +1,27 @@
+---
+- name: Roll back Vivolution CP1 application release
+  hosts: controllers
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Read previous release marker
+      ansible.builtin.slurp:
+        src: /etc/vivolution/previous-release
+      register: cp_previous_release_file
+
+    - name: Select previous release
+      ansible.builtin.set_fact:
+        cp_controller_release_id: "{{ cp_previous_release_file.content | b64decode | trim }}"
+        cp_controller_build: false
+        cp_controller_refresh_release_environment: false
+        cp_controller_run_migrations: false
+        cp_controller_create_initial_operator: false
+
+    - name: Validate rollback release identifier
+      ansible.builtin.assert:
+        that: cp_controller_release_id is match('^[a-zA-Z0-9][a-zA-Z0-9_.-]{7,79}$')
+        fail_msg: No valid previous controller release is available.
+
+    - name: Activate previous controller release
+      ansible.builtin.include_role:
+        name: controller_services

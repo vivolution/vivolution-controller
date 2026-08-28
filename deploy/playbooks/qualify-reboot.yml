@@ -1,0 +1,39 @@
+---
+- name: Qualify clean CP1 reboot and service recovery
+  hosts: controllers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Reboot the controller and wait for systemd readiness
+      ansible.builtin.reboot:
+        connect_timeout: 5
+        reboot_timeout: 120
+        post_reboot_delay: 2
+        test_command: systemctl is-system-running --wait
+
+    - name: Require core services after reboot
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ item }}"]
+      loop: "{{ ['ssh', 'nftables', 'pgbouncer', 'caddy', 'vivolution-cp-web'] + (['postgresql@17-main'] if cp_install_local_postgres | bool else []) }}"
+      changed_when: false
+
+    - name: Require trusted HTTPS readiness after reboot
+      ansible.builtin.uri:
+        url: "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/ready"
+        method: GET
+        status_code: 200
+        return_content: true
+        validate_certs: true
+      register: cp_reboot_ready
+      retries: 20
+      delay: 1
+      until: cp_reboot_ready.status == 200
+
+    - name: Require no failed units after reboot
+      ansible.builtin.command:
+        argv: [systemctl, --failed, --no-legend, --plain]
+      register: cp_reboot_failed_units
+      changed_when: false
+      failed_when: cp_reboot_failed_units.stdout | trim | length > 0
+
+- import_playbook: verify.yml

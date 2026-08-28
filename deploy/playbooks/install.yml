@@ -1,0 +1,15 @@
+---
+- name: Install Vivolution CP1 foundation
+  hosts: controllers
+  become: true
+  gather_facts: true
+  roles:
+    - role: preflight
+    - role: base_os
+    - role: host_firewall
+    - role: podman
+    - role: postgres_local
+      when: cp_install_local_postgres | bool
+    - role: pgbouncer
+    - role: controller_services
+    - role: ingress

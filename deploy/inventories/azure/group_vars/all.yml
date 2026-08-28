@@ -1,0 +1,44 @@
+cp_profile: azure
+cp_expected_hostname: controller
+cp_install_local_postgres: false
+
+cp_database_name: vivolution
+cp_db_owner: vivo_owner
+cp_db_runtime_user: vivo_runtime
+cp_db_upstream_host: replace-with-flexible-server.postgres.database.azure.com
+cp_db_upstream_port: 5432
+cp_db_server_tls_sslmode: verify-full
+cp_pgbouncer_host: 127.0.0.1
+cp_pgbouncer_port: 6432
+
+cp_firewall_tcp_ports:
+  - 22
+  - 80
+  - 443
+
+cp_min_vcpus: 2
+cp_min_memory_mb: 2500
+cp_min_root_disk_gb: 25
+cp_journal_max_use: 512M
+cp_pgbouncer_max_client_conn: 200
+cp_pgbouncer_default_pool_size: 30
+cp_pgbouncer_query_wait_timeout: 3
+cp_pgbouncer_server_connect_timeout: 5
+cp_pgbouncer_server_login_retry: 2
+
+cp_controller_admin_username: cpadmin
+cp_controller_allowed_hosts: controller.voice.vivolution.ae
+cp_controller_csrf_origins: https://controller.voice.vivolution.ae
+cp_controller_cookie_secure: true
+cp_controller_trust_forwarded_proto: true
+cp_controller_ssl_redirect: true
+cp_controller_web_port: 8000
+cp_controller_web_workers: 2
+cp_controller_memory_max: 1G
+cp_controller_memory_max_bytes: 1073741824
+cp_controller_cpu_quota: 150%
+cp_controller_base_image: docker.io/library/python@sha256:7e3a6aca9d74f93cca21a91d86a8dad8c34749afd5b4a98ee481c9c47b9f5ed4
+
+cp_ingress_server_name: controller.voice.vivolution.ae
+cp_ingress_https_port: 443
+cp_ingress_local_tls: false

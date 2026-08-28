@@ -1,0 +1,17 @@
+---
+- name: Install controller nftables policy
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: '0644'
+    validate: nft -c -f %s
+  notify: Reload nftables
+
+- name: Enable nftables
+  ansible.builtin.systemd_service:
+    name: nftables.service
+    enabled: true
+    state: started
+

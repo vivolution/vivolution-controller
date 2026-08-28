@@ -1,0 +1,57 @@
+cp_profile: lab
+cp_expected_hostname: vivo-cp1-lab
+cp_install_local_postgres: true
+
+cp_database_name: vivolution
+cp_db_owner: vivo_owner
+cp_db_runtime_user: vivo_runtime
+cp_db_upstream_host: 127.0.0.1
+cp_db_upstream_port: 5432
+cp_pgbouncer_host: 127.0.0.1
+cp_pgbouncer_port: 6432
+
+cp_firewall_tcp_ports:
+  - 22
+  - 8080
+
+cp_min_vcpus: 2
+cp_min_memory_mb: 2500
+cp_min_root_disk_gb: 25
+cp_journal_max_use: 256M
+cp_postgres_shared_buffers: 256MB
+cp_postgres_effective_cache_size: 1GB
+cp_postgres_max_connections: 60
+cp_pgbouncer_max_client_conn: 120
+cp_pgbouncer_default_pool_size: 20
+cp_pgbouncer_query_wait_timeout: 3
+cp_pgbouncer_server_connect_timeout: 5
+cp_pgbouncer_server_login_retry: 2
+
+cp_controller_admin_username: cpadmin
+cp_controller_allowed_hosts: 127.0.0.1,localhost,vivo-cp1-lab
+cp_controller_csrf_origins: https://vivo-cp1-lab:8080
+cp_controller_cookie_secure: true
+cp_controller_trust_forwarded_proto: true
+cp_controller_ssl_redirect: true
+cp_controller_web_port: 8000
+cp_controller_web_workers: 2
+cp_controller_memory_max: 768M
+cp_controller_memory_max_bytes: 805306368
+cp_controller_cpu_quota: 150%
+cp_controller_base_image: docker.io/library/python@sha256:7e3a6aca9d74f93cca21a91d86a8dad8c34749afd5b4a98ee481c9c47b9f5ed4
+
+# Bounded local endurance gate: 8 trusted HTTPS requests/second for two minutes.
+cp_resource_soak_seconds: 120
+cp_resource_idle_sample_seconds: 10
+cp_resource_https_concurrency: 8
+cp_resource_host_https_port: 8080
+cp_resource_min_system_available_bytes: 268435456
+cp_resource_max_root_growth_bytes: 67108864
+cp_resource_max_journal_growth_bytes: 16777216
+# CPUQuota is 150%; allow a 20-point one-second sampling tolerance.
+cp_resource_peak_cpu_limit_millipercent: 170000
+
+cp_ingress_server_name: vivo-cp1-lab
+cp_ingress_https_port: 8080
+cp_ingress_local_tls: true
+cp_ingress_ca_export_path: "{{ playbook_dir }}/../../lab/utm/generated/caddy-root.crt"

@@ -1,0 +1,187 @@
+---
+- name: Qualify PostgreSQL logical backup and isolated restore
+  hosts: controllers
+  become: true
+  gather_facts: false
+  vars:
+    cp_restore_database_name: vivolution_restore_qualification
+    cp_qualification_dump: /var/lib/vivolution/backups/qualification.dump
+  tasks:
+    - name: Restrict backup/restore qualification to local PostgreSQL profile
+      ansible.builtin.assert:
+        that:
+          - cp_install_local_postgres | bool
+          - cp_restore_database_name is match('^[a-z][a-z0-9_]{7,62}$')
+        fail_msg: Isolated logical restore qualification requires the local PostgreSQL profile.
+
+    - name: Exercise logical backup and isolated restore
+      block:
+        - name: Install deterministic backup qualification fixtures
+          ansible.builtin.command:
+            argv:
+              - psql
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_database_name }}"
+              - --no-password
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-setup.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          changed_when: false
+          no_log: true
+
+        - name: Pre-create protected qualification dump
+          ansible.builtin.file:
+            path: "{{ cp_qualification_dump }}"
+            state: touch
+            owner: root
+            group: root
+            mode: '0600'
+          changed_when: false
+
+        - name: Create PostgreSQL custom-format qualification dump
+          ansible.builtin.command:
+            argv:
+              - pg_dump
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_database_name }}"
+              - --no-password
+              - --format=custom
+              - --compress=9
+              - "--file={{ cp_qualification_dump }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          changed_when: true
+          no_log: true
+
+        - name: Validate qualification dump archive
+          ansible.builtin.command:
+            argv: [pg_restore, --list, "{{ cp_qualification_dump }}"]
+          register: cp_restore_archive_list
+          changed_when: false
+
+        - name: Require core schema in qualification dump
+          ansible.builtin.assert:
+            that:
+              - "'TABLE public core_tenantcontext' in cp_restore_archive_list.stdout"
+              - "'TABLE DATA public auth_user' in cp_restore_archive_list.stdout"
+            fail_msg: Qualification dump is missing required controller schema or operator data.
+
+        - name: Remove stale isolated restore database
+          become_user: postgres
+          ansible.builtin.command:
+            argv:
+              - dropdb
+              - --if-exists
+              - --force
+              - "{{ cp_restore_database_name }}"
+          changed_when: false
+
+        - name: Create isolated restore database
+          become_user: postgres
+          ansible.builtin.command:
+            argv:
+              - createdb
+              - "--owner={{ cp_db_owner }}"
+              - "{{ cp_restore_database_name }}"
+          changed_when: true
+
+        - name: Restore qualification dump into isolated database
+          ansible.builtin.command:
+            argv:
+              - pg_restore
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_restore_database_name }}"
+              - --no-password
+              - --no-owner
+              - --exit-on-error
+              - "{{ cp_qualification_dump }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          changed_when: true
+          no_log: true
+
+        - name: Verify restored migrations, operator, and RLS catalog
+          ansible.builtin.command:
+            argv:
+              - psql
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_restore_database_name }}"
+              - --no-password
+              - --no-align
+              - --tuples-only
+              - --quiet
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/restore-integrity-check.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          register: cp_restore_integrity
+          changed_when: false
+          no_log: true
+
+        - name: Require restored controller integrity
+          ansible.builtin.assert:
+            that:
+              - cp_restore_integrity.stdout | trim == 'true|true|3'
+            fail_msg: Restored controller database failed schema, operator, or RLS integrity checks.
+
+        - name: Exercise restored tenant RLS through runtime identity
+          ansible.builtin.command:
+            argv:
+              - psql
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_runtime_user }}"
+              - "--dbname={{ cp_restore_database_name }}"
+              - --no-password
+              - --no-align
+              - --tuples-only
+              - --quiet
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-check.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_runtime_password }}"
+          register: cp_restored_rls_check
+          changed_when: false
+          no_log: true
+
+        - name: Require restored tenant visibility matrix
+          ansible.builtin.assert:
+            that:
+              - cp_restored_rls_check.stdout_lines == ['0|0|0', '1|0|1|0|1|0', '0|1|0|1|0|1', '2|2|2']
+            fail_msg: Restored database did not preserve tenant row-level isolation.
+
+      always:
+        - name: Remove isolated restore database
+          become_user: postgres
+          ansible.builtin.command:
+            argv:
+              - dropdb
+              - --if-exists
+              - --force
+              - "{{ cp_restore_database_name }}"
+          changed_when: false
+
+        - name: Remove deterministic source qualification fixtures
+          ansible.builtin.command:
+            argv:
+              - psql
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_database_name }}"
+              - --no-password
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-cleanup.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          changed_when: false
+          no_log: true

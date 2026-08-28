@@ -1,0 +1,56 @@
+---
+- name: Validate deployment profile
+  ansible.builtin.assert:
+    that:
+      - cp_profile in ['lab', 'azure']
+      - (cp_profile == 'lab' and cp_install_local_postgres | bool) or (cp_profile == 'azure' and not (cp_install_local_postgres | bool))
+    fail_msg: The lab profile must install PostgreSQL; the Azure profile must not.
+
+- name: Validate supported operating system and architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Debian'
+      - ansible_facts['distribution_major_version'] == '13'
+      - ansible_facts['architecture'] in ['aarch64', 'x86_64']
+    fail_msg: CP1 currently supports Debian 13 on ARM64 or AMD64 only.
+
+- name: Determine root filesystem
+  ansible.builtin.set_fact:
+    cp_root_mount: "{{ (ansible_facts['mounts'] | selectattr('mount', 'equalto', '/') | list | first) }}"
+
+- name: Validate minimum capacity
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['processor_vcpus'] | int >= cp_min_vcpus | int
+      - ansible_facts['memtotal_mb'] | int >= cp_min_memory_mb | int
+      - cp_root_mount.size_total | int >= (cp_min_root_disk_gb | int * 1000 * 1000 * 1000)
+    fail_msg: CP1 does not meet the declared CPU, memory, or root-disk minimum.
+
+- name: Reject a local database target in Azure profile
+  ansible.builtin.assert:
+    that:
+      - cp_db_upstream_host not in ['127.0.0.1', 'localhost', '::1']
+      - cp_db_server_tls_sslmode == 'verify-full'
+    fail_msg: Azure must use a non-local PostgreSQL endpoint with verify-full TLS.
+  when: cp_profile == 'azure'
+
+- name: Require deployment secrets
+  ansible.builtin.assert:
+    that:
+      - cp_db_owner_password is defined
+      - cp_db_owner_password | length >= 32
+      - cp_db_runtime_password is defined
+      - cp_db_runtime_password | length >= 32
+      - cp_django_secret_key is defined
+      - cp_django_secret_key | length >= 48
+      - cp_controller_admin_password is defined
+      - cp_controller_admin_password | length >= 32
+    fail_msg: Generate the protected profile secrets before installation.
+  no_log: true
+
+- name: Validate immutable controller release identifier
+  ansible.builtin.assert:
+    that:
+      - cp_controller_release_id is defined
+      - cp_controller_release_id is match('^[a-zA-Z0-9][a-zA-Z0-9_.-]{7,79}$')
+    fail_msg: The controller source digest did not produce a safe release identifier.

@@ -1,0 +1,74 @@
+---
+- name: Install protected PgBouncer authentication file for lab
+  ansible.builtin.template:
+    src: userlist.txt.j2
+    dest: /etc/pgbouncer/userlist.txt
+    owner: postgres
+    group: postgres
+    mode: '0640'
+  no_log: true
+  notify: Restart PgBouncer
+
+- name: Configure PgBouncer
+  ansible.builtin.template:
+    src: pgbouncer.ini.j2
+    dest: /etc/pgbouncer/pgbouncer.ini
+    owner: postgres
+    group: postgres
+    mode: '0640'
+  notify: Restart PgBouncer
+
+- name: Enable PgBouncer
+  ansible.builtin.systemd_service:
+    name: pgbouncer.service
+    enabled: true
+    state: started
+
+# Debian starts PgBouncer as soon as the package is installed. On a clean host,
+# the templates above therefore notify a restart that would otherwise wait
+# until the end of the play, after the controller readiness gate. Apply the
+# protected auth/config files before any controller process can connect.
+- name: Apply PgBouncer configuration before controller activation
+  ansible.builtin.meta: flush_handlers
+
+- name: Prove managed PgBouncer authentication is active
+  block:
+    - name: Test runtime login through PgBouncer
+      ansible.builtin.command:
+        argv:
+          - psql
+          - --host=127.0.0.1
+          - "--port={{ cp_pgbouncer_port }}"
+          - "--username={{ cp_db_runtime_user }}"
+          - "--dbname={{ cp_database_name }}"
+          - --no-password
+          - --tuples-only
+          - --command=SELECT current_database(), current_user
+      environment:
+        PGPASSWORD: "{{ cp_db_runtime_password }}"
+      changed_when: false
+      no_log: true
+  rescue:
+    # Recover a host interrupted after template installation but before the
+    # handler flush. A healthy reconciled host never enters this path, so the
+    # second qualification run still reports zero changes.
+    - name: Restart PgBouncer after a stale-auth probe
+      ansible.builtin.systemd_service:
+        name: pgbouncer.service
+        state: restarted
+
+    - name: Re-test runtime login through PgBouncer
+      ansible.builtin.command:
+        argv:
+          - psql
+          - --host=127.0.0.1
+          - "--port={{ cp_pgbouncer_port }}"
+          - "--username={{ cp_db_runtime_user }}"
+          - "--dbname={{ cp_database_name }}"
+          - --no-password
+          - --tuples-only
+          - --command=SELECT current_database(), current_user
+      environment:
+        PGPASSWORD: "{{ cp_db_runtime_password }}"
+      changed_when: false
+      no_log: true

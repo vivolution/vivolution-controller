@@ -1,0 +1,180 @@
+---
+- name: Qualify automatic recovery from a failed controller release
+  hosts: controllers
+  become: true
+  gather_facts: false
+  vars:
+    cp_failure_probe_release: cp1-failure-probe
+    cp_failure_probe_image_repository: localhost/vivolution/controller
+    cp_failure_probe_release_config_root: /etc/vivolution/releases
+  tasks:
+    - name: Require production-precedence failure probe release
+      ansible.builtin.assert:
+        that: cp_controller_release_id == cp_failure_probe_release
+        fail_msg: The failure probe must pass its release ID through Ansible extra-vars.
+
+    - name: Read current known-good release marker
+      ansible.builtin.slurp:
+        src: /etc/vivolution/active-release
+      register: cp_failure_probe_active_file
+
+    - name: Read current rollback release marker
+      ansible.builtin.slurp:
+        src: /etc/vivolution/previous-release
+      register: cp_failure_probe_previous_file
+      failed_when: false
+
+    - name: Remember release markers before failure injection
+      ansible.builtin.set_fact:
+        cp_failure_probe_prior_release: "{{ cp_failure_probe_active_file.content | b64decode | trim }}"
+        cp_failure_probe_prior_previous: >-
+          {{ (cp_failure_probe_previous_file.content | default('') | b64decode | trim)
+             if not (cp_failure_probe_previous_file.failed | default(false)) else '' }}
+
+    - name: Validate known-good release for failure probe
+      ansible.builtin.assert:
+        that:
+          - cp_failure_probe_prior_release is match('^[a-zA-Z0-9][a-zA-Z0-9_.-]{7,79}$')
+          - cp_failure_probe_prior_release != cp_failure_probe_release
+        fail_msg: A distinct valid active release is required before testing failed-upgrade recovery.
+
+    - name: Capture live Quadlet checksum before failure injection
+      ansible.builtin.stat:
+        path: /etc/containers/systemd/vivolution-cp-web.container
+        checksum_algorithm: sha256
+      register: cp_failure_probe_quadlet_before
+
+    - name: Capture running image ID before failure injection
+      ansible.builtin.command:
+        argv:
+          - podman
+          - inspect
+          - vivolution-cp-web
+          - --format
+          - "{{ '{{' }}.Image{{ '}}' }}"
+      register: cp_failure_probe_image_before
+      changed_when: false
+
+    - name: Create temporary failure-probe build directory
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: vivolution-failed-upgrade-
+      register: cp_failure_probe_directory
+
+    - name: Build and exercise an intentionally unhealthy release
+      block:
+        - name: Install failure-probe Containerfile
+          ansible.builtin.copy:
+            dest: "{{ cp_failure_probe_directory.path }}/Containerfile"
+            owner: root
+            group: root
+            mode: '0600'
+            content: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/failed-upgrade.Containerfile') }}"
+
+        - name: Build intentionally unhealthy controller image
+          ansible.builtin.command:
+            argv:
+              - podman
+              - build
+              - --pull=never
+              - --network=none
+              - "--build-arg=BASE_IMAGE={{ cp_failure_probe_image_repository }}:{{ cp_failure_probe_prior_release }}"
+              - "--tag={{ cp_failure_probe_image_repository }}:{{ cp_failure_probe_release }}"
+              - "{{ cp_failure_probe_directory.path }}"
+          changed_when: true
+
+        - name: Configure bounded failure-probe activation
+          ansible.builtin.set_fact:
+            cp_controller_build: false
+            cp_controller_readiness_retries: 4
+            cp_controller_readiness_delay: 1
+
+        - name: Attempt failure-probe activation
+          block:
+            - name: Activate intentionally unhealthy controller image
+              ansible.builtin.include_role:
+                name: controller_services
+
+            - name: Reject an unexpectedly healthy failure probe
+              ansible.builtin.fail:
+                msg: The intentionally unhealthy controller release unexpectedly became ready.
+          rescue:
+            - name: Require intended automatic recovery path
+              ansible.builtin.assert:
+                that:
+                  - cp_target_controller_release | default('') == cp_failure_probe_release
+                  - cp_failed_controller_release | default('') == cp_failure_probe_release
+                  - cp_activation_recovered | default(false) | bool
+                fail_msg: The expected automatic controller recovery path was not completed.
+
+            - name: Read active marker after automatic recovery
+              ansible.builtin.slurp:
+                src: /etc/vivolution/active-release
+              register: cp_failure_probe_active_after
+
+            - name: Read rollback marker after automatic recovery
+              ansible.builtin.slurp:
+                src: /etc/vivolution/previous-release
+              register: cp_failure_probe_previous_after
+              failed_when: false
+
+            - name: Capture live Quadlet checksum after automatic recovery
+              ansible.builtin.stat:
+                path: /etc/containers/systemd/vivolution-cp-web.container
+                checksum_algorithm: sha256
+              register: cp_failure_probe_quadlet_after
+
+            - name: Capture running image ID after automatic recovery
+              ansible.builtin.command:
+                argv:
+                  - podman
+                  - inspect
+                  - vivolution-cp-web
+                  - --format
+                  - "{{ '{{' }}.Image{{ '}}' }}"
+              register: cp_failure_probe_image_after
+              changed_when: false
+
+            - name: Require exact known-good state after failed activation
+              ansible.builtin.assert:
+                that:
+                  - cp_failure_probe_active_after.content | b64decode | trim == cp_failure_probe_prior_release
+                  - >-
+                    ((cp_failure_probe_previous_after.content | default('') | b64decode | trim)
+                    if not (cp_failure_probe_previous_after.failed | default(false)) else '') ==
+                    cp_failure_probe_prior_previous
+                  - cp_failure_probe_quadlet_after.stat.checksum == cp_failure_probe_quadlet_before.stat.checksum
+                  - cp_failure_probe_image_after.stdout | trim == cp_failure_probe_image_before.stdout | trim
+                fail_msg: Failed activation did not restore the exact prior release state.
+
+            - name: Require recovered controller service
+              ansible.builtin.command:
+                argv: [systemctl, is-active, vivolution-cp-web.service]
+              changed_when: false
+
+            - name: Require recovered controller readiness
+              ansible.builtin.uri:
+                url: "http://127.0.0.1:{{ cp_controller_web_port }}/health/ready"
+                method: GET
+                status_code: 200
+
+        - name: Remove proven-inactive failure-probe image
+          ansible.builtin.command:
+            argv:
+              - podman
+              - image
+              - rm
+              - "{{ cp_failure_probe_image_repository }}:{{ cp_failure_probe_release }}"
+          changed_when: true
+
+        - name: Remove protected failure-probe release environment
+          ansible.builtin.file:
+            path: "{{ cp_failure_probe_release_config_root }}/{{ cp_failure_probe_release }}"
+            state: absent
+          no_log: true
+
+      always:
+        - name: Remove failure-probe build directory
+          ansible.builtin.file:
+            path: "{{ cp_failure_probe_directory.path }}"
+            state: absent

@@ -1,0 +1,73 @@
+---
+- name: Install maintained Caddy ingress
+  ansible.builtin.apt:
+    name: caddy
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install Caddy ingress policy
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: /etc/caddy/Caddyfile
+    owner: root
+    group: caddy
+    mode: '0640'
+  register: cp_caddy_config
+
+- name: Validate Caddy ingress policy
+  ansible.builtin.command:
+    argv:
+      - caddy
+      - validate
+      - --config
+      - /etc/caddy/Caddyfile
+      - --adapter
+      - caddyfile
+  changed_when: false
+
+- name: Enable Caddy ingress
+  ansible.builtin.systemd_service:
+    name: caddy.service
+    enabled: true
+    state: started
+
+- name: Restart Caddy after a validated policy change
+  ansible.builtin.systemd_service:
+    name: caddy.service
+    state: restarted
+  when: cp_caddy_config.changed
+
+- name: Wait for local Caddy root certificate
+  ansible.builtin.wait_for:
+    path: /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
+    timeout: 30
+  when: cp_ingress_local_tls | bool
+
+- name: Trust the local lab Caddy root certificate
+  ansible.builtin.copy:
+    src: /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
+    remote_src: true
+    dest: /usr/local/share/ca-certificates/vivolution-lab-caddy.crt
+    owner: root
+    group: root
+    mode: '0644'
+  register: cp_caddy_local_root
+  when: cp_ingress_local_tls | bool
+
+- name: Refresh system CA trust for local ingress
+  ansible.builtin.command:
+    argv: [update-ca-certificates]
+  when:
+    - cp_ingress_local_tls | bool
+    - cp_caddy_local_root.changed
+  changed_when: true
+
+- name: Export public local CA certificate for host-side verification
+  ansible.builtin.fetch:
+    src: /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
+    dest: >-
+      {{ cp_ingress_ca_export_path |
+         default(playbook_dir + '/../../lab/utm/generated/caddy-root.crt') }}
+    flat: true
+  when: cp_ingress_local_tls | bool

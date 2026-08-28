@@ -1,0 +1,10 @@
+---
+cp_controller_build: true
+cp_controller_image_repository: localhost/vivolution/controller
+cp_controller_image: "{{ cp_controller_image_repository }}:{{ cp_controller_release_id }}"
+cp_controller_release_config_root: /etc/vivolution/releases
+cp_controller_refresh_release_environment: true
+cp_controller_run_migrations: true
+cp_controller_create_initial_operator: true
+cp_controller_readiness_retries: 30
+cp_controller_readiness_delay: 2

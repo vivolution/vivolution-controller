@@ -1,0 +1,75 @@
+---
+- name: Find PostgreSQL 17 cluster configuration
+  ansible.builtin.stat:
+    path: /etc/postgresql/17/main/postgresql.conf
+  register: cp_postgres_config
+
+- name: Require PostgreSQL 17 cluster
+  ansible.builtin.assert:
+    that: cp_postgres_config.stat.exists
+    fail_msg: Debian did not create the expected PostgreSQL 17 main cluster.
+
+- name: Configure PostgreSQL listener and memory limits
+  ansible.builtin.blockinfile:
+    path: /etc/postgresql/17/main/postgresql.conf
+    marker: '# {mark} VIVOLUTION CP1 MANAGED BLOCK'
+    block: |
+      listen_addresses = '127.0.0.1'
+      password_encryption = 'scram-sha-256'
+      shared_buffers = '{{ cp_postgres_shared_buffers }}'
+      effective_cache_size = '{{ cp_postgres_effective_cache_size }}'
+      max_connections = {{ cp_postgres_max_connections }}
+      log_connections = on
+      log_disconnections = on
+  notify: Restart PostgreSQL
+
+- name: Restrict local PostgreSQL host authentication
+  ansible.builtin.copy:
+    dest: /etc/postgresql/17/main/pg_hba.conf
+    owner: postgres
+    group: postgres
+    mode: '0640'
+    content: |
+      local   all             postgres                                peer
+      local   all             all                                     peer
+      host    all             all             127.0.0.1/32            scram-sha-256
+      host    all             all             ::1/128                 reject
+  notify: Reload PostgreSQL
+
+- name: Ensure PostgreSQL is available before provisioning roles
+  ansible.builtin.meta: flush_handlers
+
+- name: Provision local database roles and database safely
+  block:
+    - name: Render protected database bootstrap SQL
+      ansible.builtin.template:
+        src: bootstrap.sql.j2
+        dest: /run/vivolution-db-bootstrap.sql
+        owner: postgres
+        group: postgres
+        mode: '0600'
+      changed_when: false
+      no_log: true
+
+    - name: Create or update local database roles and database
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - psql
+          - --set=ON_ERROR_STOP=1
+          - --file=/run/vivolution-db-bootstrap.sql
+      changed_when: false
+      no_log: true
+  always:
+    - name: Remove protected database bootstrap SQL
+      ansible.builtin.file:
+        path: /run/vivolution-db-bootstrap.sql
+        state: absent
+      changed_when: false
+      no_log: true
+
+- name: Enable PostgreSQL
+  ansible.builtin.systemd_service:
+    name: postgresql.service
+    enabled: true
+    state: started
