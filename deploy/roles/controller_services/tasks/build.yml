@@ -123,7 +123,8 @@
     that:
       - cp_controller_release_id == 'cp1-' ~ cp_controller_source_manifest_sha256
     fail_msg: >-
-      The selected release ID is not the full SHA-256 digest of the declared controller source.
+      The selected release ID {{ cp_controller_release_id }} is not the full SHA-256 digest
+      cp1-{{ cp_controller_source_manifest_sha256 }} of the declared controller source.
 
 - name: Inspect release storage and release parent paths
   ansible.builtin.stat:
