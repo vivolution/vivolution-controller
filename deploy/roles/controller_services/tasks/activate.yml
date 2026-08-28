@@ -592,7 +592,8 @@
           - >-
             (cp_target_controller_release_config_stat.stat.exists | default(false))
           - >-
-             (cp_target_controller_image_record_stat.stat.exists | default(false)) and
+            (cp_target_controller_image_record_stat.stat.exists | default(false))
+          - >-
             cp_controller_existing_runtime_environment_stat.stat.isreg | default(false)
           - >-
             not (cp_controller_existing_runtime_environment_stat.stat.islnk | default(false))

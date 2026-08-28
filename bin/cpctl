@@ -891,6 +891,25 @@ static_checks() {
     done < "$shell_source_list"
     rm -f "$shell_source_list"
 
+    ansible_python="$(sed -n '1s/^#!//p' "$(command -v ansible-playbook)")"
+    [ -x "$ansible_python" ] || {
+        printf 'Unable to resolve the pinned Ansible Python interpreter.\n' >&2
+        return 1
+    }
+    "$ansible_python" - "$DEPLOY_DIR" <<'PY'
+import pathlib
+import sys
+
+import yaml
+
+deploy_root = pathlib.Path(sys.argv[1])
+for yaml_path in sorted(deploy_root.rglob("*.yml")):
+    if ".state" in yaml_path.parts or "evidence" in yaml_path.parts:
+        continue
+    with yaml_path.open(encoding="utf-8") as yaml_stream:
+        list(yaml.safe_load_all(yaml_stream))
+PY
+
     syntax_checks
 
     (
