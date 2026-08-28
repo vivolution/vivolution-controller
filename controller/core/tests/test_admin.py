@@ -4,7 +4,15 @@ from django.contrib.auth.models import Group, User
 from django.test import RequestFactory, TestCase
 from django.urls import reverse
 
-from core.models import AuditEvent
+from core.models import (
+    AuditEvent,
+    ConfigurationVersion,
+    CustomerAccount,
+    EdgeCluster,
+    EdgeNode,
+    M365Tenant,
+    TenantContext,
+)
 
 
 class OperatorAdminSmokeTests(TestCase):
@@ -40,3 +48,18 @@ class OperatorAdminSmokeTests(TestCase):
 
         self.assertFalse(model_admin.has_add_permission(request))
         self.assertFalse(model_admin.has_delete_permission(request))
+        self.assertFalse(model_admin.has_change_permission(request))
+
+    def test_runtime_managed_core_records_cannot_be_deleted_through_admin(self):
+        request = RequestFactory().get("/admin/")
+        request.user = self.operator
+        for model in (
+            CustomerAccount,
+            M365Tenant,
+            TenantContext,
+            EdgeCluster,
+            EdgeNode,
+            ConfigurationVersion,
+        ):
+            with self.subTest(model=model.__name__):
+                self.assertFalse(admin.site._registry[model].has_delete_permission(request))

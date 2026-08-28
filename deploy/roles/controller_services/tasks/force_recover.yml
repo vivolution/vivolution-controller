@@ -1,0 +1,207 @@
+---
+- name: Validate explicit recovery lineage
+  ansible.builtin.assert:
+    that:
+      - cp_recovery_release_id is match('^cp1-[0-9a-f]{64}$')
+      - cp_recovery_previous_release_id is match('^cp1-[0-9a-f]{64}$')
+      - cp_recovery_release_id != cp_recovery_previous_release_id
+
+- name: Define exact recovery artifacts
+  ansible.builtin.set_fact:
+    cp_recovery_image_record: >-
+      {{ cp_controller_release_config_root }}/{{ cp_recovery_release_id }}/image
+    cp_recovery_runtime_environment: >-
+      {{ cp_controller_release_config_root }}/{{ cp_recovery_release_id }}/runtime.env
+
+- name: Inspect exact recovery artifacts
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+    checksum_algorithm: sha256
+  loop:
+    - path: "{{ cp_controller_release_config_root }}/{{ cp_recovery_release_id }}"
+      type: directory
+      mode: '0700'
+    - path: "{{ cp_recovery_image_record }}"
+      type: file
+      mode: '0600'
+    - path: "{{ cp_recovery_runtime_environment }}"
+      type: file
+      mode: '0600'
+  register: cp_recovery_artifact_stats
+  no_log: true
+
+- name: Require private regular recovery artifacts
+  ansible.builtin.assert:
+    that:
+      - >-
+        (item.item.type == 'directory' and
+         (item.stat.isdir | default(false))) or
+        (item.item.type == 'file' and
+         (item.stat.isreg | default(false)) and
+         item.stat.nlink | default(-1) | int == 1 and
+         item.stat.checksum | default('') is match('^[0-9a-f]{64}$'))
+      - not (item.stat.islnk | default(false))
+      - item.stat.uid | default(-1) | int == 0
+      - item.stat.gid | default(-1) | int == 0
+      - item.stat.mode | default('') == item.item.mode
+    fail_msg: An exact recovery artifact is missing, linked, shared, or unsafe.
+  loop: "{{ cp_recovery_artifact_stats.results }}"
+  loop_control:
+    label: protected-recovery-artifact
+  no_log: true
+
+- name: Read exact recovery image registration
+  ansible.builtin.slurp:
+    src: "{{ cp_recovery_image_record }}"
+  register: cp_recovery_image_file
+
+- name: Select exact recovery image
+  ansible.builtin.set_fact:
+    cp_recovery_image: "{{ cp_recovery_image_file.content | b64decode | trim }}"
+
+- name: Revalidate exact recovery staged source
+  ansible.builtin.include_tasks: validate_release.yml
+  vars:
+    cp_controller_validation_release_id: "{{ cp_recovery_release_id }}"
+
+- name: Inspect exact recovery image provenance
+  ansible.builtin.command:
+    argv:
+      - podman
+      - image
+      - inspect
+      - "{{ cp_recovery_image }}"
+      - --format
+      - >-
+        {{ '{{' }}.Id{{ '}}' }}|{{ '{{' }} index .Labels "org.vivolution.release.id" {{ '}}' }}|{{
+        '{{' }} index .Labels "org.vivolution.release.manifest-sha256" {{ '}}' }}
+  register: cp_recovery_image_provenance
+  changed_when: false
+
+- name: Require exact recovery image provenance
+  ansible.builtin.assert:
+    that:
+      - cp_recovery_image is match('^sha256:[0-9a-f]{64}$')
+      - cp_recovery_image_provenance.stdout.split('|') | length == 3
+      - >-
+        cp_recovery_image_provenance.stdout.split('|')[0] |
+        regex_replace('^sha256:', '') ==
+        cp_recovery_image | regex_replace('^sha256:', '')
+      - cp_recovery_image_provenance.stdout.split('|')[1] == cp_recovery_release_id
+      - >-
+        cp_recovery_image_provenance.stdout.split('|')[2] ==
+        (cp_controller_validated_release.stdout_lines | last)
+    fail_msg: The recovery image does not match its immutable release source.
+
+- name: Verify source files embedded in exact recovery image
+  ansible.builtin.command:
+    argv:
+      - podman
+      - run
+      - --rm
+      - --network=none
+      - --pull=never
+      - --read-only
+      - --cap-drop=all
+      - --security-opt=no-new-privileges
+      - --workdir=/app
+      - --entrypoint=/usr/bin/sha256sum
+      - "{{ cp_recovery_image }}"
+      - --check
+      - --strict
+      - .vivolution-source-manifest.sha256
+  changed_when: false
+
+- name: Hash source manifest embedded in exact recovery image
+  ansible.builtin.command:
+    argv:
+      - podman
+      - run
+      - --rm
+      - --network=none
+      - --pull=never
+      - --read-only
+      - --cap-drop=all
+      - --security-opt=no-new-privileges
+      - --entrypoint=/usr/bin/sha256sum
+      - "{{ cp_recovery_image }}"
+      - /app/.vivolution-source-manifest.sha256
+  register: cp_recovery_embedded_manifest
+  changed_when: false
+
+- name: Require exact embedded recovery source manifest
+  ansible.builtin.assert:
+    that:
+      - >-
+        cp_recovery_embedded_manifest.stdout.split()[0] ==
+        (cp_controller_validated_release.stdout_lines | last)
+
+- name: Select exact recovery release for live Quadlet
+  ansible.builtin.set_fact:
+    cp_controller_quadlet_image: "{{ cp_recovery_image }}"
+    cp_controller_quadlet_environment_file: "{{ cp_recovery_runtime_environment }}"
+
+- name: Install exact recovery Quadlet
+  ansible.builtin.template:
+    src: vivolution-cp-web.container.j2
+    dest: /etc/containers/systemd/vivolution-cp-web.container
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Reload systemd for exact recovery
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Restart exact recovery release
+  ansible.builtin.systemd_service:
+    name: vivolution-cp-web.service
+    enabled: true
+    state: restarted
+
+- name: Wait for exact recovery readiness
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ cp_controller_web_port }}/health/ready"
+    method: GET
+    status_code: 200
+  register: cp_recovery_ready
+  retries: "{{ cp_controller_readiness_retries }}"
+  delay: "{{ cp_controller_readiness_delay }}"
+  until: cp_recovery_ready.status == 200
+
+- name: Inspect exact running recovery image
+  ansible.builtin.command:
+    argv:
+      - podman
+      - inspect
+      - vivolution-cp-web
+      - --format
+      - "{{ '{{' }}.State.Running{{ '}}' }}|{{ '{{' }}.Image{{ '}}' }}"
+  register: cp_recovery_running_image
+  changed_when: false
+
+- name: Require exact recovery image to be running
+  ansible.builtin.assert:
+    that:
+      - cp_recovery_running_image.stdout.split('|') | length == 2
+      - cp_recovery_running_image.stdout.split('|')[0] | lower == 'true'
+      - >-
+        cp_recovery_running_image.stdout.split('|')[1] |
+        regex_replace('^sha256:', '') ==
+        cp_recovery_image | regex_replace('^sha256:', '')
+
+- name: Restore exact rollback lineage after readiness
+  ansible.builtin.copy:
+    dest: "{{ item.path }}"
+    owner: root
+    group: root
+    mode: '0644'
+    content: "{{ item.release }}\n"
+  loop:
+    - path: /etc/vivolution/previous-release
+      release: "{{ cp_recovery_previous_release_id }}"
+    - path: /etc/vivolution/active-release
+      release: "{{ cp_recovery_release_id }}"
+  loop_control:
+    label: "{{ item.path }}"

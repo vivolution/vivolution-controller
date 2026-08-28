@@ -11,7 +11,14 @@ from django.test import (
     skipUnlessDBFeature,
 )
 
-from core.models import ConfigurationVersion, CustomerAccount, M365Tenant, TenantContext
+from core.models import (
+    ConfigurationVersion,
+    CustomerAccount,
+    EdgeCluster,
+    EdgeNode,
+    M365Tenant,
+    TenantContext,
+)
 from core.rls import _build_context_token, operator_scope, tenant_scope
 
 TEST_SIGNING_KEY = "1f" * 32
@@ -70,31 +77,90 @@ class TenantScopeUnitTests(SimpleTestCase):
 
 @skipUnlessDBFeature("supports_transactions")
 class PostgreSQLRLSCatalogTests(TransactionTestCase):
-    def test_scoped_tables_use_security_definer_signed_context_policy(self):
+    def test_scoped_tables_use_signed_only_security_definer_policy(self):
         if connection.vendor != "postgresql":
             self.skipTest("PostgreSQL integration test")
 
         expected = {
-            "core_tenantcontext",
-            "core_configurationversion",
-            "core_auditevent",
+            ("core_tenantcontext", "tenant_context_isolation", "r"),
+            ("core_tenantcontext", "operator_context_only", "*"),
+            ("core_configurationversion", "tenant_context_isolation", "*"),
+            ("core_auditevent", "tenant_context_isolation", "*"),
+            ("core_customeraccount", "operator_context_only", "*"),
+            ("core_customeraccount", "tenant_metadata_read", "r"),
+            ("core_m365tenant", "operator_context_only", "*"),
+            ("core_m365tenant", "tenant_metadata_read", "r"),
+            ("core_edgecluster", "operator_context_only", "*"),
+            ("core_edgenode", "operator_context_only", "*"),
         }
+        signed_tenant = "cp_security.rls_context_allows(tenant_context_id)"
+        signed_operator = "cp_security.rls_context_allows(NULL::uuid)"
+        expected_expressions = {
+            ("core_tenantcontext", "tenant_context_isolation", "r"): (
+                "cp_security.rls_context_allows(id)",
+                None,
+            ),
+            ("core_configurationversion", "tenant_context_isolation", "*"): (
+                signed_tenant,
+                signed_tenant,
+            ),
+            ("core_auditevent", "tenant_context_isolation", "*"): (
+                signed_tenant,
+                signed_tenant,
+            ),
+            ("core_customeraccount", "tenant_metadata_read", "r"): (
+                "(EXISTS(SELECT1FROMcore_tenantcontexttenant_contextWHERE"
+                "((tenant_context.customer_account_id=core_customeraccount.id)AND"
+                "cp_security.rls_context_allows(tenant_context.id))))",
+                None,
+            ),
+            ("core_m365tenant", "tenant_metadata_read", "r"): (
+                "(EXISTS(SELECT1FROMcore_tenantcontexttenant_contextWHERE"
+                "((tenant_context.m365_tenant_id=core_m365tenant.id)AND"
+                "cp_security.rls_context_allows(tenant_context.id))))",
+                None,
+            ),
+        }
+        for table in (
+            "core_tenantcontext",
+            "core_customeraccount",
+            "core_m365tenant",
+            "core_edgecluster",
+            "core_edgenode",
+        ):
+            expected_expressions[(table, "operator_context_only", "*")] = (
+                signed_operator,
+                signed_operator,
+            )
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT c.relname, pg_get_expr(p.polqual, p.polrelid)
+                SELECT
+                    c.relname,
+                    p.polname,
+                    p.polpermissive,
+                    p.polcmd,
+                    p.polroles,
+                    c.relrowsecurity,
+                    pg_get_userbyid(c.relowner) = current_user,
+                    pg_get_expr(p.polqual, p.polrelid),
+                    pg_get_expr(p.polwithcheck, p.polrelid)
                 FROM pg_class c
                 JOIN pg_namespace n ON n.oid = c.relnamespace
                 JOIN pg_policy p ON p.polrelid = c.oid
-                WHERE n.nspname = current_schema()
+                WHERE n.nspname = 'public'
                   AND c.relrowsecurity
-                  AND p.polname = 'tenant_context_isolation'
-                """
+                  AND c.relname = ANY(%s)
+                """,
+                [sorted({item[0] for item in expected})],
             )
-            policies = dict(cursor.fetchall())
+            policies = cursor.fetchall()
             cursor.execute(
                 """
-                SELECT p.prosecdef, p.proconfig
+                SELECT
+                    p.prosecdef,
+                    p.proconfig,
+                    pg_get_userbyid(p.proowner) = current_user
                 FROM pg_proc p
                 JOIN pg_namespace n ON n.oid = p.pronamespace
                 WHERE n.nspname = 'cp_security'
@@ -103,14 +169,40 @@ class PostgreSQLRLSCatalogTests(TransactionTestCase):
             )
             function_security = cursor.fetchone()
 
-        self.assertTrue(expected.issubset(policies))
-        for expression in policies.values():
-            self.assertIn("cp_security.rls_context_allows", expression)
-            self.assertIn("app.is_operator", expression)
-            self.assertIn("app.tenant_context_id", expression)
+            cursor.execute(
+                """
+                SELECT
+                    pg_get_userbyid(n.nspowner) = current_user,
+                    pg_get_userbyid(c.relowner) = current_user
+                FROM pg_namespace n
+                JOIN pg_class c ON c.relnamespace = n.oid
+                WHERE n.nspname = 'cp_security'
+                  AND c.relname = 'rls_signing_key'
+                """
+            )
+            security_ownership = cursor.fetchone()
+
+        self.assertEqual(len(policies), len(expected))
+        self.assertEqual(
+            {(policy[0], policy[1], policy[3]) for policy in policies},
+            expected,
+        )
+        for policy in policies:
+            self.assertTrue(policy[2])
+            self.assertEqual(policy[4], [0])
+            self.assertTrue(policy[5])
+            self.assertTrue(policy[6])
+            key = (policy[0], policy[1], policy[3])
+            actual_expressions = tuple(
+                "".join(expression.split()) if expression is not None else None
+                for expression in policy[7:9]
+            )
+            self.assertEqual(actual_expressions, expected_expressions[key])
         self.assertIsNotNone(function_security)
         self.assertTrue(function_security[0])
         self.assertIn("search_path=pg_catalog, pg_temp", function_security[1])
+        self.assertTrue(function_security[2])
+        self.assertEqual(security_ownership, (True, True))
 
 
 @override_settings(
@@ -118,10 +210,14 @@ class PostgreSQLRLSCatalogTests(TransactionTestCase):
     RLS_CONTEXT_TTL_SECONDS=60,
 )
 class PostgreSQLSignedContextBehaviorTests(TransactionTestCase):
-    scoped_tables = (
+    rls_tables = (
         "core_tenantcontext",
         "core_configurationversion",
         "core_auditevent",
+        "core_customeraccount",
+        "core_m365tenant",
+        "core_edgecluster",
+        "core_edgenode",
     )
 
     def setUp(self):
@@ -159,6 +255,16 @@ class PostgreSQLSignedContextBehaviorTests(TransactionTestCase):
             tenant_context=self.second_tenant,
             version=1,
         )
+        self.edge_cluster = EdgeCluster.objects.create(
+            name="rls-test-cluster",
+            service_mode=EdgeCluster.ServiceMode.SHARED_ENHANCED,
+        )
+        self.edge_node = EdgeNode.objects.create(
+            cluster=self.edge_cluster,
+            name="rls-test-node",
+            node_index=1,
+            architecture=EdgeNode.Architecture.ARM64,
+        )
 
         with connection.cursor() as cursor:
             cursor.execute(
@@ -172,13 +278,13 @@ class PostgreSQLSignedContextBehaviorTests(TransactionTestCase):
                 """,
                 [TEST_SIGNING_KEY],
             )
-            for table in self.scoped_tables:
+            for table in self.rls_tables:
                 cursor.execute(f'ALTER TABLE "{table}" FORCE ROW LEVEL SECURITY')
 
     def tearDown(self):
         if connection.vendor == "postgresql":
             with connection.cursor() as cursor:
-                for table in self.scoped_tables:
+                for table in self.rls_tables:
                     cursor.execute(f'ALTER TABLE "{table}" NO FORCE ROW LEVEL SECURITY')
         super().tearDown()
 
@@ -187,12 +293,12 @@ class PostgreSQLSignedContextBehaviorTests(TransactionTestCase):
         with connection.cursor() as cursor:
             cursor.execute("SELECT set_config('app.rls_context', %s, true)", [token])
 
-    def test_legacy_contexts_remain_available_during_compatibility_bridge(self):
+    def test_legacy_contexts_are_denied_after_signed_only_cutover(self):
         with transaction.atomic():
             self._set_raw_context("")
             with connection.cursor() as cursor:
                 cursor.execute("SELECT set_config('app.is_operator', 'true', true)")
-            self.assertEqual(TenantContext.objects.count(), 2)
+            self.assertEqual(TenantContext.objects.count(), 0)
 
         with transaction.atomic():
             self._set_raw_context("")
@@ -204,7 +310,7 @@ class PostgreSQLSignedContextBehaviorTests(TransactionTestCase):
                 )
             self.assertEqual(
                 list(TenantContext.objects.values_list("id", flat=True)),
-                [self.first_tenant.id],
+                [],
             )
 
     def test_forged_signed_operator_context_is_denied(self):
@@ -219,6 +325,8 @@ class PostgreSQLSignedContextBehaviorTests(TransactionTestCase):
             self._set_raw_context(forged_token)
             self.assertEqual(TenantContext.objects.count(), 0)
             self.assertEqual(ConfigurationVersion.objects.count(), 0)
+            self.assertEqual(CustomerAccount.objects.count(), 0)
+            self.assertEqual(EdgeCluster.objects.count(), 0)
 
     def test_forged_and_expired_tenant_contexts_are_denied(self):
         forged = (
@@ -247,6 +355,29 @@ class PostgreSQLSignedContextBehaviorTests(TransactionTestCase):
                 list(ConfigurationVersion.objects.values_list("id", flat=True)),
                 [self.first_version.id],
             )
+
+    def test_global_metadata_requires_signed_operator_context(self):
+        with tenant_scope(self.first_tenant.id):
+            self.assertEqual(
+                list(CustomerAccount.objects.values_list("id", flat=True)),
+                [self.first_tenant.customer_account_id],
+            )
+            self.assertEqual(
+                list(M365Tenant.objects.values_list("id", flat=True)),
+                [self.first_tenant.m365_tenant_id],
+            )
+            self.assertEqual(EdgeCluster.objects.count(), 0)
+            self.assertEqual(EdgeNode.objects.count(), 0)
+            with self.assertRaises(DatabaseError), transaction.atomic():
+                CustomerAccount.objects.create(name="Denied", slug="denied")
+
+        with operator_scope():
+            self.assertEqual(CustomerAccount.objects.count(), 2)
+            self.assertEqual(M365Tenant.objects.count(), 2)
+            self.assertEqual(EdgeCluster.objects.count(), 1)
+            self.assertEqual(EdgeNode.objects.count(), 1)
+            self.first_tenant.customer_account.status = CustomerAccount.Status.SUSPENDED
+            self.first_tenant.customer_account.save(update_fields=["status"])
 
     def test_valid_operator_context_reads_all_rows(self):
         with operator_scope():
@@ -289,3 +420,28 @@ class PostgreSQLSignedContextBehaviorTests(TransactionTestCase):
                     tenant_context_id=self.second_tenant.id,
                     version=2,
                 )
+
+    def test_tenant_cannot_rebind_or_create_tenant_contexts(self):
+        with tenant_scope(self.first_tenant.id):
+            self.assertEqual(
+                TenantContext.objects.filter(pk=self.first_tenant.id).update(
+                    customer_account_id=self.second_tenant.customer_account_id,
+                    m365_tenant_id=self.second_tenant.m365_tenant_id,
+                    status=TenantContext.Status.SUSPENDED,
+                ),
+                0,
+            )
+            with self.assertRaises(DatabaseError), transaction.atomic():
+                TenantContext.objects.create(
+                    customer_account_id=self.first_tenant.customer_account_id,
+                    m365_tenant_id=self.first_tenant.m365_tenant_id,
+                    name="denied",
+                )
+
+        with operator_scope():
+            self.assertEqual(
+                TenantContext.objects.filter(pk=self.first_tenant.id).update(
+                    status=TenantContext.Status.SUSPENDED
+                ),
+                1,
+            )

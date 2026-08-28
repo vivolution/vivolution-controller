@@ -1,0 +1,10 @@
+---
+- name: Recover one exact immutable CP1 release independently of marker state
+  hosts: controllers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Force exact immutable release recovery
+      ansible.builtin.include_role:
+        name: controller_services
+        tasks_from: force_recover.yml

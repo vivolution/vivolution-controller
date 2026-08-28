@@ -67,7 +67,7 @@ def _build_context_token(
 
 
 def set_local_rls_context(*, tenant_context_id=None, operator=False):
-    """Install the bridge and signed RLS contexts for the active transaction."""
+    """Install one signed RLS context for the active transaction."""
 
     if connection.vendor != "postgresql":
         return
@@ -78,12 +78,7 @@ def set_local_rls_context(*, tenant_context_id=None, operator=False):
         tenant_context_id=tenant_context_id,
         operator=operator,
     )
-    tenant_value = "" if operator else _validated_uuid(tenant_context_id)
-    _set_raw_local_contexts(
-        token=token,
-        tenant_context_id=tenant_value,
-        is_operator="true" if operator else "",
-    )
+    _set_raw_local_context(token)
 
 
 def _read_raw_local_context():
@@ -92,30 +87,9 @@ def _read_raw_local_context():
         return cursor.fetchone()[0] or ""
 
 
-def _read_raw_local_contexts():
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT current_setting('app.rls_context', true), "
-            "current_setting('app.tenant_context_id', true), "
-            "current_setting('app.is_operator', true)"
-        )
-        values = cursor.fetchone()
-    return tuple(value or "" for value in values)
-
-
 def _set_raw_local_context(token):
     with connection.cursor() as cursor:
         cursor.execute("SELECT set_config('app.rls_context', %s, true)", [token])
-
-
-def _set_raw_local_contexts(*, token, tenant_context_id, is_operator):
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT set_config('app.rls_context', %s, true), "
-            "set_config('app.tenant_context_id', %s, true), "
-            "set_config('app.is_operator', %s, true)",
-            [token, tenant_context_id, is_operator],
-        )
 
 
 @contextmanager
@@ -125,7 +99,7 @@ def _signed_scope(*, tenant_context_id=None, operator=False):
         return
 
     with transaction.atomic():
-        previous_contexts = _read_raw_local_contexts()
+        previous_context = _read_raw_local_context()
         set_local_rls_context(
             tenant_context_id=tenant_context_id,
             operator=operator,
@@ -138,11 +112,7 @@ def _signed_scope(*, tenant_context_id=None, operator=False):
             # required, so restoration is deliberately left to PostgreSQL.
             raise
         else:
-            _set_raw_local_contexts(
-                token=previous_contexts[0],
-                tenant_context_id=previous_contexts[1],
-                is_operator=previous_contexts[2],
-            )
+            _set_raw_local_context(previous_context)
 
 
 @contextmanager

@@ -11,6 +11,12 @@
         that:
           - cp_expected_active_release is defined
           - cp_expected_active_release is match('^cp1-[0-9a-f]{64}$')
+          - >-
+            cp_expected_previous_release is not defined or
+            cp_expected_previous_release is match('^cp1-[0-9a-f]{64}$')
+          - >-
+            cp_expected_previous_release is not defined or
+            cp_expected_previous_release != cp_expected_active_release
 
     - name: Inspect active release marker
       ansible.builtin.stat:
@@ -33,6 +39,40 @@
       ansible.builtin.slurp:
         src: /etc/vivolution/active-release
       register: cp_active_release_qualification
+
+    - name: Inspect expected previous release marker
+      ansible.builtin.stat:
+        path: /etc/vivolution/previous-release
+        follow: false
+      register: cp_previous_release_marker_qualification
+      when: cp_expected_previous_release is defined
+
+    - name: Require a safe previous release marker
+      ansible.builtin.assert:
+        that:
+          - cp_previous_release_marker_qualification.stat.isreg | default(false)
+          - not (cp_previous_release_marker_qualification.stat.islnk | default(false))
+          - cp_previous_release_marker_qualification.stat.uid | default(-1) | int == 0
+          - cp_previous_release_marker_qualification.stat.gid | default(-1) | int == 0
+          - cp_previous_release_marker_qualification.stat.mode | default('') == '0644'
+          - cp_previous_release_marker_qualification.stat.nlink | default(-1) | int == 1
+        fail_msg: The previous release marker is missing, linked, or unsafe.
+      when: cp_expected_previous_release is defined
+
+    - name: Read expected previous release marker
+      ansible.builtin.slurp:
+        src: /etc/vivolution/previous-release
+      register: cp_previous_release_qualification
+      when: cp_expected_previous_release is defined
+
+    - name: Require the exact expected release lineage
+      ansible.builtin.assert:
+        that:
+          - >-
+            cp_previous_release_qualification.content | b64decode | trim ==
+            cp_expected_previous_release
+        fail_msg: The previous release marker does not identify the expected N-1 release.
+      when: cp_expected_previous_release is defined
 
     - name: Read active immutable image registration
       ansible.builtin.slurp:

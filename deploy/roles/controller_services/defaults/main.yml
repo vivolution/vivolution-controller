@@ -5,6 +5,7 @@ cp_controller_image: "{{ cp_controller_image_repository }}:{{ cp_controller_rele
 cp_controller_release_root_files:
   - .dockerignore
   - Containerfile
+  - RELEASE_NOTES.md
   - constraints.txt
   - entrypoint.sh
   - manage.py
@@ -14,5 +15,6 @@ cp_controller_refresh_release_environment: true
 cp_controller_run_migrations: true
 cp_controller_create_initial_operator: true
 cp_controller_allow_legacy_rls_rollback: false
+cp_controller_require_signed_rls_cutover: false
 cp_controller_readiness_retries: 30
 cp_controller_readiness_delay: 2

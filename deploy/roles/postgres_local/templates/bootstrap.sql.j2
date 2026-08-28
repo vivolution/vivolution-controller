@@ -46,6 +46,7 @@ BEGIN
         JOIN pg_roles parent ON parent.oid = membership.roleid
         JOIN pg_roles member ON member.oid = membership.member
         WHERE member.rolname IN ('{{ cp_db_owner }}', '{{ cp_db_runtime_user }}')
+           OR parent.rolname IN ('{{ cp_db_owner }}', '{{ cp_db_runtime_user }}')
     LOOP
         EXECUTE format(
             'REVOKE %I FROM %I',
@@ -126,6 +127,79 @@ END
 $vivolution$;
 
 \connect {{ cp_database_name }}
+
+DO $vivolution$
+DECLARE
+    target_role text;
+    target_search_path text;
+    unexpected_database text;
+BEGIN
+    FOREACH target_role IN ARRAY ARRAY[
+        '{{ cp_db_owner }}', '{{ cp_db_runtime_user }}'
+    ] LOOP
+        target_search_path := CASE
+            WHEN target_role = '{{ cp_db_owner }}' THEN 'public, pg_catalog'
+            ELSE 'pg_catalog, public'
+        END;
+        IF EXISTS (
+            SELECT 1
+            FROM pg_db_role_setting setting
+            WHERE setting.setrole = (
+                SELECT oid FROM pg_roles WHERE rolname = target_role
+            )
+              AND setting.setdatabase = 0
+        ) THEN
+            EXECUTE format('ALTER ROLE %I RESET ALL', target_role);
+            RAISE NOTICE 'VIVOLUTION_DB_CHANGED:role-global-settings';
+        END IF;
+
+        FOR unexpected_database IN
+            SELECT database.datname
+            FROM pg_db_role_setting setting
+            JOIN pg_database database ON database.oid = setting.setdatabase
+            WHERE setting.setrole = (
+                SELECT oid FROM pg_roles WHERE rolname = target_role
+            )
+              AND database.datname <> '{{ cp_database_name }}'
+        LOOP
+            EXECUTE format(
+                'ALTER ROLE %I IN DATABASE %I RESET ALL',
+                target_role,
+                unexpected_database
+            );
+            RAISE NOTICE 'VIVOLUTION_DB_CHANGED:role-other-database-settings';
+        END LOOP;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_db_role_setting setting
+            WHERE setting.setdatabase = (
+                      SELECT oid FROM pg_database
+                      WHERE datname = '{{ cp_database_name }}'
+                  )
+              AND setting.setrole = (
+                      SELECT oid FROM pg_roles WHERE rolname = target_role
+                  )
+              AND setting.setconfig = ARRAY[
+                    'search_path=' || target_search_path
+                  ]::text[]
+        ) THEN
+            EXECUTE format(
+                'ALTER ROLE %I IN DATABASE %I RESET ALL',
+                target_role,
+                '{{ cp_database_name }}'
+            );
+            EXECUTE format(
+                'ALTER ROLE %I IN DATABASE %I SET search_path TO %s',
+                target_role,
+                '{{ cp_database_name }}',
+                target_search_path
+            );
+            RAISE NOTICE 'VIVOLUTION_DB_CHANGED:role-search-path';
+        END IF;
+    END LOOP;
+END
+$vivolution$;
 
 DO $vivolution$
 BEGIN

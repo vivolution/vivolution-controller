@@ -96,12 +96,13 @@
               local running_image
               local nftables_runtime_digest
               local pg_database_acl_digest
+              local pg_semantic_state_digest
               local pg_role_count
               local pg_scram_digest
               local rls_key_count
               local rls_key_state_digest
 
-              printf 'schema|vivolution-cp1-state-v2\n'
+              printf 'schema|vivolution-cp1-state-v3\n'
 
               active_release="$(tr -d '\r\n' </etc/vivolution/active-release)"
               test "$active_release" != ""
@@ -244,6 +245,108 @@
               )"
               [[ "$pg_database_acl_digest" =~ ^[0-9a-f]{64}$ ]]
               printf 'database|owner-acl|%s\n' "$pg_database_acl_digest"
+
+              pg_semantic_state_digest="$(
+                  runuser --user postgres -- \
+                      psql -XAtq --set=ON_ERROR_STOP=1 \
+                      --dbname='{{ cp_database_name }}' \
+                      --command="
+                          WITH facts AS (
+                              SELECT 'role|' || rolname || '|' || rolcanlogin::text || '|' ||
+                                     rolinherit::text || '|' || rolsuper::text || '|' ||
+                                     rolcreatedb::text || '|' || rolcreaterole::text || '|' ||
+                                     rolreplication::text || '|' || rolbypassrls::text AS fact
+                              FROM pg_roles
+                              WHERE rolname IN ('{{ cp_db_owner }}', '{{ cp_db_runtime_user }}')
+                              UNION ALL
+                              SELECT 'role-setting|' || role.rolname || '|' ||
+                                     COALESCE(database.datname, '<global>') || '|' ||
+                                     setting.setconfig::text
+                              FROM pg_db_role_setting setting
+                              JOIN pg_roles role ON role.oid = setting.setrole
+                              LEFT JOIN pg_database database ON database.oid = setting.setdatabase
+                              WHERE role.rolname IN ('{{ cp_db_owner }}', '{{ cp_db_runtime_user }}')
+                              UNION ALL
+                              SELECT 'membership|' || parent.rolname || '|' || member.rolname
+                              FROM pg_auth_members membership
+                              JOIN pg_roles parent ON parent.oid = membership.roleid
+                              JOIN pg_roles member ON member.oid = membership.member
+                              WHERE parent.rolname IN ('{{ cp_db_owner }}', '{{ cp_db_runtime_user }}')
+                                 OR member.rolname IN ('{{ cp_db_owner }}', '{{ cp_db_runtime_user }}')
+                              UNION ALL
+                              SELECT 'default-acl|' || owner.rolname || '|' ||
+                                     COALESCE(namespace.nspname, '<global>') || '|' ||
+                                     default_acl.defaclobjtype::text || '|' ||
+                                     default_acl.defaclacl::text
+                              FROM pg_default_acl default_acl
+                              JOIN pg_roles owner ON owner.oid = default_acl.defaclrole
+                              LEFT JOIN pg_namespace namespace
+                                ON namespace.oid = default_acl.defaclnamespace
+                              WHERE owner.rolname = '{{ cp_db_owner }}'
+                              UNION ALL
+                              SELECT 'schema|' || namespace.nspname || '|' ||
+                                     pg_get_userbyid(namespace.nspowner) || '|' ||
+                                     COALESCE(namespace.nspacl::text, '')
+                              FROM pg_namespace namespace
+                              WHERE namespace.nspname IN ('public', 'cp_security')
+                              UNION ALL
+                              SELECT 'relation|' || namespace.nspname || '|' ||
+                                     relation.relname || '|' || relation.relkind::text || '|' ||
+                                     pg_get_userbyid(relation.relowner) || '|' ||
+                                     relation.relrowsecurity::text || '|' ||
+                                     relation.relforcerowsecurity::text || '|' ||
+                                     COALESCE(relation.relacl::text, '')
+                              FROM pg_class relation
+                              JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+                              WHERE namespace.nspname IN ('public', 'cp_security')
+                              UNION ALL
+                              SELECT 'column|' || namespace.nspname || '|' ||
+                                     relation.relname || '|' || attribute.attname || '|' ||
+                                     attribute.attacl::text
+                              FROM pg_attribute attribute
+                              JOIN pg_class relation ON relation.oid = attribute.attrelid
+                              JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+                              WHERE namespace.nspname IN ('public', 'cp_security')
+                                AND attribute.attnum > 0
+                                AND NOT attribute.attisdropped
+                                AND attribute.attacl IS NOT NULL
+                              UNION ALL
+                              SELECT 'function|' || namespace.nspname || '|' ||
+                                     function.oid::regprocedure::text || '|' ||
+                                     pg_get_userbyid(function.proowner) || '|' ||
+                                     function.prosecdef::text || '|' ||
+                                     COALESCE(function.proconfig::text, '') || '|' ||
+                                     COALESCE(function.proacl::text, '')
+                              FROM pg_proc function
+                              JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
+                              WHERE namespace.nspname IN ('public', 'cp_security')
+                              UNION ALL
+                              SELECT 'policy|' || namespace.nspname || '|' ||
+                                     relation.relname || '|' || policy.polname || '|' ||
+                                     policy.polpermissive::text || '|' ||
+                                     policy.polcmd::text || '|' ||
+                                     policy.polroles::text || '|' ||
+                                     pg_get_expr(policy.polqual, policy.polrelid) || '|' ||
+                                     pg_get_expr(policy.polwithcheck, policy.polrelid)
+                              FROM pg_policy policy
+                              JOIN pg_class relation ON relation.oid = policy.polrelid
+                              JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+                              WHERE namespace.nspname = 'public'
+                              UNION ALL
+                              SELECT 'migration|' || app || '|' || name
+                              FROM django_migrations
+                              UNION ALL
+                              SELECT 'operator|' || username || '|' || password || '|' ||
+                                     is_active::text || '|' || is_staff::text || '|' ||
+                                     is_superuser::text
+                              FROM auth_user
+                          )
+                          SELECT fact FROM facts ORDER BY fact
+                      " |
+                      sha256sum | awk '{print $1}'
+              )"
+              [[ "$pg_semantic_state_digest" =~ ^[0-9a-f]{64}$ ]]
+              printf 'database|semantic-state|%s\n' "$pg_semantic_state_digest"
 
               rls_key_count="$(
                   runuser --user postgres -- \

@@ -473,6 +473,80 @@
         argv: [podman, image, exists, "{{ cp_old_controller_image }}"]
       changed_when: false
 
+- name: Inspect database state before the signed-only RLS cutover
+  ansible.builtin.command:
+    argv:
+      - psql
+      - -X
+      - --set=ON_ERROR_STOP=1
+      - --host={{ cp_db_upstream_host }}
+      - --port={{ cp_db_upstream_port }}
+      - --username={{ cp_db_owner }}
+      - --dbname={{ cp_database_name }}
+      - --no-password
+      - --no-align
+      - --tuples-only
+      - --quiet
+  args:
+    stdin: |
+      \set ON_ERROR_STOP on
+      SELECT (to_regclass('public.django_migrations') IS NOT NULL)::int
+          AS cp_has_migration_table \gset
+      \if :cp_has_migration_table
+      SELECT CASE
+        WHEN EXISTS (
+          SELECT 1 FROM django_migrations
+          WHERE app = 'core' AND name = '0004_signed_only_rls_context'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM django_migrations
+          WHERE app = 'core' AND name > '0004_signed_only_rls_context'
+        ) THEN 'signed-only'
+        WHEN EXISTS (
+          SELECT 1 FROM django_migrations
+          WHERE app = 'core' AND name = '0003_signed_rls_context'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM django_migrations
+          WHERE app = 'core' AND name > '0003_signed_rls_context'
+        ) THEN 'bridge-only'
+        ELSE 'unsupported'
+      END;
+      \else
+      SELECT 'empty';
+      \endif
+  environment:
+    PGPASSWORD: "{{ cp_db_owner_password }}"
+  register: cp_signed_rls_cutover_database_state
+  changed_when: false
+  no_log: true
+  when:
+    - cp_controller_require_signed_rls_cutover | bool
+    - cp_install_local_postgres | bool
+
+- name: Require a safe database lineage before any signed-only activation work
+  ansible.builtin.assert:
+    that:
+      - >-
+        (not (cp_controller_can_recover | bool) and
+         cp_signed_rls_cutover_database_state.stdout | trim == 'empty') or
+        (not (cp_controller_can_recover | bool) and
+         cp_controller_refresh_release_environment | bool and
+         cp_signed_rls_cutover_database_state.stdout | trim == 'signed-only') or
+        ((cp_controller_can_recover | bool) and
+         cp_signed_rls_cutover_database_state.stdout | trim in
+         ['bridge-only', 'signed-only'])
+      - >-
+        not (cp_controller_can_recover | bool) or
+        (cp_controller_is_release_change | bool) or
+        cp_signed_rls_cutover_database_state.stdout | trim == 'signed-only'
+    fail_msg: >-
+      Signed-only RLS activation requires an empty fresh database, an exact
+      same-target retry with runtime reconciliation enabled, the signed-capable
+      bridge, or the already-cut-over signed-only schema.
+  when:
+    - cp_controller_require_signed_rls_cutover | bool
+    - cp_install_local_postgres | bool
+  no_log: true
+
 - name: Reconcile protected target runtime environment without in-place drift
   when: cp_controller_refresh_release_environment | bool
   block:
@@ -510,6 +584,33 @@
         follow: false
         checksum_algorithm: sha256
       register: cp_controller_existing_runtime_environment_stat
+      no_log: true
+
+    - name: Require exact pre-copy artifacts for a signed-only no-marker retry
+      ansible.builtin.assert:
+        that:
+          - >-
+            (cp_target_controller_release_config_stat.stat.exists | default(false))
+          - >-
+             (cp_target_controller_image_record_stat.stat.exists | default(false)) and
+            cp_controller_existing_runtime_environment_stat.stat.isreg | default(false)
+          - >-
+            not (cp_controller_existing_runtime_environment_stat.stat.islnk | default(false))
+          - cp_controller_existing_runtime_environment_stat.stat.uid | default(-1) | int == 0
+          - cp_controller_existing_runtime_environment_stat.stat.gid | default(-1) | int == 0
+          - cp_controller_existing_runtime_environment_stat.stat.mode | default('') == '0600'
+          - cp_controller_existing_runtime_environment_stat.stat.nlink | default(-1) | int == 1
+          - >-
+            cp_controller_existing_runtime_environment_stat.stat.checksum | default('') ==
+            cp_controller_runtime_environment_candidate_stat.stat.checksum | default('')
+        fail_msg: >-
+          A signed-only no-marker retry requires the exact pre-existing image,
+          configuration directory, and private runtime environment. Nothing was changed.
+      when:
+        - cp_controller_require_signed_rls_cutover | bool
+        - cp_install_local_postgres | bool
+        - not (cp_controller_can_recover | bool)
+        - cp_signed_rls_cutover_database_state.stdout | trim == 'signed-only'
       no_log: true
 
     - name: Reject same-release runtime environment drift
@@ -611,6 +712,21 @@
       {{ cp_target_controller_runtime_env_key_lineage.content | b64decode |
          regex_findall('(?m)^RLS_CONTEXT_SIGNING_KEY=[0-9a-f]{64}$') }}
   when: cp_controller_is_release_change | bool
+  no_log: true
+
+- name: Require signed-capable N-1 recovery for a final release change
+  ansible.builtin.assert:
+    that:
+      - cp_old_controller_rls_key_lineage | length == 1
+      - cp_target_controller_rls_key_lineage | length == 1
+      - cp_old_controller_rls_key_lineage == cp_target_controller_rls_key_lineage
+    fail_msg: >-
+      The active N-1 release is not signed-RLS capable with the target key
+      lineage, so an irreversible final cutover is refused.
+  when:
+    - cp_controller_require_signed_rls_cutover | bool
+    - cp_install_local_postgres | bool
+    - cp_controller_is_release_change | bool
   no_log: true
 
 - name: Prove the database is still on the signed-RLS compatibility bridge
@@ -752,18 +868,11 @@
           - --entrypoint=python
           - "{{ cp_target_controller_image }}"
           - manage.py
-          - shell
-          - --command
-          - >-
-            from django.contrib.auth import get_user_model;
-            U=get_user_model();
-            u,created=U.objects.get_or_create(username='{{ cp_controller_admin_username }}',
-            defaults={'is_staff':True,'is_superuser':True});
-            created and (u.set_password(__import__('os').environ['DJANGO_SUPERUSER_PASSWORD']) or u.save());
-            print('VIVOLUTION_ADMIN_CREATED' if created else 'VIVOLUTION_ADMIN_PRESENT')
+          - reconcile_operator
+          - "{{ cp_controller_admin_username }}"
       register: cp_controller_initial_operator
       changed_when: >-
-        'VIVOLUTION_ADMIN_CREATED' in
+        'VIVOLUTION_ADMIN_RECONCILED' in
         (cp_controller_initial_operator.stdout | default(''))
       no_log: true
       when: cp_controller_create_initial_operator | bool

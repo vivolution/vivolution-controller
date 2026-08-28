@@ -19,8 +19,13 @@ for authentication_model in (User, Group):
         admin.site.unregister(authentication_model)
 
 
+class NoDeleteAdminMixin:
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(CustomerAccount)
-class CustomerAccountAdmin(admin.ModelAdmin):
+class CustomerAccountAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("name", "slug", "status", "updated_at")
     list_filter = ("status",)
     search_fields = ("name", "slug")
@@ -28,7 +33,7 @@ class CustomerAccountAdmin(admin.ModelAdmin):
 
 
 @admin.register(M365Tenant)
-class M365TenantAdmin(admin.ModelAdmin):
+class M365TenantAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("display_name", "customer_account", "entra_tenant_id", "status")
     list_filter = ("status",)
     search_fields = ("display_name", "primary_domain", "entra_tenant_id")
@@ -37,7 +42,7 @@ class M365TenantAdmin(admin.ModelAdmin):
 
 
 @admin.register(TenantContext)
-class TenantContextAdmin(admin.ModelAdmin):
+class TenantContextAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("name", "customer_account", "m365_tenant", "status")
     list_filter = ("status",)
     search_fields = ("name", "customer_account__name", "m365_tenant__display_name")
@@ -46,7 +51,7 @@ class TenantContextAdmin(admin.ModelAdmin):
 
 
 @admin.register(EdgeCluster)
-class EdgeClusterAdmin(admin.ModelAdmin):
+class EdgeClusterAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("name", "service_mode", "exclusive_customer_account", "region", "status")
     list_filter = ("service_mode", "status", "region")
     search_fields = ("name",)
@@ -55,7 +60,7 @@ class EdgeClusterAdmin(admin.ModelAdmin):
 
 
 @admin.register(EdgeNode)
-class EdgeNodeAdmin(admin.ModelAdmin):
+class EdgeNodeAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("name", "cluster", "node_index", "architecture", "status", "last_seen_at")
     list_filter = ("architecture", "status")
     search_fields = ("name", "cluster__name")
@@ -64,7 +69,7 @@ class EdgeNodeAdmin(admin.ModelAdmin):
 
 
 @admin.register(ConfigurationVersion)
-class ConfigurationVersionAdmin(admin.ModelAdmin):
+class ConfigurationVersionAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("tenant_context", "version", "state", "artifact_digest", "published_at")
     list_filter = ("state",)
     search_fields = ("tenant_context__name", "artifact_digest")
@@ -93,4 +98,7 @@ class AuditEventAdmin(admin.ModelAdmin):
         return False
 
     def has_delete_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
         return False

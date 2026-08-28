@@ -158,6 +158,30 @@
           ansible.builtin.set_fact:
             cp_restore_database_created_by_run: true
 
+        - name: Harden isolated restore database access and managed role settings
+          become_user: postgres
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - "--dbname={{ cp_restore_database_name }}"
+          args:
+            stdin: |
+              REVOKE ALL PRIVILEGES ON DATABASE "{{ cp_restore_database_name }}" FROM PUBLIC;
+              GRANT CONNECT ON DATABASE "{{ cp_restore_database_name }}"
+                  TO "{{ cp_db_runtime_user }}";
+              ALTER ROLE "{{ cp_db_owner }}" IN DATABASE "{{ cp_restore_database_name }}"
+                  RESET ALL;
+              ALTER ROLE "{{ cp_db_owner }}" IN DATABASE "{{ cp_restore_database_name }}"
+                  SET search_path TO public, pg_catalog;
+              ALTER ROLE "{{ cp_db_runtime_user }}" IN DATABASE "{{ cp_restore_database_name }}"
+                  RESET ALL;
+              ALTER ROLE "{{ cp_db_runtime_user }}" IN DATABASE "{{ cp_restore_database_name }}"
+                  SET search_path TO pg_catalog, public;
+          changed_when: true
+          no_log: true
+
         - name: Restore qualification dump into isolated database
           ansible.builtin.command:
             argv:
@@ -215,6 +239,8 @@
               - --no-align
               - --tuples-only
               - --quiet
+              - "--set=runtime_role={{ cp_db_runtime_user }}"
+              - "--set=owner_role={{ cp_db_owner }}"
           args:
             stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/restore-integrity-check.sql') }}"
           environment:
@@ -226,7 +252,9 @@
         - name: Require restored controller integrity
           ansible.builtin.assert:
             that:
-              - cp_restore_integrity.stdout | trim == 'true|true|3|true|true|true'
+              - >-
+                cp_restore_integrity.stdout | trim ==
+                'true|true|true|true|true|true|true|true|true'
             fail_msg: Restored controller database failed schema, operator, or RLS integrity checks.
 
         - name: Exercise restored tenant RLS through runtime identity
@@ -257,8 +285,9 @@
             that:
               - >-
                 cp_restored_rls_check.stdout_lines ==
-                ['0|0|0', '0|0|0', '0|0|0', '0|0|0',
-                 '1|0|1|0|1|0', '1', '0', '0|1|0|1|0|1', '2|2|2', '0']
+                ['0|0|0', '0|0|0|0', '0|0|0', '0|0|0', '0|0|0',
+                 '1|0|1|0|1|0', '1|1|0|0', '0', '0', '1', '0',
+                 '0|1|0|1|0|1', '2|2|2', '2|2|0|0', '1', '1', '0']
             fail_msg: Restored database did not preserve tenant row-level isolation.
 
       always:

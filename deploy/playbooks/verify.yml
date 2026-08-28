@@ -11,6 +11,22 @@
       ansible.builtin.include_role:
         name: preflight
 
+    - name: Require final signed-only local security profile
+      ansible.builtin.assert:
+        that:
+          - cp_postgres_enforce_least_privilege | default(false) | bool
+          - cp_controller_require_signed_rls_cutover | default(false) | bool
+        fail_msg: >-
+          Final local verification requires the signed-only cutover guard and
+          explicit least-privilege PostgreSQL reconciliation.
+      when: cp_install_local_postgres | bool
+
+    - name: Independently prove the exact PostgreSQL ACL contract without mutation
+      ansible.builtin.include_role:
+        name: postgres_local
+        tasks_from: runtime_privileges_check.yml
+      when: cp_install_local_postgres | bool
+
     - name: Verify controller hostname
       ansible.builtin.assert:
         that: ansible_facts['hostname'] == cp_expected_hostname
@@ -558,9 +574,32 @@
             that:
               - >-
                 cp_rls_check.stdout_lines ==
-                ['0|0|0', '0|0|0', '0|0|0', '0|0|0',
-                 '1|0|1|0|1|0', '1', '0', '0|1|0|1|0|1', '2|2|2', '0']
+                ['0|0|0', '0|0|0|0', '0|0|0', '0|0|0', '0|0|0',
+                 '1|0|1|0|1|0', '1|1|0|0', '0', '0', '1', '0',
+                 '0|1|0|1|0|1', '2|2|2', '2|2|0|0', '1', '1', '0']
             fail_msg: PostgreSQL row-level tenant isolation did not match the expected visibility matrix.
+
+        - name: Exercise signed RLS through the deployed Django ORM
+          ansible.builtin.command:
+            argv:
+              - podman
+              - exec
+              - --interactive
+              - vivolution-cp-web
+              - python
+              - '-'
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-orm-check.py') }}"
+          register: cp_rls_orm_check
+          changed_when: false
+
+        - name: Require tenant-safe ORM joins and nested signed scopes
+          ansible.builtin.assert:
+            that:
+              - >-
+                'CP_ORM_RLS_OK=signed-tenant-joins-and-operator' in
+                (cp_rls_orm_check.stdout | default(''))
+            fail_msg: The deployed Django ORM did not preserve signed tenant isolation.
       always:
         - name: Remove deterministic RLS qualification fixtures
           ansible.builtin.command:

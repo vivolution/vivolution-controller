@@ -18,6 +18,11 @@ SELECT
     (SELECT count(*) FROM core_tenantcontext) || '|' ||
     (SELECT count(*) FROM core_configurationversion) || '|' ||
     (SELECT count(*) FROM core_auditevent);
+SELECT
+    (SELECT count(*) FROM core_customeraccount) || '|' ||
+    (SELECT count(*) FROM core_m365tenant) || '|' ||
+    (SELECT count(*) FROM core_edgecluster) || '|' ||
+    (SELECT count(*) FROM core_edgenode);
 
 -- The legacy caller-controlled settings no longer grant either tenant or operator rights.
 SET LOCAL app.is_operator = 'true';
@@ -71,6 +76,29 @@ SELECT
     (SELECT count(*) FROM core_configurationversion WHERE id = '00000000-0000-4000-8000-0000000000b4') || '|' ||
     (SELECT count(*) FROM core_auditevent WHERE id = '00000000-0000-4000-8000-0000000000a5') || '|' ||
     (SELECT count(*) FROM core_auditevent WHERE id = '00000000-0000-4000-8000-0000000000b5');
+SELECT
+    (SELECT count(*) FROM core_customeraccount) || '|' ||
+    (SELECT count(*) FROM core_m365tenant) || '|' ||
+    (SELECT count(*) FROM core_edgecluster) || '|' ||
+    (SELECT count(*) FROM core_edgenode);
+-- Tenant-linked customer/M365 metadata remains readable for ORM joins, while
+-- the operator-only DML policy keeps those same rows non-writable.
+WITH updated AS (
+    UPDATE core_customeraccount
+    SET status = 'SUSPENDED'
+    WHERE id = '00000000-0000-4000-8000-0000000000a0'
+    RETURNING 1
+)
+SELECT count(*) FROM updated;
+WITH updated AS (
+    UPDATE core_tenantcontext
+    SET customer_account_id = '00000000-0000-4000-8000-0000000000b0',
+        m365_tenant_id = '00000000-0000-4000-8000-0000000000b2',
+        status = 'SUSPENDED'
+    WHERE id = '00000000-0000-4000-8000-0000000000a1'
+    RETURNING 1
+)
+SELECT count(*) FROM updated;
 
 -- Same-tenant UPDATE succeeds; cross-tenant UPDATE is invisible and affects zero rows.
 WITH updated AS (
@@ -140,10 +168,41 @@ SELECT
     (SELECT count(*) FROM core_tenantcontext) || '|' ||
     (SELECT count(*) FROM core_configurationversion) || '|' ||
     (SELECT count(*) FROM core_auditevent);
+SELECT
+    (SELECT count(*) FROM core_customeraccount) || '|' ||
+    (SELECT count(*) FROM core_m365tenant) || '|' ||
+    (SELECT count(*) FROM core_edgecluster) || '|' ||
+    (SELECT count(*) FROM core_edgenode);
+WITH updated AS (
+    UPDATE core_customeraccount
+    SET status = 'SUSPENDED'
+    WHERE id = '00000000-0000-4000-8000-0000000000a0'
+    RETURNING 1
+)
+SELECT count(*) FROM updated;
+WITH updated AS (
+    UPDATE core_tenantcontext
+    SET status = 'SUSPENDED'
+    WHERE id = '00000000-0000-4000-8000-0000000000a1'
+    RETURNING 1
+)
+SELECT count(*) FROM updated;
 
--- The runtime identity can invoke the validator through policies but cannot read its key.
-SELECT has_table_privilege(
-    current_user, 'cp_security.rls_signing_key', 'SELECT'
+-- The runtime identity can invoke the validator through policies but has no
+-- table- or column-level path to the signing key.
+SELECT (
+    has_table_privilege(
+        current_user, 'cp_security.rls_signing_key', 'SELECT'
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_attribute attribute
+        CROSS JOIN LATERAL aclexplode(attribute.attacl) privilege
+        WHERE attribute.attrelid = 'cp_security.rls_signing_key'::regclass
+          AND attribute.attacl IS NOT NULL
+          AND privilege.grantee = (
+              SELECT oid FROM pg_roles WHERE rolname = current_user
+          )
+    )
 )::int;
 
 ROLLBACK;

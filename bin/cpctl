@@ -19,6 +19,10 @@ vulnerability_archive=""
 vulnerability_source_archive=""
 vulnerability_source_directory=""
 vulnerability_rootfs=""
+rollback_qualification_active=false
+rollback_qualification_final_release=""
+rollback_qualification_n1_release=""
+rollback_qualification_recovery_outcome=not-required
 
 hash_file() {
     hash_output="$(shasum -a 256 "$1")"
@@ -63,7 +67,7 @@ controller_source_manifest() {
         trap 'rm -f "$source_list" "$sorted_source_list" "$symlink_list"' \
             EXIT HUP INT TERM
         for required_source_file in \
-            .dockerignore Containerfile constraints.txt entrypoint.sh manage.py requirements.lock; do
+            .dockerignore Containerfile RELEASE_NOTES.md constraints.txt entrypoint.sh manage.py requirements.lock; do
             [ -f "$required_source_file" ] && [ ! -L "$required_source_file" ] || {
                 printf 'Unsafe or missing controller source: %s\n' "$required_source_file" >&2
                 exit 1
@@ -77,6 +81,7 @@ controller_source_manifest() {
         printf '%s\n' \
             .dockerignore \
             Containerfile \
+            RELEASE_NOTES.md \
             constraints.txt \
             entrypoint.sh \
             manage.py \
@@ -149,6 +154,7 @@ usage() {
         '  admin-test Prove the real HTTPS administrator login flow' \
         '  bridge-test Prove signed and N-1 RLS bridge compatibility' \
         '  bridge-qualify Deploy and seal the one-release RLS bridge' \
+        '  rollback-qualify Seal a final to N-1 to final recovery cycle' \
         '  vulnerability-test Scan source dependencies and the exact live image' \
         '  verify     Run the CP1 acceptance checks' \
         '  qualify    Run the complete CP1 foundation qualification suite'
@@ -1519,6 +1525,52 @@ state_fingerprint_from_log() {
     printf '%s\n' "$state_fingerprint"
 }
 
+ensure_rollback_qualification_final() {
+    rollback_ensure_prefix="$1"
+    rollback_ensure_status=0
+
+    if run_logged "$evidence_dir/$rollback_ensure_prefix-final-before.log" \
+        protected_playbook \
+        --extra-vars \
+        "cp_expected_active_release=$rollback_qualification_final_release" \
+        --extra-vars \
+        "cp_expected_previous_release=$rollback_qualification_n1_release" \
+        "$DEPLOY_DIR/playbooks/qualify-active-release.yml"; then
+        rollback_qualification_active=false
+        rollback_qualification_recovery_outcome=passed
+        return 0
+    else
+        rollback_ensure_status=$?
+    fi
+
+    if run_logged "$evidence_dir/$rollback_ensure_prefix-force-final.log" \
+        protected_playbook \
+        --extra-vars "cp_recovery_release_id=$rollback_qualification_final_release" \
+        --extra-vars \
+        "cp_recovery_previous_release_id=$rollback_qualification_n1_release" \
+        "$DEPLOY_DIR/playbooks/recover-exact-release.yml"; then
+        :
+    else
+        rollback_qualification_recovery_outcome=failed
+        return 1
+    fi
+
+    if ! run_logged "$evidence_dir/$rollback_ensure_prefix-final-after.log" \
+        protected_playbook \
+        --extra-vars \
+        "cp_expected_active_release=$rollback_qualification_final_release" \
+        --extra-vars \
+        "cp_expected_previous_release=$rollback_qualification_n1_release" \
+        "$DEPLOY_DIR/playbooks/qualify-active-release.yml"; then
+        rollback_qualification_recovery_outcome=failed
+        return 1
+    fi
+
+    rollback_qualification_active=false
+    rollback_qualification_recovery_outcome=final-restored-with-errors
+    return "$rollback_ensure_status"
+}
+
 require_successful_install_recap() {
     install_log="$1"
     require_zero_changes="${2:-false}"
@@ -1557,6 +1609,15 @@ require_successful_install_recap() {
 seal_failed_qualification() {
     qualification_status="${1:-1}"
     trap - EXIT HUP INT TERM
+    if [ "${rollback_qualification_active:-false}" = true ]; then
+        if ensure_rollback_qualification_final rollback-failure-recovery; then
+            rollback_qualification_recovery_outcome=passed
+        elif [ "${rollback_qualification_active:-true}" = false ]; then
+            rollback_qualification_recovery_outcome=final-restored-with-errors
+        else
+            rollback_qualification_recovery_outcome=failed
+        fi
+    fi
     cleanup_vulnerability_inputs
     if [ "${evidence_sealed:-false}" != true ] && [ -n "${evidence_dir:-}" ] &&
         [ -d "$evidence_dir" ]; then
@@ -1567,6 +1628,8 @@ seal_failed_qualification() {
             printf 'source_commit=%s\n' "${CP_SOURCE_COMMIT:-unknown}"
             printf 'project_source_sha256=%s\n' "${CP_PROJECT_SOURCE_SHA256:-unknown}"
             printf 'controller_release=%s\n' "${CP_CONTROLLER_RELEASE:-unknown}"
+            printf 'rollback_recovery=%s\n' \
+                "${rollback_qualification_recovery_outcome:-not-required}"
         } > "$evidence_dir/RESULT"
         finalize_evidence || true
     fi
@@ -1701,6 +1764,146 @@ case "$command_name" in
         disarm_qualification_traps
         printf 'CP1 RLS compatibility bridge passed. Evidence: %s\n' "$evidence_dir"
         ;;
+    rollback-qualify)
+        umask 077
+        arm_qualification_traps
+        begin_evidence
+        run_logged "$evidence_dir/static-preflight.log" static_checks
+        run_logged "$evidence_dir/final-before-cycle.log" protected_playbook \
+            --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+            "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
+        run_logged "$evidence_dir/release-lineage.log" protected_playbook \
+            --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+            "$DEPLOY_DIR/playbooks/qualify-release-lineage.yml"
+        rollback_previous_release="$(
+            sed -n 's/.*CP_PREVIOUS_RELEASE=\(cp1-[0-9a-f][0-9a-f]*\).*/\1/p' \
+                "$evidence_dir/release-lineage.log" | tail -n 1
+        )"
+        printf '%s\n' "$rollback_previous_release" | \
+            grep -Eq '^cp1-[0-9a-f]{64}$' || {
+                printf 'A valid N-1 release was not recorded for rollback qualification.\n' >&2
+                exit 1
+            }
+        [ "$rollback_previous_release" != "$CP_CONTROLLER_RELEASE" ] || {
+            printf 'Rollback qualification requires a distinct N-1 release.\n' >&2
+            exit 1
+        }
+
+        rollback_qualification_final_release="$CP_CONTROLLER_RELEASE"
+        rollback_qualification_n1_release="$rollback_previous_release"
+        rollback_qualification_active=true
+        rollback_cycle_status=0
+        if run_logged "$evidence_dir/rollback-to-n1.log" rollback_playbook; then
+            :
+        else
+            rollback_cycle_status=$?
+        fi
+
+        rollback_n1_exact=false
+        if run_logged "$evidence_dir/n1-active-release.log" protected_playbook \
+            --extra-vars "cp_expected_active_release=$rollback_previous_release" \
+            "$DEPLOY_DIR/playbooks/qualify-active-release.yml"; then
+            rollback_n1_exact=true
+        else
+            [ "$rollback_cycle_status" -ne 0 ] || rollback_cycle_status=1
+        fi
+
+        if [ "$rollback_cycle_status" -eq 0 ]; then
+            run_logged "$evidence_dir/n1-signed-only-verify.log" playbook \
+                "$DEPLOY_DIR/playbooks/verify.yml" || rollback_cycle_status=$?
+        fi
+        if [ "$rollback_cycle_status" -eq 0 ]; then
+            run_logged "$evidence_dir/n1-admin-login.log" protected_playbook \
+                "$DEPLOY_DIR/playbooks/qualify-admin-login.yml" || \
+                rollback_cycle_status=$?
+        fi
+
+        if [ "$rollback_n1_exact" = true ]; then
+            if run_logged "$evidence_dir/rollback-to-final.log" rollback_playbook; then
+                :
+            else
+                rollback_to_final_status=$?
+                [ "$rollback_cycle_status" -ne 0 ] || \
+                    rollback_cycle_status=$rollback_to_final_status
+            fi
+        fi
+
+        rollback_return_status=0
+        if ensure_rollback_qualification_final rollback-cycle-return; then
+            :
+        else
+            rollback_return_status=$?
+            [ "$rollback_cycle_status" -ne 0 ] || \
+                rollback_cycle_status=$rollback_return_status
+        fi
+        if [ "$rollback_qualification_active" = false ]; then
+            run_logged "$evidence_dir/final-after-cycle.log" protected_playbook \
+                --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+                "$DEPLOY_DIR/playbooks/qualify-active-release.yml" || \
+                rollback_cycle_status=$?
+            run_logged "$evidence_dir/final-signed-only-verify.log" playbook \
+                "$DEPLOY_DIR/playbooks/verify.yml" || rollback_cycle_status=$?
+            run_logged "$evidence_dir/final-admin-login.log" protected_playbook \
+                "$DEPLOY_DIR/playbooks/qualify-admin-login.yml" || \
+                rollback_cycle_status=$?
+
+            if [ "$rollback_cycle_status" -eq 0 ]; then
+                rollback_qualification_active=true
+                run_logged "$evidence_dir/interrupted-lineage-injection.log" \
+                    protected_playbook \
+                    --extra-vars \
+                    "cp_expected_active_release=$rollback_qualification_final_release" \
+                    --extra-vars \
+                    "cp_expected_previous_release=$rollback_qualification_n1_release" \
+                    "$DEPLOY_DIR/playbooks/qualify-interrupted-rollback-state.yml" || \
+                    rollback_cycle_status=$?
+            fi
+            if [ "$rollback_cycle_status" -eq 0 ]; then
+                run_logged "$evidence_dir/interrupted-lineage-force-recovery.log" \
+                    protected_playbook \
+                    --extra-vars \
+                    "cp_recovery_release_id=$rollback_qualification_final_release" \
+                    --extra-vars \
+                    "cp_recovery_previous_release_id=$rollback_qualification_n1_release" \
+                    "$DEPLOY_DIR/playbooks/recover-exact-release.yml" || \
+                    rollback_cycle_status=$?
+            fi
+            if [ "$rollback_cycle_status" -eq 0 ]; then
+                run_logged "$evidence_dir/interrupted-lineage-recovered.log" \
+                    protected_playbook \
+                    --extra-vars \
+                    "cp_expected_active_release=$rollback_qualification_final_release" \
+                    --extra-vars \
+                    "cp_expected_previous_release=$rollback_qualification_n1_release" \
+                    "$DEPLOY_DIR/playbooks/qualify-active-release.yml" || \
+                    rollback_cycle_status=$?
+                if [ "$rollback_cycle_status" -eq 0 ]; then
+                    rollback_qualification_active=false
+                    rollback_qualification_recovery_outcome=passed
+                fi
+            fi
+        else
+            [ "$rollback_cycle_status" -ne 0 ] || rollback_cycle_status=1
+        fi
+        [ "$rollback_cycle_status" -eq 0 ] || exit "$rollback_cycle_status"
+        verify_source_snapshot
+        {
+            printf 'result=passed\n'
+            printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'run_id=%s\n' "$CP_EVIDENCE_RUN_ID"
+            printf 'source_commit=%s\n' "$CP_SOURCE_COMMIT"
+            printf 'project_source_sha256=%s\n' "$CP_PROJECT_SOURCE_SHA256"
+            printf 'controller_release=%s\n' "$CP_CONTROLLER_RELEASE"
+            printf 'n1_release=%s\n' "$rollback_previous_release"
+            printf 'signed_only_rls=passed\n'
+            printf 'final_n1_final_rollback_cycle=passed\n'
+            printf 'interrupted_lineage_force_recovery=passed\n'
+            printf 'admin_https_login_at_both_ends=passed\n'
+        } > "$evidence_dir/RESULT"
+        finalize_evidence
+        disarm_qualification_traps
+        printf 'CP1 N-1 rollback qualification passed. Evidence: %s\n' "$evidence_dir"
+        ;;
     resource-test)
         umask 077
         arm_qualification_traps
@@ -1824,6 +2027,9 @@ case "$command_name" in
             printf 'project_source_sha256=%s\n' "$CP_PROJECT_SOURCE_SHA256"
             printf 'controller_release=%s\n' "$CP_CONTROLLER_RELEASE"
             printf 'bounded_state_idempotency=passed\n'
+            printf 'signed_only_rls=passed\n'
+            printf 'runtime_least_privilege=passed\n'
+            printf 'n1_rollback_cycle=pending-separate-required-gate\n'
             printf 'admin_https_login=passed\n'
             printf 'high_critical_vulnerabilities=none\n'
             printf 'ansible=%s\n' "$(ansible --version | sed -n '1p')"
@@ -1831,7 +2037,8 @@ case "$command_name" in
         } >"$evidence_dir/RESULT"
         finalize_evidence
         disarm_qualification_traps
-        printf 'CP1 local release qualification passed. Evidence: %s\n' "$evidence_dir"
+        printf '%s\n' \
+            "CP1 local qualification suite passed; the separate N-1 rollback gate is still required. Evidence: $evidence_dir"
         ;;
     -h|--help|help|'')
         usage

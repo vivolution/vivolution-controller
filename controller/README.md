@@ -46,8 +46,9 @@ The URL parser passes through only PostgreSQL's `sslmode`, `sslrootcert`, `sslce
 
 ## Database and RLS contract
 
-Migrations `0002_enable_rls` and `0003_signed_rls_context` enable RLS and install the
-signed-context validator on:
+Migrations `0002_enable_rls`, `0003_signed_rls_context`, and
+`0004_signed_only_rls_context` enable RLS, install the signed-context validator,
+and remove the temporary legacy authorization clauses on:
 
 - `TenantContext` (scope column is its immutable UUID primary key);
 - `ConfigurationVersion`;
@@ -60,13 +61,18 @@ transaction-local operator context. PostgreSQL validates signed contexts against
 stored in the owner-only `cp_security` schema. No HTTP tenant-header shortcut exists because
 an unverified header is not an authorization boundary.
 
-Migration `0003` is intentionally the one-release compatibility bridge: its policies accept
-the signed context and the preceding release's transaction-local legacy settings, while this
-bridge application emits both. That keeps the pre-bridge image recoverable during the schema
-transition. The next migration removes the legacy clauses only after this signed-capable
-release has been deployed and verified as N-1. Until that migration lands, raw SQL can still
-self-select the legacy operator setting, so the bridge is a recovery mechanism—not the final
-SQL-injection containment boundary.
+Migration `0003` was the one-release compatibility bridge: its policies accepted the signed
+context and the preceding release's transaction-local legacy settings while the bridge
+application emitted both. Migration `0004` is the irreversible cutover to signed-only
+authorization after that signed-capable bridge was deployed and proven recoverable as N-1.
+Caller-controlled `app.is_operator` and `app.tenant_context_id` settings no longer grant
+access.
+
+Tenant contexts can read only the `CustomerAccount` and `M365Tenant` rows linked to their
+own visible context so normal ORM joins remain usable. Those metadata policies and tenant
+access to `TenantContext` are `SELECT`-only; every tenant-context/customer/M365 write and all
+edge-inventory access require a valid signed operator context. The catalog contract is ten
+explicit policies across seven tables.
 
 After migrations, the schema owner must synchronize the database copy of the independent key
 before starting the runtime process:
@@ -121,8 +127,9 @@ gunicorn cp1.wsgi:application --bind 127.0.0.1:8000
 Endpoints:
 
 - `GET /health/live` proves the process can answer without touching PostgreSQL.
-- `GET /health/ready` proves PostgreSQL is reachable, migration `0003` is recorded, and the
-  application signing key matches the owner-only database copy.
+- `GET /health/ready` proves PostgreSQL is reachable, migration `0004` is recorded, the
+  application signing key matches the owner-only database copy, and the exact ten-policy
+  signed-only catalog is intact.
 - `/admin/` is the initial operator UI.
 
 ## Container

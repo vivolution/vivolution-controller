@@ -1,0 +1,66 @@
+---
+- name: Record the active and N-1 CP1 release lineage
+  hosts: controllers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Validate expected active release
+      ansible.builtin.assert:
+        that:
+          - >-
+            cp_expected_active_release is not defined or
+            cp_expected_active_release is match('^cp1-[0-9a-f]{64}$')
+
+    - name: Inspect active and previous release markers
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - /etc/vivolution/active-release
+        - /etc/vivolution/previous-release
+      register: cp_release_lineage_markers
+
+    - name: Require safe release lineage markers
+      ansible.builtin.assert:
+        that:
+          - item.stat.isreg | default(false)
+          - not (item.stat.islnk | default(false))
+          - item.stat.uid | default(-1) | int == 0
+          - item.stat.gid | default(-1) | int == 0
+          - item.stat.mode | default('') == '0644'
+          - item.stat.nlink | default(-1) | int == 1
+      loop: "{{ cp_release_lineage_markers.results }}"
+
+    - name: Read active and previous release markers
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - /etc/vivolution/active-release
+        - /etc/vivolution/previous-release
+      register: cp_release_lineage_files
+
+    - name: Select active and previous release lineage
+      ansible.builtin.set_fact:
+        cp_release_lineage_active: >-
+          {{ cp_release_lineage_files.results[0].content | b64decode | trim }}
+        cp_release_lineage_previous: >-
+          {{ cp_release_lineage_files.results[1].content | b64decode | trim }}
+
+    - name: Require a distinct immutable N-1 release
+      ansible.builtin.assert:
+        that:
+          - cp_release_lineage_active is match('^cp1-[0-9a-f]{64}$')
+          - cp_release_lineage_previous is match('^cp1-[0-9a-f]{64}$')
+          - cp_release_lineage_previous != cp_release_lineage_active
+
+    - name: Report sanitized release lineage
+      ansible.builtin.debug:
+        msg: >-
+          CP_ACTIVE_RELEASE={{ cp_release_lineage_active }}
+          CP_PREVIOUS_RELEASE={{ cp_release_lineage_previous }}
+
+    - name: Require the requested release to be active
+      ansible.builtin.assert:
+        that:
+          - cp_release_lineage_active == cp_expected_active_release
+      when: cp_expected_active_release is defined

@@ -1,6 +1,8 @@
 cp_profile: lab
 cp_expected_hostname: vivo-cp1-lab
 cp_install_local_postgres: true
+cp_postgres_enforce_least_privilege: true
+cp_controller_require_signed_rls_cutover: true
 
 cp_database_name: vivolution
 cp_db_owner: vivo_owner

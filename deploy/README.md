@@ -32,6 +32,8 @@ bin/cpctl resource-test
 bin/cpctl secret-test
 bin/cpctl admin-test
 bin/cpctl bridge-test
+bin/cpctl bridge-qualify
+bin/cpctl rollback-qualify
 bin/cpctl vulnerability-test
 bin/cpctl qualify
 bin/cpctl verify-evidence deploy/evidence/<run-id>
@@ -119,7 +121,11 @@ linked, or unsigned evidence files.
 
 The compatibility `bridge-qualify` command intentionally records
 `security_release_gate=transitional-not-passed`. Only the later signed-only
-release may run the complete `qualify` gate.
+release may run the complete `qualify` gate. `qualify` records that the distinct
+N-1 rollback gate is still pending; `rollback-qualify` separately proves and
+signs the exact final → N-1 → final cycle, verifies HTTPS/admin behavior at both
+ends, and force-recovers the final immutable release and canonical marker pair
+if any normal rollback step is interrupted.
 
 `deploy/.state` is mode-protected and excluded from version control. Commands
 use `no_log` for secret-bearing Ansible tasks. The initial lab uses

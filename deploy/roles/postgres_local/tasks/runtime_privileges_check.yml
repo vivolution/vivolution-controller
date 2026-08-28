@@ -1,0 +1,43 @@
+---
+- name: Independently check the runtime privilege contract
+  block:
+    - name: Render read-only runtime privilege contract SQL
+      ansible.builtin.template:
+        src: runtime-privileges.sql.j2
+        dest: /run/vivolution-db-runtime-privileges-check.sql
+        owner: postgres
+        group: postgres
+        mode: '0600'
+      vars:
+        cp_runtime_privileges_reconcile: false
+      changed_when: false
+
+    - name: Prove the exact runtime privilege contract without reconciliation
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - --set=ON_ERROR_STOP=1
+          - "--dbname={{ cp_database_name }}"
+          - --file=/run/vivolution-db-runtime-privileges-check.sql
+      register: cp_db_runtime_privilege_check_result
+      changed_when: false
+
+    - name: Require a clean read-only runtime privilege result
+      ansible.builtin.assert:
+        that:
+          - >-
+            'CP_RUNTIME_PRIVILEGES_OK=file-sessions-auth-readonly-core-dml' in
+            (cp_db_runtime_privilege_check_result.stdout | default(''))
+          - >-
+            'VIVOLUTION_DB_CHANGED:' not in
+            ((cp_db_runtime_privilege_check_result.stdout | default('')) ~
+             (cp_db_runtime_privilege_check_result.stderr | default('')))
+        fail_msg: The live PostgreSQL ACL contract is incomplete or unexpectedly mutable.
+  always:
+    - name: Remove read-only runtime privilege contract SQL
+      ansible.builtin.file:
+        path: /run/vivolution-db-runtime-privileges-check.sql
+        state: absent
+      changed_when: false

@@ -1,0 +1,19 @@
+---
+- import_playbook: qualify-active-release.yml
+
+- name: Simulate the marker state left by an interrupted rollback rescue
+  hosts: controllers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Write the guarded final/final interrupted-lineage state
+      ansible.builtin.copy:
+        dest: /etc/vivolution/previous-release
+        owner: root
+        group: root
+        mode: '0644'
+        content: "{{ cp_expected_active_release }}\n"
+
+    - name: Report the deliberate interrupted-lineage fixture
+      ansible.builtin.debug:
+        msg: CP_INTERRUPTED_ROLLBACK_STATE=final-final
