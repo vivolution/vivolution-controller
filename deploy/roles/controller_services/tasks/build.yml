@@ -57,7 +57,7 @@
            rejectattr('path', 'search', '/__pycache__/') |
            rejectattr('path', 'match', '.*\\.py[co]$') |
            rejectattr('path', 'match', '.*/\\.DS_Store$') | list))
-         | sort(attribute='path') }}
+         | sort(attribute='path', case_sensitive=true) }}
 
 - name: Require complete, regular, link-free controller source allowlist
   ansible.builtin.assert:
