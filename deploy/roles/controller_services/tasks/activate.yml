@@ -2,15 +2,85 @@
 - name: Capture immutable target release facts
   ansible.builtin.set_fact:
     cp_target_controller_release: "{{ cp_controller_release_id }}"
-    cp_target_controller_image: "{{ cp_controller_image }}"
+    cp_target_controller_image_record: >-
+      {{ cp_controller_release_config_root }}/{{ cp_controller_release_id }}/image
     cp_target_controller_runtime_env: >-
       {{ cp_controller_release_config_root }}/{{ cp_controller_release_id }}/runtime.env
-    cp_target_controller_migrate_env: >-
-      {{ cp_controller_release_config_root }}/{{ cp_controller_release_id }}/migrate.env
+    cp_target_controller_release_root: >-
+      /var/lib/vivolution/releases/{{ cp_controller_release_id }}/controller
+    cp_target_controller_release_manifest: >-
+      /var/lib/vivolution/releases/{{ cp_controller_release_id }}/controller/.vivolution-source-manifest.sha256
+
+- name: Inspect protected release configuration root
+  ansible.builtin.stat:
+    path: "{{ cp_controller_release_config_root }}"
+    follow: false
+  register: cp_controller_release_config_root_stat
+
+- name: Inspect target release configuration directory
+  ansible.builtin.stat:
+    path: "{{ cp_controller_release_config_root }}/{{ cp_controller_release_id }}"
+    follow: false
+  register: cp_target_controller_release_config_stat
+
+- name: Require safe release configuration paths
+  ansible.builtin.assert:
+    that:
+      - cp_controller_release_config_root_stat.stat.isdir | default(false)
+      - not (cp_controller_release_config_root_stat.stat.islnk | default(false))
+      - cp_controller_release_config_root_stat.stat.uid | default(-1) | int == 0
+      - cp_controller_release_config_root_stat.stat.gid | default(-1) | int == 0
+      - cp_controller_release_config_root_stat.stat.mode | default('') == '0700'
+      - >-
+        not cp_target_controller_release_config_stat.stat.exists or
+        ((cp_target_controller_release_config_stat.stat.isdir | default(false)) and
+         not (cp_target_controller_release_config_stat.stat.islnk | default(false)) and
+         cp_target_controller_release_config_stat.stat.uid | default(-1) | int == 0 and
+         cp_target_controller_release_config_stat.stat.gid | default(-1) | int == 0 and
+         cp_target_controller_release_config_stat.stat.mode | default('') == '0700')
+    fail_msg: Release configuration root or target directory is linked or unsafe.
+
+- name: Check for a registered target image ID
+  ansible.builtin.stat:
+    path: "{{ cp_target_controller_image_record }}"
+    follow: false
+  register: cp_target_controller_image_record_stat
+
+- name: Require safe registered target image file
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cp_target_controller_image_record_stat.stat.exists or
+        ((cp_target_controller_image_record_stat.stat.isreg | default(false)) and
+         not (cp_target_controller_image_record_stat.stat.islnk | default(false)) and
+         cp_target_controller_image_record_stat.stat.uid | default(-1) | int == 0 and
+         cp_target_controller_image_record_stat.stat.gid | default(-1) | int == 0 and
+         cp_target_controller_image_record_stat.stat.mode | default('') == '0600' and
+         cp_target_controller_image_record_stat.stat.nlink | default(-1) | int == 1)
+    fail_msg: Registered target image path is linked or unsafe.
+
+- name: Read registered target image ID
+  ansible.builtin.slurp:
+    src: "{{ cp_target_controller_image_record }}"
+  register: cp_target_controller_image_record_file
+  when: cp_target_controller_image_record_stat.stat.exists
+
+- name: Select registered or freshly captured target image
+  ansible.builtin.set_fact:
+    cp_target_controller_image_candidate: >-
+      {{ (cp_target_controller_image_record_file.content | b64decode | trim)
+         if cp_target_controller_image_record_stat.stat.exists
+         else (cp_controller_image_immutable | default('')) }}
+
+- name: Validate immutable target image ID
+  ansible.builtin.assert:
+    that:
+      - cp_target_controller_image_candidate is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: Activation requires a registered or freshly captured immutable SHA-256 image ID.
 
 - name: Require selected controller image
   ansible.builtin.command:
-    argv: [podman, image, exists, "{{ cp_target_controller_image }}"]
+    argv: [podman, image, exists, "{{ cp_target_controller_image_candidate }}"]
   changed_when: false
 
 - name: Inspect selected controller image ID
@@ -19,27 +89,109 @@
       - podman
       - image
       - inspect
-      - "{{ cp_target_controller_image }}"
+      - "{{ cp_target_controller_image_candidate }}"
       - --format
       - "{{ '{{' }}.Id{{ '}}' }}"
   register: cp_target_controller_image_inspect
   changed_when: false
 
-- name: Remember selected controller image ID
+- name: Validate selected controller image ID
+  ansible.builtin.assert:
+    that:
+      - >-
+        cp_target_controller_image_inspect.stdout | trim |
+        regex_replace('^sha256:', '') is match('^[0-9a-f]{64}$')
+    fail_msg: Podman did not return a full SHA-256 image ID for the selected release.
+
+- name: Remember canonical selected controller image ID
   ansible.builtin.set_fact:
-    cp_target_controller_image_id: "{{ cp_target_controller_image_inspect.stdout | trim }}"
+    cp_target_controller_image_id: >-
+      sha256:{{ cp_target_controller_image_inspect.stdout | trim | regex_replace('^sha256:', '') }}
+    cp_target_controller_image: >-
+      sha256:{{ cp_target_controller_image_inspect.stdout | trim | regex_replace('^sha256:', '') }}
+
+- name: Check for staged target release source
+  ansible.builtin.stat:
+    path: "{{ cp_target_controller_release_root }}"
+    follow: false
+  register: cp_target_controller_release_root_stat
+
+- name: Check for staged target release manifest
+  ansible.builtin.stat:
+    path: "{{ cp_target_controller_release_manifest }}"
+    follow: false
+  register: cp_target_controller_release_manifest_stat
+
+- name: Reject incomplete staged target release state
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (cp_target_controller_release_root_stat.stat.exists | default(false)) or
+        ((cp_target_controller_release_root_stat.stat.isdir | default(false)) and
+         not (cp_target_controller_release_root_stat.stat.islnk | default(false)) and
+         cp_target_controller_release_root_stat.stat.uid | default(-1) | int == 0 and
+         cp_target_controller_release_root_stat.stat.gid | default(-1) | int == 0 and
+         cp_target_controller_release_root_stat.stat.mode | default('') == '0755')
+      - >-
+        not (cp_target_controller_release_manifest_stat.stat.exists | default(false)) or
+        ((cp_target_controller_release_manifest_stat.stat.isreg | default(false)) and
+         not (cp_target_controller_release_manifest_stat.stat.islnk | default(false)) and
+         cp_target_controller_release_manifest_stat.stat.uid | default(-1) | int == 0 and
+         cp_target_controller_release_manifest_stat.stat.gid | default(-1) | int == 0 and
+         cp_target_controller_release_manifest_stat.stat.mode | default('') == '0444' and
+         cp_target_controller_release_manifest_stat.stat.nlink | default(-1) | int == 1 and
+         (cp_target_controller_release_root_stat.stat.isdir | default(false)))
+      - >-
+        not (cp_controller_build | bool) or
+        ((cp_target_controller_release_root_stat.stat.isdir | default(false)) and
+         (cp_target_controller_release_manifest_stat.stat.isreg | default(false)))
+    fail_msg: >-
+      The target release has incomplete or missing immutable staged source.
+
+- name: Revalidate staged target source immediately before activation
+  ansible.builtin.include_tasks: validate_release.yml
+  vars:
+    cp_controller_validation_release_id: "{{ cp_target_controller_release }}"
+  when: cp_target_controller_release_manifest_stat.stat.isreg | default(false)
+
+- name: Require registered target image to resolve exactly
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cp_target_controller_image_record_stat.stat.exists or
+        cp_target_controller_image_candidate == cp_target_controller_image_id
+    fail_msg: The registered target image no longer resolves to its recorded image ID.
+
+- name: Inspect active release marker
+  ansible.builtin.stat:
+    path: /etc/vivolution/active-release
+    follow: false
+  register: cp_active_release_marker_stat
+
+- name: Require safe active release marker
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cp_active_release_marker_stat.stat.exists or
+        ((cp_active_release_marker_stat.stat.isreg | default(false)) and
+         not (cp_active_release_marker_stat.stat.islnk | default(false)) and
+         cp_active_release_marker_stat.stat.uid | default(-1) | int == 0 and
+         cp_active_release_marker_stat.stat.gid | default(-1) | int == 0 and
+         cp_active_release_marker_stat.stat.mode | default('') == '0644' and
+         cp_active_release_marker_stat.stat.nlink | default(-1) | int == 1)
+    fail_msg: Active release marker is linked or unsafe.
 
 - name: Read active release marker
   ansible.builtin.slurp:
     src: /etc/vivolution/active-release
   register: cp_active_release_file
-  failed_when: false
+  when: cp_active_release_marker_stat.stat.exists
 
 - name: Determine active release
   ansible.builtin.set_fact:
     cp_old_controller_release: >-
       {{ (cp_active_release_file.content | default('') | b64decode | trim)
-         if not (cp_active_release_file.failed | default(false)) else '' }}
+         if cp_active_release_marker_stat.stat.exists else '' }}
 
 - name: Validate active release marker
   ansible.builtin.assert:
@@ -52,29 +204,172 @@
 - name: Determine whether automatic recovery is available
   ansible.builtin.set_fact:
     cp_controller_can_recover: >-
+      {{ cp_old_controller_release | length > 0 }}
+    cp_controller_is_release_change: >-
       {{ cp_old_controller_release | length > 0 and
          cp_old_controller_release != cp_target_controller_release }}
     cp_old_controller_runtime_env: >-
       {{ cp_controller_release_config_root }}/{{ cp_old_controller_release }}/runtime.env
 
-- name: Read exact active image from live Quadlet
+- name: Inspect prior release configuration directory
+  ansible.builtin.stat:
+    path: "{{ cp_controller_release_config_root }}/{{ cp_old_controller_release }}"
+    follow: false
+  register: cp_old_controller_release_config_stat
+  when: cp_controller_can_recover | bool
+
+- name: Require safe prior release configuration directory
+  ansible.builtin.assert:
+    that:
+      - cp_old_controller_release_config_stat.stat.isdir | default(false)
+      - not (cp_old_controller_release_config_stat.stat.islnk | default(false))
+      - cp_old_controller_release_config_stat.stat.uid | default(-1) | int == 0
+      - cp_old_controller_release_config_stat.stat.gid | default(-1) | int == 0
+      - cp_old_controller_release_config_stat.stat.mode | default('') == '0700'
+    fail_msg: Prior release configuration directory is linked or unsafe.
+  when: cp_controller_can_recover | bool
+
+- name: Inspect live prior controller Quadlet
+  ansible.builtin.stat:
+    path: /etc/containers/systemd/vivolution-cp-web.container
+    follow: false
+  register: cp_old_controller_quadlet_stat
+  when: cp_controller_can_recover | bool
+
+- name: Require a safe live prior controller Quadlet
+  ansible.builtin.assert:
+    that:
+      - cp_old_controller_quadlet_stat.stat.isreg | default(false)
+      - not (cp_old_controller_quadlet_stat.stat.islnk | default(false))
+      - cp_old_controller_quadlet_stat.stat.uid | default(-1) | int == 0
+      - cp_old_controller_quadlet_stat.stat.gid | default(-1) | int == 0
+      - cp_old_controller_quadlet_stat.stat.mode | default('') == '0644'
+      - cp_old_controller_quadlet_stat.stat.nlink | default(-1) | int == 1
+    fail_msg: The live prior controller Quadlet is missing, linked, or unsafe.
+  when: cp_controller_can_recover | bool
+
+- name: Snapshot exact live prior controller Quadlet
+  ansible.builtin.slurp:
+    src: /etc/containers/systemd/vivolution-cp-web.container
+  register: cp_old_controller_quadlet_file
+  when: cp_controller_can_recover | bool
+
+- name: Inspect exact running image for prior-release recovery
+  ansible.builtin.command:
+    argv:
+      - podman
+      - inspect
+      - vivolution-cp-web
+      - --format
+      - "{{ '{{' }}.Image{{ '}}' }}"
+  register: cp_old_controller_running_image
+  changed_when: false
+  when: cp_controller_can_recover | bool
+
+- name: Read live Quadlet image before prior-release recovery
   ansible.builtin.command:
     argv:
       - awk
       - -F=
       - '$1 == "Image" {sub(/^[^=]*=/, ""); print; exit}'
       - /etc/containers/systemd/vivolution-cp-web.container
-  register: cp_old_controller_image_read
+  register: cp_old_controller_quadlet_image
   changed_when: false
-  failed_when: false
   when: cp_controller_can_recover | bool
 
-- name: Remember exact prior image
+- name: Read live Quadlet environment before prior-release recovery
+  ansible.builtin.command:
+    argv:
+      - awk
+      - -F=
+      - '$1 == "EnvironmentFile" {sub(/^[^=]*=/, ""); print; exit}'
+      - /etc/containers/systemd/vivolution-cp-web.container
+  register: cp_old_controller_quadlet_environment
+  changed_when: false
+  when: cp_controller_can_recover | bool
+
+- name: Check prior release image registration
+  ansible.builtin.stat:
+    path: "{{ cp_controller_release_config_root }}/{{ cp_old_controller_release }}/image"
+    follow: false
+  register: cp_old_controller_image_record_stat
+  when: cp_controller_can_recover | bool
+
+- name: Require safe prior release image registration
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cp_old_controller_image_record_stat.stat.exists or
+        ((cp_old_controller_image_record_stat.stat.isreg | default(false)) and
+         not (cp_old_controller_image_record_stat.stat.islnk | default(false)) and
+         cp_old_controller_image_record_stat.stat.uid | default(-1) | int == 0 and
+         cp_old_controller_image_record_stat.stat.gid | default(-1) | int == 0 and
+         cp_old_controller_image_record_stat.stat.mode | default('') == '0600' and
+         cp_old_controller_image_record_stat.stat.nlink | default(-1) | int == 1)
+    fail_msg: Prior release image registration is linked or unsafe.
+  when: cp_controller_can_recover | bool
+
+- name: Read prior release image registration
+  ansible.builtin.slurp:
+    src: "{{ cp_controller_release_config_root }}/{{ cp_old_controller_release }}/image"
+  register: cp_old_controller_image_record_file
+  when:
+    - cp_controller_can_recover | bool
+    - cp_old_controller_image_record_stat.stat.exists
+
+- name: Validate exact running image for prior-release recovery
+  ansible.builtin.assert:
+    that:
+      - >-
+        cp_old_controller_running_image.stdout | trim |
+        regex_replace('^sha256:', '') is match('^[0-9a-f]{64}$')
+    fail_msg: The active controller does not expose a full SHA-256 image ID for recovery.
+  when: cp_controller_can_recover | bool
+
+- name: Remember canonical prior image ID
   ansible.builtin.set_fact:
     cp_old_controller_image: >-
-      {{ (cp_old_controller_image_read.stdout | trim)
-         if cp_old_controller_image_read.stdout | default('') | trim | length > 0
-         else cp_controller_image_repository ~ ':' ~ cp_old_controller_release }}
+      sha256:{{ cp_old_controller_running_image.stdout | trim | regex_replace('^sha256:', '') }}
+    cp_old_controller_registered_image: >-
+      {{ (cp_old_controller_image_record_file.content | b64decode | trim)
+         if cp_old_controller_image_record_stat.stat.exists else '' }}
+  when: cp_controller_can_recover | bool
+
+- name: Require prior marker, Quadlet, registration, and running image lineage
+  ansible.builtin.assert:
+    that:
+      - >-
+        cp_old_controller_quadlet_image.stdout | trim in
+        [cp_old_controller_image, cp_controller_image_repository ~ ':' ~ cp_old_controller_release]
+      - >-
+        cp_old_controller_registered_image | length == 0 or
+        cp_old_controller_registered_image in
+        [cp_old_controller_image, cp_controller_image_repository ~ ':' ~ cp_old_controller_release]
+      - >-
+        cp_old_controller_quadlet_environment.stdout | trim in
+        [cp_old_controller_runtime_env, '/etc/vivolution/cp-runtime.env']
+    fail_msg: The prior marker, image, Quadlet, or runtime environment lineage is inconsistent.
+  when: cp_controller_can_recover | bool
+
+- name: Require one image and environment directive in the prior Quadlet
+  ansible.builtin.assert:
+    that:
+      - >-
+        cp_old_controller_quadlet_file.content | b64decode |
+        regex_findall('(?m)^Image=[^\n]+$') | length == 1
+      - >-
+        cp_old_controller_quadlet_file.content | b64decode |
+        regex_findall('(?m)^EnvironmentFile=[^\n]+$') | length == 1
+    fail_msg: The prior controller Quadlet cannot be canonicalized safely for recovery.
+  when: cp_controller_can_recover | bool
+
+- name: Canonicalize only prior image and environment references for recovery
+  ansible.builtin.set_fact:
+    cp_old_controller_quadlet_recovery_content: >-
+      {{ cp_old_controller_quadlet_file.content | b64decode |
+         regex_replace('(?m)^Image=[^\n]+$', 'Image=' ~ cp_old_controller_image) |
+         regex_replace('(?m)^EnvironmentFile=[^\n]+$',
+                       'EnvironmentFile=' ~ cp_old_controller_runtime_env) }}
   when: cp_controller_can_recover | bool
 
 - name: Create target release configuration directory
@@ -87,11 +382,24 @@
 
 - name: Record exact target image reference
   ansible.builtin.copy:
-    dest: "{{ cp_controller_release_config_root }}/{{ cp_target_controller_release }}/image"
+    dest: "{{ cp_target_controller_image_record }}"
     owner: root
     group: root
     mode: '0600'
     content: "{{ cp_target_controller_image }}\n"
+    force: false
+
+- name: Re-read registered target image reference
+  ansible.builtin.slurp:
+    src: "{{ cp_target_controller_image_record }}"
+  register: cp_target_controller_image_record_confirmed
+
+- name: Require immutable target image registration
+  ansible.builtin.assert:
+    that:
+      - cp_target_controller_image_record_confirmed.content | b64decode | trim == cp_target_controller_image
+      - cp_target_controller_image is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: Target release image registration is not immutable or does not match Podman.
 
 - name: Prepare prior release recovery state
   when: cp_controller_can_recover | bool
@@ -132,84 +440,344 @@
     - name: Require prior runtime environment for exact recovery
       ansible.builtin.stat:
         path: "{{ cp_old_controller_runtime_env }}"
+        follow: false
+        checksum_algorithm: sha256
       register: cp_old_controller_runtime_env_ready
-      failed_when: not cp_old_controller_runtime_env_ready.stat.exists
 
-    - name: Record exact prior image reference
+    - name: Validate prior runtime environment for exact recovery
+      ansible.builtin.assert:
+        that:
+          - cp_old_controller_runtime_env_ready.stat.isreg | default(false)
+          - not (cp_old_controller_runtime_env_ready.stat.islnk | default(false))
+          - cp_old_controller_runtime_env_ready.stat.uid | default(-1) | int == 0
+          - cp_old_controller_runtime_env_ready.stat.gid | default(-1) | int == 0
+          - cp_old_controller_runtime_env_ready.stat.mode | default('') == '0600'
+          - cp_old_controller_runtime_env_ready.stat.nlink | default(-1) | int == 1
+          - >-
+            cp_old_controller_runtime_env_ready.stat.checksum | default('') is
+            match('^[0-9a-f]{64}$')
+        fail_msg: >-
+          The prior runtime environment is missing, linked, shared, or not root-only mode 0600.
+      no_log: true
+
+    - name: Record canonical prior image reference
       ansible.builtin.copy:
         dest: "{{ cp_controller_release_config_root }}/{{ cp_old_controller_release }}/image"
         owner: root
         group: root
         mode: '0600'
         content: "{{ cp_old_controller_image }}\n"
-        force: false
 
-- name: Install protected target runtime environment
-  ansible.builtin.template:
-    src: runtime.env.j2
-    dest: "{{ cp_target_controller_runtime_env }}"
-    owner: root
-    group: root
-    mode: '0600'
-  register: cp_controller_runtime_environment
-  no_log: true
+    - name: Require canonical prior image to remain available
+      ansible.builtin.command:
+        argv: [podman, image, exists, "{{ cp_old_controller_image }}"]
+      changed_when: false
+
+- name: Reconcile protected target runtime environment without in-place drift
   when: cp_controller_refresh_release_environment | bool
+  block:
+    - name: Create ephemeral runtime environment candidate
+      ansible.builtin.tempfile:
+        state: file
+        path: /run
+        prefix: vivolution-cp-runtime-
+        suffix: .env
+      register: cp_controller_runtime_environment_candidate
+      changed_when: false
+      no_log: true
 
-- name: Require target runtime environment
+    - name: Render protected runtime environment candidate
+      ansible.builtin.template:
+        src: runtime.env.j2
+        dest: "{{ cp_controller_runtime_environment_candidate.path }}"
+        owner: root
+        group: root
+        mode: '0600'
+      changed_when: false
+      no_log: true
+
+    - name: Hash desired runtime environment privately
+      ansible.builtin.stat:
+        path: "{{ cp_controller_runtime_environment_candidate.path }}"
+        follow: false
+        checksum_algorithm: sha256
+      register: cp_controller_runtime_environment_candidate_stat
+      no_log: true
+
+    - name: Inspect existing target runtime environment privately
+      ansible.builtin.stat:
+        path: "{{ cp_target_controller_runtime_env }}"
+        follow: false
+        checksum_algorithm: sha256
+      register: cp_controller_existing_runtime_environment_stat
+      no_log: true
+
+    - name: Reject same-release runtime environment drift
+      ansible.builtin.assert:
+        that:
+          - >-
+            cp_old_controller_release != cp_target_controller_release or
+            (cp_controller_existing_runtime_environment_stat.stat.isreg | default(false))
+          - >-
+            cp_old_controller_release != cp_target_controller_release or
+            not (cp_controller_existing_runtime_environment_stat.stat.islnk | default(false))
+          - >-
+            cp_old_controller_release != cp_target_controller_release or
+            cp_controller_existing_runtime_environment_stat.stat.uid | default(-1) | int == 0
+          - >-
+            cp_old_controller_release != cp_target_controller_release or
+            cp_controller_existing_runtime_environment_stat.stat.gid | default(-1) | int == 0
+          - >-
+            cp_old_controller_release != cp_target_controller_release or
+            cp_controller_existing_runtime_environment_stat.stat.mode | default('') == '0600'
+          - >-
+            cp_old_controller_release != cp_target_controller_release or
+            cp_controller_existing_runtime_environment_stat.stat.nlink | default(-1) | int == 1
+          - >-
+            cp_old_controller_release != cp_target_controller_release or
+            cp_controller_existing_runtime_environment_stat.stat.checksum | default('') ==
+            cp_controller_runtime_environment_candidate_stat.stat.checksum
+        fail_msg: >-
+          Runtime settings for an active release are immutable. Select a new
+          release/configuration revision instead of overwriting them in place.
+      no_log: true
+
+    - name: Install protected runtime environment for a new target release
+      ansible.builtin.copy:
+        src: "{{ cp_controller_runtime_environment_candidate.path }}"
+        remote_src: true
+        dest: "{{ cp_target_controller_runtime_env }}"
+        owner: root
+        group: root
+        mode: '0600'
+      register: cp_controller_runtime_environment
+      no_log: true
+      when: cp_old_controller_release != cp_target_controller_release
+
+  always:
+    - name: Remove ephemeral runtime environment candidate
+      ansible.builtin.file:
+        path: "{{ cp_controller_runtime_environment_candidate.path }}"
+        state: absent
+      changed_when: false
+      no_log: true
+      when:
+        - cp_controller_runtime_environment_candidate is defined
+        - cp_controller_runtime_environment_candidate.path is defined
+
+- name: Inspect protected target runtime environment
   ansible.builtin.stat:
     path: "{{ cp_target_controller_runtime_env }}"
+    follow: false
+    checksum_algorithm: sha256
   register: cp_target_controller_runtime_env_stat
-  failed_when: not cp_target_controller_runtime_env_stat.stat.exists
-
-- name: Install protected target migration environment
-  ansible.builtin.template:
-    src: migrate.env.j2
-    dest: "{{ cp_target_controller_migrate_env }}"
-    owner: root
-    group: root
-    mode: '0600'
   no_log: true
-  when: cp_controller_run_migrations | bool or cp_controller_create_initial_operator | bool
 
-- name: Apply backward-compatible controller database migrations with schema owner
+- name: Require protected target runtime environment
+  ansible.builtin.assert:
+    that:
+      - cp_target_controller_runtime_env_stat.stat.isreg | default(false)
+      - not (cp_target_controller_runtime_env_stat.stat.islnk | default(false))
+      - cp_target_controller_runtime_env_stat.stat.uid | default(-1) | int == 0
+      - cp_target_controller_runtime_env_stat.stat.gid | default(-1) | int == 0
+      - cp_target_controller_runtime_env_stat.stat.mode | default('') == '0600'
+      - cp_target_controller_runtime_env_stat.stat.nlink | default(-1) | int == 1
+      - >-
+        cp_target_controller_runtime_env_stat.stat.checksum | default('') is
+        match('^[0-9a-f]{64}$')
+    fail_msg: The target runtime environment is missing or is not a private regular file.
+  no_log: true
+
+- name: Read prior RLS key lineage for a release change
+  ansible.builtin.slurp:
+    src: "{{ cp_old_controller_runtime_env }}"
+  register: cp_old_controller_runtime_env_key_lineage
+  when: cp_controller_is_release_change | bool
+  no_log: true
+
+- name: Read target RLS key lineage for a release change
+  ansible.builtin.slurp:
+    src: "{{ cp_target_controller_runtime_env }}"
+  register: cp_target_controller_runtime_env_key_lineage
+  when: cp_controller_is_release_change | bool
+  no_log: true
+
+- name: Determine RLS key lineage for a release change
+  ansible.builtin.set_fact:
+    cp_old_controller_rls_key_lineage: >-
+      {{ cp_old_controller_runtime_env_key_lineage.content | b64decode |
+         regex_findall('(?m)^RLS_CONTEXT_SIGNING_KEY=[0-9a-f]{64}$') }}
+    cp_target_controller_rls_key_lineage: >-
+      {{ cp_target_controller_runtime_env_key_lineage.content | b64decode |
+         regex_findall('(?m)^RLS_CONTEXT_SIGNING_KEY=[0-9a-f]{64}$') }}
+  when: cp_controller_is_release_change | bool
+  no_log: true
+
+- name: Prove the database is still on the signed-RLS compatibility bridge
   ansible.builtin.command:
     argv:
-      - podman
-      - run
-      - --rm
-      - --network=host
-      - "--env-file={{ cp_target_controller_migrate_env }}"
-      - --entrypoint=python
-      - "{{ cp_target_controller_image }}"
-      - manage.py
-      - migrate
-      - --noinput
-  changed_when: false
-  no_log: true
-  when: cp_controller_run_migrations | bool
-
-- name: Create initial lab operator if absent
-  ansible.builtin.command:
-    argv:
-      - podman
-      - run
-      - --rm
-      - --network=host
-      - "--env-file={{ cp_target_controller_migrate_env }}"
-      - --entrypoint=python
-      - "{{ cp_target_controller_image }}"
-      - manage.py
-      - shell
+      - psql
+      - -X
+      - --set=ON_ERROR_STOP=1
+      - --host={{ cp_db_upstream_host }}
+      - --port={{ cp_db_upstream_port }}
+      - --username={{ cp_db_owner }}
+      - --dbname={{ cp_database_name }}
+      - --no-password
+      - --no-align
+      - --tuples-only
+      - --quiet
       - --command
       - >-
-        from django.contrib.auth import get_user_model;
-        U=get_user_model();
-        u,created=U.objects.get_or_create(username='{{ cp_controller_admin_username }}',
-        defaults={'is_staff':True,'is_superuser':True});
-        created and (u.set_password(__import__('os').environ['DJANGO_SUPERUSER_PASSWORD']) or u.save())
+        SELECT CASE
+          WHEN EXISTS (
+            SELECT 1 FROM django_migrations
+            WHERE app = 'core' AND name = '0003_signed_rls_context'
+          ) AND NOT EXISTS (
+            SELECT 1 FROM django_migrations
+            WHERE app = 'core' AND name > '0003_signed_rls_context'
+          ) THEN 'bridge-only'
+          ELSE 'not-bridge-only'
+        END;
+  environment:
+    PGPASSWORD: "{{ cp_db_owner_password }}"
+  register: cp_legacy_rls_rollback_database_state
   changed_when: false
   no_log: true
-  when: cp_controller_create_initial_operator | bool
+  when:
+    - cp_controller_is_release_change | bool
+    - cp_controller_allow_legacy_rls_rollback | bool
+    - cp_install_local_postgres | bool
+    - cp_old_controller_rls_key_lineage | length == 1
+    - cp_target_controller_rls_key_lineage | length == 0
+
+- name: Refuse unsupported in-place RLS key rotation
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cp_old_controller_rls_key_lineage | length == 0) or
+        cp_old_controller_rls_key_lineage == cp_target_controller_rls_key_lineage or
+        ((cp_controller_allow_legacy_rls_rollback | bool) and
+         (cp_install_local_postgres | bool) and
+         (cp_target_controller_rls_key_lineage | length == 0) and
+         (cp_legacy_rls_rollback_database_state.stdout | default('') | trim == 'bridge-only'))
+    fail_msg: >-
+      RLS key rotation requires a dual-key rollout and is refused while N-1
+      recovery depends on the current key.
+  when: cp_controller_is_release_change | bool
+  no_log: true
+
+- name: Run privileged controller preparation with ephemeral credentials
+  block:
+    - name: Create ephemeral migration environment
+      ansible.builtin.tempfile:
+        state: file
+        path: /run
+        prefix: vivolution-cp-migrate-
+        suffix: .env
+      register: cp_controller_migrate_environment_file
+      changed_when: false
+      no_log: true
+      when: cp_controller_run_migrations | bool or cp_controller_create_initial_operator | bool
+
+    - name: Render ephemeral protected migration environment
+      ansible.builtin.template:
+        src: migrate.env.j2
+        dest: "{{ cp_controller_migrate_environment_file.path }}"
+        owner: root
+        group: root
+        mode: '0600'
+      changed_when: false
+      no_log: true
+      when: cp_controller_run_migrations | bool or cp_controller_create_initial_operator | bool
+
+    - name: Apply backward-compatible controller database migrations with schema owner
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - --rm
+          - --pull=never
+          - --network=host
+          - "--env-file={{ cp_controller_migrate_environment_file.path }}"
+          - --entrypoint=python
+          - "{{ cp_target_controller_image }}"
+          - manage.py
+          - migrate
+          - --noinput
+      register: cp_controller_migration_run
+      changed_when: >-
+        'Applying ' in (cp_controller_migration_run.stdout | default(''))
+      no_log: true
+      when: cp_controller_run_migrations | bool
+
+    - name: Install or reconcile signed RLS context key with schema owner
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - --rm
+          - --pull=never
+          - --network=host
+          - "--env-file={{ cp_controller_migrate_environment_file.path }}"
+          - --entrypoint=python
+          - "{{ cp_target_controller_image }}"
+          - manage.py
+          - configure_rls_key
+      register: cp_controller_rls_key_configuration
+      changed_when: >-
+        'Signed RLS context key is rotated.' in
+        (cp_controller_rls_key_configuration.stdout | default(''))
+      no_log: true
+      when: cp_controller_run_migrations | bool
+
+    - name: Reconcile runtime database privileges after owner-run migrations
+      ansible.builtin.include_role:
+        name: postgres_local
+        tasks_from: runtime_privileges.yml
+      when:
+        - cp_controller_run_migrations | bool
+        - cp_install_local_postgres | bool
+        - cp_postgres_enforce_least_privilege | default(false) | bool
+
+    - name: Create initial lab operator if absent
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - --rm
+          - --pull=never
+          - --network=host
+          - "--env-file={{ cp_controller_migrate_environment_file.path }}"
+          - --entrypoint=python
+          - "{{ cp_target_controller_image }}"
+          - manage.py
+          - shell
+          - --command
+          - >-
+            from django.contrib.auth import get_user_model;
+            U=get_user_model();
+            u,created=U.objects.get_or_create(username='{{ cp_controller_admin_username }}',
+            defaults={'is_staff':True,'is_superuser':True});
+            created and (u.set_password(__import__('os').environ['DJANGO_SUPERUSER_PASSWORD']) or u.save());
+            print('VIVOLUTION_ADMIN_CREATED' if created else 'VIVOLUTION_ADMIN_PRESENT')
+      register: cp_controller_initial_operator
+      changed_when: >-
+        'VIVOLUTION_ADMIN_CREATED' in
+        (cp_controller_initial_operator.stdout | default(''))
+      no_log: true
+      when: cp_controller_create_initial_operator | bool
+
+  always:
+    - name: Remove ephemeral migration environment
+      ansible.builtin.file:
+        path: "{{ cp_controller_migrate_environment_file.path }}"
+        state: absent
+      changed_when: false
+      no_log: true
+      when:
+        - cp_controller_migrate_environment_file is defined
+        - cp_controller_migrate_environment_file.path is defined
 
 - name: Select target release for live Quadlet
   ansible.builtin.set_fact:
@@ -270,7 +838,10 @@
     - name: Require selected image to be running before commit
       ansible.builtin.assert:
         that:
-          - cp_running_controller_image.stdout | trim == cp_target_controller_image_id
+          - >-
+            cp_running_controller_image.stdout | trim | regex_replace('^sha256:', '') ==
+            cp_target_controller_image_id | regex_replace('^sha256:', '')
+          - cp_target_controller_image is match('^sha256:[0-9a-f]{64}$')
         fail_msg: Readiness did not come from the selected controller image.
 
     - name: Save rollback release marker after readiness
@@ -280,7 +851,7 @@
         group: root
         mode: '0644'
         content: "{{ cp_old_controller_release }}\n"
-      when: cp_controller_can_recover | bool
+      when: cp_controller_is_release_change | bool
 
     - name: Record active controller release after readiness
       ansible.builtin.copy:
@@ -321,13 +892,13 @@
             cp_controller_quadlet_image: "{{ cp_old_controller_image }}"
             cp_controller_quadlet_environment_file: "{{ cp_old_controller_runtime_env }}"
 
-        - name: Restore prior controller Quadlet
-          ansible.builtin.template:
-            src: vivolution-cp-web.container.j2
+        - name: Restore the previously proven controller Quadlet syntax
+          ansible.builtin.copy:
             dest: /etc/containers/systemd/vivolution-cp-web.container
             owner: root
             group: root
             mode: '0644'
+            content: "{{ cp_old_controller_quadlet_recovery_content }}"
 
         - name: Reload systemd after controller recovery
           ansible.builtin.systemd_service:
@@ -360,13 +931,30 @@
           register: cp_recovered_controller_image
           changed_when: false
 
+        - name: Inspect recovered Quadlet image and environment
+          ansible.builtin.command:
+            argv:
+              - awk
+              - -F=
+              - >-
+                $1 == "Image" {image=$2}
+                $1 == "EnvironmentFile" {environment=$2}
+                END {print image "|" environment}
+              - /etc/containers/systemd/vivolution-cp-web.container
+          register: cp_recovered_controller_quadlet
+          changed_when: false
+
         - name: Require exact prior image after recovery
           ansible.builtin.assert:
             that:
               - >-
-                cp_recovered_controller_image.stdout | trim ==
-                cp_old_controller_image_inspect.stdout | trim
-            fail_msg: Controller recovery did not restore the exact prior image.
+                cp_recovered_controller_image.stdout | trim | regex_replace('^sha256:', '') ==
+                cp_old_controller_image | regex_replace('^sha256:', '')
+              - cp_old_controller_image is match('^sha256:[0-9a-f]{64}$')
+              - >-
+                cp_recovered_controller_quadlet.stdout | trim ==
+                cp_old_controller_image ~ '|' ~ cp_old_controller_runtime_env
+            fail_msg: Controller recovery did not restore the exact prior image and environment.
 
         - name: Preserve prior release as active after recovery
           ansible.builtin.copy:
@@ -404,3 +992,24 @@
         msg: >-
           Controller release {{ cp_failed_controller_release }} failed its health gate.
           Automatic prior-release recovery={{ cp_activation_recovered | bool }}.
+
+- name: Find obsolete persistent migration environments
+  ansible.builtin.find:
+    paths: "{{ cp_controller_release_config_root }}"
+    recurse: true
+    hidden: true
+    file_type: file
+    patterns:
+      - migrate.env
+  register: cp_controller_obsolete_migrate_environments
+  changed_when: false
+  no_log: true
+
+- name: Remove obsolete persistent migration environments
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ cp_controller_obsolete_migrate_environments.files }}"
+  loop_control:
+    label: protected-migration-environment
+  no_log: true

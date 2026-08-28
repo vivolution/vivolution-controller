@@ -13,6 +13,7 @@
     owner: root
     group: caddy
     mode: '0640'
+    validate: caddy validate --config %s --adapter caddyfile
   register: cp_caddy_config
 
 - name: Validate Caddy ingress policy
@@ -32,11 +33,47 @@
     enabled: true
     state: started
 
-- name: Restart Caddy after a validated policy change
+- name: Inspect live listeners before Caddy reconciliation
+  ansible.builtin.command:
+    argv: [ss, -ltnH]
+  register: cp_caddy_listeners_before_reconciliation
+  changed_when: false
+
+- name: Restart Caddy after a validated policy or live-admin change
   ansible.builtin.systemd_service:
     name: caddy.service
     state: restarted
-  when: cp_caddy_config.changed
+  when: >-
+    cp_caddy_config.changed or
+    ':2019' in cp_caddy_listeners_before_reconciliation.stdout
+
+- name: Inspect listeners after Caddy reconciliation
+  ansible.builtin.command:
+    argv: [ss, -ltnH]
+  register: cp_caddy_listeners_after_reconciliation
+  changed_when: false
+
+- name: Require the Caddy admin listener to be disabled before controller activation
+  ansible.builtin.assert:
+    that:
+      - "':2019' not in cp_caddy_listeners_after_reconciliation.stdout"
+    fail_msg: Caddy's unauthenticated admin API is still listening.
+
+- name: Prove Caddy admin HTTP endpoint is unreachable before controller activation
+  ansible.builtin.uri:
+    url: http://127.0.0.1:2019/config/
+    method: GET
+    status_code: -1
+    timeout: 2
+  register: cp_caddy_admin_pre_activation_probe
+  failed_when: false
+  changed_when: false
+
+- name: Require Caddy admin HTTP connection refusal before controller activation
+  ansible.builtin.assert:
+    that:
+      - cp_caddy_admin_pre_activation_probe.status | default(-1) == -1
+    fail_msg: Caddy's unauthenticated admin API remains reachable before activation.
 
 - name: Wait for local Caddy root certificate
   ansible.builtin.wait_for:

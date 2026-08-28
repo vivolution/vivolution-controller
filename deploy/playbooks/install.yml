@@ -11,5 +11,5 @@
     - role: postgres_local
       when: cp_install_local_postgres | bool
     - role: pgbouncer
-    - role: controller_services
     - role: ingress
+    - role: controller_services

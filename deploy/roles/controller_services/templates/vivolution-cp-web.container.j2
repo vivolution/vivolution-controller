@@ -5,6 +5,7 @@ Requires=pgbouncer.service
 
 [Container]
 Image={{ cp_controller_quadlet_image }}
+Pull=never
 ContainerName=vivolution-cp-web
 Network=host
 EnvironmentFile={{ cp_controller_quadlet_environment_file }}

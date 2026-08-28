@@ -1,0 +1,3 @@
+# Hash-locked local qualification tooling for the Apple Silicon controller host.
+ruff==0.16.5 \
+    --hash=sha256:c5ae9a7b9a8875131f40f8fe967cc86abf899779efd663cb7ce3d572d01da7eb

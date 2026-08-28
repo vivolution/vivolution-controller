@@ -28,6 +28,11 @@ Copy `.env.example` only as a reference; do not commit a real `.env` file.
 - `DJANGO_SECRET_KEY`: random deployment secret; required.
 - `DJANGO_ALLOWED_HOSTS`: comma-separated hostnames; required with debug disabled.
 - `DATABASE_URL`: `postgresql://` URL. Percent-encode reserved characters in credentials.
+- `RLS_CONTEXT_SIGNING_KEY`: an independent 32-byte key encoded as 64 lowercase hex
+  characters. The web process uses it only to sign short-lived database authorization
+  contexts; never reuse `DJANGO_SECRET_KEY` or a database password.
+- `RLS_CONTEXT_TTL_SECONDS`: signed database-context lifetime, from 5 through 300 seconds;
+  default `60`.
 - `DJANGO_CSRF_TRUSTED_ORIGINS`: comma-separated HTTPS origins for the operator UI.
 - `DJANGO_TRUST_X_FORWARDED_PROTO`: set to `true` only behind the trusted ingress proxy.
 - `DJANGO_SECURE_SSL_REDIRECT`: enable after trusted proxy-header handling is verified.
@@ -41,23 +46,52 @@ The URL parser passes through only PostgreSQL's `sslmode`, `sslrootcert`, `sslce
 
 ## Database and RLS contract
 
-Migration `0002_enable_rls` enables RLS on:
+Migrations `0002_enable_rls` and `0003_signed_rls_context` enable RLS and install the
+signed-context validator on:
 
 - `TenantContext` (scope column is its immutable UUID primary key);
 - `ConfigurationVersion`;
 - `AuditEvent` (global events have a null tenant and are operator-only).
 
 A tenant operation must execute inside `core.rls.tenant_scope(tenant_context_id)`. It opens
-a transaction and sets transaction-local PostgreSQL settings. The current admin UI is for
-authenticated Django staff only; middleware gives staff an explicit transaction-local
-operator setting. No HTTP tenant-header shortcut exists because an unverified header is not
-an authorization boundary.
+a transaction and installs a short-lived HMAC-signed PostgreSQL context. The current admin UI
+is for authenticated Django staff only; middleware gives staff an independently signed,
+transaction-local operator context. PostgreSQL validates signed contexts against key material
+stored in the owner-only `cp_security` schema. No HTTP tenant-header shortcut exists because
+an unverified header is not an authorization boundary.
+
+Migration `0003` is intentionally the one-release compatibility bridge: its policies accept
+the signed context and the preceding release's transaction-local legacy settings, while this
+bridge application emits both. That keeps the pre-bridge image recoverable during the schema
+transition. The next migration removes the legacy clauses only after this signed-capable
+release has been deployed and verified as N-1. Until that migration lands, raw SQL can still
+self-select the legacy operator setting, so the bridge is a recovery mechanism—not the final
+SQL-injection containment boundary.
+
+After migrations, the schema owner must synchronize the database copy of the independent key
+before starting the runtime process:
+
+```sh
+python manage.py migrate --noinput
+python manage.py configure_rls_key
+```
+
+The database key table is deliberately unreadable by the runtime role. After the signed-only
+policy migration and explicit least-privilege grants are active, a raw SQL-injection flaw can
+reuse only the current transaction's scope; it cannot mint an operator or a different tenant
+context. A fully compromised Python process can read its signing key and is outside this
+boundary, so host/container controls and key rotation remain necessary.
 
 RLS is enabled but not forced so the migration owner can migrate and repair the schema. The
-deployment kit must grant the non-owner runtime role only the required table/sequence rights.
+final deployment grants the non-owner runtime role only explicit required table/sequence
+rights. Operator sessions use the container's bounded `/tmp` tmpfs instead of the database,
+and the runtime administrator cannot edit users, groups, or permissions; those identities are
+reconciled only through the owner-credential deployment command.
 The local deployment qualification connects as that runtime role and proves no-context,
-same-tenant, cross-tenant, and explicit-operator behavior against PostgreSQL 17. The same
-behavioral gate must pass again against Azure Database for PostgreSQL before production use.
+legacy-setting forgery, signed-context forgery, same-tenant reads and writes, cross-tenant
+read/write denial, explicit operator behavior, and runtime key-table denial against
+PostgreSQL 17. The same behavioral gate must pass again against Azure Database for PostgreSQL
+before production use.
 
 ## Local development and checks
 
@@ -87,7 +121,8 @@ gunicorn cp1.wsgi:application --bind 127.0.0.1:8000
 Endpoints:
 
 - `GET /health/live` proves the process can answer without touching PostgreSQL.
-- `GET /health/ready` proves PostgreSQL is reachable and the RLS migration is recorded.
+- `GET /health/ready` proves PostgreSQL is reachable, migration `0003` is recorded, and the
+  application signing key matches the owner-only database copy.
 - `/admin/` is the initial operator UI.
 
 ## Container
@@ -103,8 +138,10 @@ preferably, use a separate one-shot migration unit before starting web replicas.
 
 Do not bake an `.env`, database password, secret key, or certificate into the image. The
 current deployment keeps versioned runtime environments root-only on the host and excludes
-them from source, images, and evidence. Production key custody and a systemd-credential or
-equivalent secret-mount design remain acceptance gates.
+them from source, images, and evidence. Migration/administrator credentials exist only in a
+root-only `/run` file for the one-shot operation and are removed in an `always` cleanup path.
+Production key custody and a systemd-credential or equivalent secret-mount design remain
+acceptance gates.
 
 Controller schema migrations must follow expand/contract compatibility. Automatic activation
 restores the exact prior image and runtime environment when a new release fails readiness, but

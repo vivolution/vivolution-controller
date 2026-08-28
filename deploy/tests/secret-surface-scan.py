@@ -9,18 +9,20 @@ The scanner never extracts an OCI archive to the filesystem.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
-from pathlib import Path
+import stat
 import sys
 import tarfile
 import tempfile
+from pathlib import Path
 from typing import BinaryIO
-
 
 EXPECTED_SECRET_NAMES = (
     "cp_db_owner_password",
     "cp_db_runtime_password",
+    "cp_rls_context_key",
     "cp_django_secret_key",
     "cp_controller_admin_password",
 )
@@ -75,6 +77,11 @@ class SecretScanner:
             overlap = combined[-overlap_length:] if overlap_length > 0 else b""
         self.scanned_files += 1
 
+    def scan_bytes(self, data: bytes, surface: str, location: str) -> None:
+        self.scanned_bytes += len(data)
+        self._record(data, surface, location)
+        self.scanned_files += 1
+
     def scan_path(self, path: Path, surface: str, location: str) -> None:
         with path.open("rb") as stream:
             self.scan_stream(stream, surface, location)
@@ -112,18 +119,73 @@ def scan_local_project(scanner: SecretScanner, project_root: Path) -> list[str]:
     if not root.is_dir():
         raise ControlledScanError("project_root_was_not_a_directory")
 
-    for current_root, directory_names, file_names in os.walk(root, followlinks=False):
+    def record_walk_error(error: OSError) -> None:
+        relative = Path(error.filename or root)
+        try:
+            relative = relative.relative_to(root)
+        except ValueError:
+            relative = Path("unresolved-walk-entry")
+        errors.append(scanner._safe_location(relative.as_posix()))
+
+    for current_root, directory_names, file_names in os.walk(
+        root,
+        followlinks=False,
+        onerror=record_walk_error,
+    ):
         current = Path(current_root)
         relative_directory = current.relative_to(root)
-        if relative_directory.parts == ("deploy",):
-            directory_names[:] = [name for name in directory_names if name != ".state"]
-        directory_names[:] = [name for name in directory_names if name != ".git"]
+        traversable_directories: list[str] = []
+        for directory_name in directory_names:
+            directory_path = current / directory_name
+            relative = directory_path.relative_to(root)
+            try:
+                entry_mode = directory_path.lstat().st_mode
+            except OSError:
+                errors.append(scanner._safe_location(f"unstatable-entry:{relative.as_posix()}"))
+                continue
+            if stat.S_ISLNK(entry_mode):
+                errors.append(
+                    scanner._safe_location(
+                        f"unscanned-symlink:{relative.as_posix()}"
+                    )
+                )
+                continue
+            if not stat.S_ISDIR(entry_mode):
+                errors.append(
+                    scanner._safe_location(
+                        f"unhandled-filesystem-type:{relative.as_posix()}"
+                    )
+                )
+                continue
+            if directory_name == ".git" or (
+                relative_directory.parts == ("deploy",) and directory_name == ".state"
+            ):
+                continue
+            traversable_directories.append(directory_name)
+        directory_names[:] = traversable_directories
 
         for file_name in file_names:
             path = current / file_name
-            if path.is_symlink() or not path.is_file():
-                continue
             relative = path.relative_to(root)
+            try:
+                entry_mode = path.lstat().st_mode
+            except OSError:
+                errors.append(scanner._safe_location(f"unstatable-entry:{relative.as_posix()}"))
+                continue
+            if stat.S_ISLNK(entry_mode):
+                errors.append(
+                    scanner._safe_location(
+                        f"unscanned-symlink:{relative.as_posix()}"
+                    )
+                )
+                continue
+            if not stat.S_ISREG(entry_mode):
+                errors.append(
+                    scanner._safe_location(
+                        f"unhandled-filesystem-type:{relative.as_posix()}"
+                    )
+                )
+                continue
             surface = (
                 "project_evidence"
                 if relative.parts[:2] == ("deploy", "evidence")
@@ -136,15 +198,65 @@ def scan_local_project(scanner: SecretScanner, project_root: Path) -> list[str]:
     return errors
 
 
+def deterministic_metadata_bytes(fields: list[tuple[str, str]]) -> bytes:
+    """Encode metadata deterministically while preserving exact UTF-8 protected values."""
+    encoded = bytearray(b"tar-metadata-v1\0")
+    for field_name, field_value in fields:
+        name_bytes = field_name.encode("utf-8", errors="backslashreplace")
+        value_bytes = field_value.encode("utf-8", errors="backslashreplace")
+        encoded.extend(len(name_bytes).to_bytes(8, "big"))
+        encoded.extend(name_bytes)
+        encoded.extend(len(value_bytes).to_bytes(8, "big"))
+        encoded.extend(value_bytes)
+    return bytes(encoded)
+
+
+def tar_pax_metadata_bytes(headers: dict[str, str]) -> bytes:
+    fields: list[tuple[str, str]] = []
+    for key, value in sorted(headers.items()):
+        fields.extend((("pax-key", key), ("pax-value", value)))
+    return deterministic_metadata_bytes(fields)
+
+
+def tar_member_metadata_bytes(member: tarfile.TarInfo) -> bytes:
+    """Return deterministic bytes for every secret-bearing tar header field."""
+    fields = [
+        ("name", member.name),
+        ("linkname", member.linkname),
+        ("uname", member.uname),
+        ("gname", member.gname),
+    ]
+    for key, value in sorted(member.pax_headers.items()):
+        fields.extend((("pax-key", key), ("pax-value", value)))
+    return deterministic_metadata_bytes(fields)
+
+
 def scan_oci_archive(scanner: SecretScanner, archive_path: Path) -> list[str]:
     errors: list[str] = []
     try:
-        outer = tarfile.open(archive_path, mode="r:*")
+        outer = tarfile.open(archive_path, mode="r:*")  # noqa: SIM115
     except (OSError, tarfile.TarError):
         raise ControlledScanError("controller_image_archive_unreadable") from None
 
     with outer:
-        members = {member.name: member for member in outer.getmembers() if member.isfile()}
+        members: dict[str, tarfile.TarInfo] = {}
+        outer_members = outer.getmembers()
+        scanner.scan_bytes(
+            tar_pax_metadata_bytes(outer.pax_headers),
+            "controller_image_archive_metadata",
+            "archive-global-pax-headers",
+        )
+        for member_index, member in enumerate(outer_members):
+            scanner.scan_bytes(
+                tar_member_metadata_bytes(member),
+                "controller_image_archive_metadata",
+                f"archive-member:{member_index}:{member.name}",
+            )
+            if not member.isfile():
+                continue
+            if member.name in members:
+                raise ControlledScanError("controller_image_archive_had_duplicate_member")
+            members[member.name] = member
 
         def json_member(member_name: str) -> object:
             member = members.get(member_name)
@@ -178,7 +290,9 @@ def scan_oci_archive(scanner: SecretScanner, archive_path: Path) -> list[str]:
                     layer_descriptor.get("digest"), str
                 ):
                     raise ControlledScanError("controller_image_layer_descriptor_invalid")
-                layer_algorithm, layer_separator, layer_digest = layer_descriptor["digest"].partition(":")
+                layer_algorithm, layer_separator, layer_digest = layer_descriptor[
+                    "digest"
+                ].partition(":")
                 if (
                     layer_algorithm != "sha256"
                     or layer_separator != ":"
@@ -225,13 +339,21 @@ def scan_oci_archive(scanner: SecretScanner, archive_path: Path) -> list[str]:
 
                 spool.seek(0)
                 try:
-                    layer = tarfile.open(fileobj=spool, mode="r:*")
+                    layer = tarfile.open(fileobj=spool, mode="r:*")  # noqa: SIM115
                 except tarfile.TarError:
                     errors.append(scanner._safe_location(f"unreadable-layer:{outer_member.name}"))
                     continue
                 processed_layers.add(outer_member.name)
                 with layer:
-                    for layer_member in layer:
+                    for layer_member_index, layer_member in enumerate(layer):
+                        scanner.scan_bytes(
+                            tar_member_metadata_bytes(layer_member),
+                            "controller_image_layer_metadata",
+                            (
+                                f"layer-member:{outer_member.name}:"
+                                f"{layer_member_index}:{layer_member.name}"
+                            ),
+                        )
                         if not layer_member.isfile():
                             continue
                         layer_stream = layer.extractfile(layer_member)
@@ -248,6 +370,11 @@ def scan_oci_archive(scanner: SecretScanner, archive_path: Path) -> list[str]:
                                 "controller_image_layer",
                                 f"layer:{outer_member.name}:{layer_member.name}",
                             )
+                    scanner.scan_bytes(
+                        tar_pax_metadata_bytes(layer.pax_headers),
+                        "controller_image_layer_metadata",
+                        f"layer-global-pax-headers:{outer_member.name}",
+                    )
         for missing_layer in sorted(expected_layers - processed_layers):
             safe_error = scanner._safe_location(f"unscanned-layer:{missing_layer}")
             if safe_error not in errors:
@@ -269,11 +396,14 @@ def scan_process_arguments(scanner: SecretScanner) -> list[str]:
                     "process_argv",
                     f"pid:{process_directory.name}",
                 )
-        except (FileNotFoundError, ProcessLookupError, PermissionError):
-            # Processes routinely exit during /proc traversal; this is not a coverage error.
+        except (FileNotFoundError, ProcessLookupError):
+            # Processes routinely exit during /proc traversal.
             continue
-        except OSError:
-            errors.append(f"pid:{process_directory.name}")
+        except PermissionError:
+            errors.append(f"unreadable-process-argv:pid:{process_directory.name}")
+        except OSError as error:
+            if error.errno not in {errno.ENOENT, errno.ESRCH}:
+                errors.append(f"unreadable-process-argv:pid:{process_directory.name}")
     return errors
 
 
@@ -331,7 +461,9 @@ def main() -> int:
             "scanned_bytes": scanner.scanned_bytes,
         }
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-        return 2 if errors else 0
+        if errors:
+            return 2
+        return 1 if scanner.findings else 0
     except ControlledScanError as error:
         print(
             json.dumps(
@@ -347,7 +479,7 @@ def main() -> int:
             )
         )
         return 2
-    except Exception:
+    except Exception:  # noqa: BLE001 - uncontrolled details must never reach evidence.
         # Never echo an uncontrolled exception: it could contain a secret-bearing path.
         print(
             '{"coverage_errors":["scanner_runtime_error"],"findings":[],'

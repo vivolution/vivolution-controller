@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 SSH_KEY="${VIVO_LAB_SSH_KEY:-$HOME/.ssh/vivo_cp1_lab_ed25519}"
 SSH_PORT="${VIVO_LAB_SSH_PORT:-2222}"
 KNOWN_HOSTS="${VIVO_LAB_KNOWN_HOSTS:-$SCRIPT_DIR/generated/known_hosts}"

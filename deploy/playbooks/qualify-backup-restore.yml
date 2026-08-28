@@ -3,23 +3,61 @@
   hosts: controllers
   become: true
   gather_facts: false
-  vars:
-    cp_restore_database_name: vivolution_restore_qualification
-    cp_qualification_dump: /var/lib/vivolution/backups/qualification.dump
   tasks:
+    - name: Generate a unique restore qualification identity
+      ansible.builtin.set_fact:
+        cp_restore_run_token: "{{ lookup('pipe', 'openssl rand -hex 8') }}"
+        cp_restore_database_created_by_run: false
+        cp_restore_fixtures_owned_by_run: false
+
+    - name: Select unique restore qualification database
+      ansible.builtin.set_fact:
+        cp_restore_database_name: "vivolution_restore_{{ cp_restore_run_token }}"
+
     - name: Restrict backup/restore qualification to local PostgreSQL profile
       ansible.builtin.assert:
         that:
           - cp_install_local_postgres | bool
+          - cp_restore_run_token is match('^[0-9a-f]{16}$')
           - cp_restore_database_name is match('^[a-z][a-z0-9_]{7,62}$')
         fail_msg: Isolated logical restore qualification requires the local PostgreSQL profile.
 
     - name: Exercise logical backup and isolated restore
       block:
+        - name: Prove deterministic fixture identities are unused
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_database_name }}"
+              - --no-password
+              - --no-align
+              - --tuples-only
+              - --quiet
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-preflight.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          register: cp_restore_fixture_preflight
+          changed_when: false
+          no_log: true
+
+        - name: Refuse to overwrite pre-existing fixture identities
+          ansible.builtin.assert:
+            that:
+              - cp_restore_fixture_preflight.stdout | trim == '0'
+            fail_msg: Qualification fixture UUIDs already exist; no data was changed.
+
         - name: Install deterministic backup qualification fixtures
           ansible.builtin.command:
             argv:
               - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
               - --host=127.0.0.1
               - "--port={{ cp_db_upstream_port }}"
               - "--username={{ cp_db_owner }}"
@@ -29,13 +67,26 @@
             stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-setup.sql') }}"
           environment:
             PGPASSWORD: "{{ cp_db_owner_password }}"
-          changed_when: false
+          changed_when: true
           no_log: true
 
-        - name: Pre-create protected qualification dump
+        - name: Mark successfully installed fixtures as owned by this run
+          ansible.builtin.set_fact:
+            cp_restore_fixtures_owned_by_run: true
+
+        - name: Create unique protected qualification dump
+          ansible.builtin.tempfile:
+            state: file
+            path: /var/lib/vivolution/backups
+            prefix: qualification-
+            suffix: .dump
+          register: cp_qualification_dump_file
+          changed_when: false
+
+        - name: Protect unique qualification dump
           ansible.builtin.file:
-            path: "{{ cp_qualification_dump }}"
-            state: touch
+            path: "{{ cp_qualification_dump_file.path }}"
+            state: file
             owner: root
             group: root
             mode: '0600'
@@ -52,7 +103,8 @@
               - --no-password
               - --format=custom
               - --compress=9
-              - "--file={{ cp_qualification_dump }}"
+              - --exclude-table-data=cp_security.rls_signing_key
+              - "--file={{ cp_qualification_dump_file.path }}"
           environment:
             PGPASSWORD: "{{ cp_db_owner_password }}"
           changed_when: true
@@ -60,7 +112,7 @@
 
         - name: Validate qualification dump archive
           ansible.builtin.command:
-            argv: [pg_restore, --list, "{{ cp_qualification_dump }}"]
+            argv: [pg_restore, --list, "{{ cp_qualification_dump_file.path }}"]
           register: cp_restore_archive_list
           changed_when: false
 
@@ -69,17 +121,29 @@
             that:
               - "'TABLE public core_tenantcontext' in cp_restore_archive_list.stdout"
               - "'TABLE DATA public auth_user' in cp_restore_archive_list.stdout"
+              - "'TABLE DATA cp_security rls_signing_key' not in cp_restore_archive_list.stdout"
             fail_msg: Qualification dump is missing required controller schema or operator data.
 
-        - name: Remove stale isolated restore database
+        - name: Prove unique isolated restore database is absent
           become_user: postgres
           ansible.builtin.command:
             argv:
-              - dropdb
-              - --if-exists
-              - --force
-              - "{{ cp_restore_database_name }}"
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --dbname=postgres
+              - --no-align
+              - --tuples-only
+              - --quiet
+              - "--command=SELECT count(*) FROM pg_database WHERE datname = '{{ cp_restore_database_name }}'"
+          register: cp_restore_database_preflight
           changed_when: false
+
+        - name: Refuse to overwrite a pre-existing restore database
+          ansible.builtin.assert:
+            that:
+              - cp_restore_database_preflight.stdout | trim == '0'
+            fail_msg: The unique restore database unexpectedly exists; it was not changed.
 
         - name: Create isolated restore database
           become_user: postgres
@@ -89,6 +153,10 @@
               - "--owner={{ cp_db_owner }}"
               - "{{ cp_restore_database_name }}"
           changed_when: true
+
+        - name: Mark successfully created restore database as owned by this run
+          ansible.builtin.set_fact:
+            cp_restore_database_created_by_run: true
 
         - name: Restore qualification dump into isolated database
           ansible.builtin.command:
@@ -101,9 +169,35 @@
               - --no-password
               - --no-owner
               - --exit-on-error
-              - "{{ cp_qualification_dump }}"
+              - "{{ cp_qualification_dump_file.path }}"
           environment:
             PGPASSWORD: "{{ cp_db_owner_password }}"
+          changed_when: true
+          no_log: true
+
+        - name: Install the current RLS signing key into the isolated restore
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_restore_database_name }}"
+              - --no-password
+          args:
+            stdin: |
+              \getenv rls_signing_key RLS_CONTEXT_SIGNING_KEY
+              INSERT INTO cp_security.rls_signing_key AS installed_key
+                  (singleton, key_material, rotated_at)
+              VALUES (true, decode(:'rls_signing_key', 'hex'), statement_timestamp())
+              ON CONFLICT (singleton) DO UPDATE
+              SET key_material = EXCLUDED.key_material,
+                  rotated_at = EXCLUDED.rotated_at;
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+            RLS_CONTEXT_SIGNING_KEY: "{{ cp_rls_context_key }}"
           changed_when: true
           no_log: true
 
@@ -111,6 +205,8 @@
           ansible.builtin.command:
             argv:
               - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
               - --host=127.0.0.1
               - "--port={{ cp_db_upstream_port }}"
               - "--username={{ cp_db_owner }}"
@@ -130,13 +226,15 @@
         - name: Require restored controller integrity
           ansible.builtin.assert:
             that:
-              - cp_restore_integrity.stdout | trim == 'true|true|3'
+              - cp_restore_integrity.stdout | trim == 'true|true|3|true|true|true'
             fail_msg: Restored controller database failed schema, operator, or RLS integrity checks.
 
         - name: Exercise restored tenant RLS through runtime identity
           ansible.builtin.command:
             argv:
               - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
               - --host=127.0.0.1
               - "--port={{ cp_db_upstream_port }}"
               - "--username={{ cp_db_runtime_user }}"
@@ -149,6 +247,7 @@
             stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-check.sql') }}"
           environment:
             PGPASSWORD: "{{ cp_db_runtime_password }}"
+            RLS_CONTEXT_SIGNING_KEY: "{{ cp_rls_context_key }}"
           register: cp_restored_rls_check
           changed_when: false
           no_log: true
@@ -156,7 +255,10 @@
         - name: Require restored tenant visibility matrix
           ansible.builtin.assert:
             that:
-              - cp_restored_rls_check.stdout_lines == ['0|0|0', '1|0|1|0|1|0', '0|1|0|1|0|1', '2|2|2']
+              - >-
+                cp_restored_rls_check.stdout_lines ==
+                ['0|0|0', '0|0|0', '0|0|0', '0|0|0',
+                 '1|0|1|0|1|0', '1', '0', '0|1|0|1|0|1', '2|2|2', '0']
             fail_msg: Restored database did not preserve tenant row-level isolation.
 
       always:
@@ -168,12 +270,23 @@
               - --if-exists
               - --force
               - "{{ cp_restore_database_name }}"
-          changed_when: false
+          changed_when: true
+          when: cp_restore_database_created_by_run | bool
+
+        - name: Remove protected qualification dump
+          ansible.builtin.file:
+            path: "{{ cp_qualification_dump_file.path }}"
+            state: absent
+          when:
+            - cp_qualification_dump_file is defined
+            - cp_qualification_dump_file.path is defined
 
         - name: Remove deterministic source qualification fixtures
           ansible.builtin.command:
             argv:
               - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
               - --host=127.0.0.1
               - "--port={{ cp_db_upstream_port }}"
               - "--username={{ cp_db_owner }}"
@@ -183,5 +296,6 @@
             stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-cleanup.sql') }}"
           environment:
             PGPASSWORD: "{{ cp_db_owner_password }}"
-          changed_when: false
+          changed_when: true
           no_log: true
+          when: cp_restore_fixtures_owned_by_run | bool

@@ -108,7 +108,7 @@ stops scanning after the key is pinned, drains the penalty window, and quotes
 the absolute known-hosts path so the space in the project directory cannot be
 misparsed by OpenSSH or Ansible.
 
-## Qualification record — 2026-08-27
+## Historical functional record — 2026-08-27 (superseded)
 
 UTM 4.7.5 build 118 and Debian 13.6 ARM64 completed two clean rebuild
 qualification cycles. The first clean cycle exposed a PgBouncer first-boot
@@ -119,13 +119,13 @@ passed after repair. Its retained evidence is
 
 The final cycle ran the corrected rebuild driver from a fresh sparse disk and
 stock pinned UEFI-variable template, passed strict SSH host-key pinning, and
-qualified the CP1 foundation from the untouched OS. The first deployment
-succeeded without recovery and the immediate second deployment reported zero
-changes. Its retained evidence is
+passed the then-current functional suite from the untouched OS. The first
+deployment succeeded without recovery and Ansible reported zero changes on the
+immediate second deployment. Its retained evidence is
 `deploy/evidence/20260827T183743Z-74252`.
 
-These records qualify the local ARM64 CP1 foundation and rebuild procedure;
-they do not qualify Azure AMD64 behavior, Azure Database for PostgreSQL,
-public TLS, enrollment/PKI, the Edge Agent, or the SIP/media data plane. No
-supported vulnerability scanner was installed, so component inventory and
-secret non-exposure were checked but a vulnerability scan was not performed.
+The August 28 audit later proved that the old `changed=0` check hid PostgreSQL
+SCRAM changes and that these records lacked the release/security provenance and
+vulnerability gate now required. They remain bounded functional evidence; they
+do not qualify the current release, Azure AMD64, Azure Database for PostgreSQL,
+public TLS, enrollment/PKI, the Edge Agent, or the SIP/media data plane.

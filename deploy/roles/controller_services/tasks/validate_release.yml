@@ -1,0 +1,106 @@
+---
+- name: Validate release identifier selected for source verification
+  ansible.builtin.assert:
+    that:
+      - cp_controller_validation_release_id is defined
+      - >-
+        cp_controller_validation_release_id is
+        match('^cp1-[0-9a-f]{64}$')
+    fail_msg: A full CP1 source-manifest release identifier is required.
+
+- name: Revalidate immutable staged controller release
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - -c
+      - |
+        set -euo pipefail
+        export LC_ALL=C
+
+        release_id="$1"
+        release_root="$2"
+        manifest="$release_root/.vivolution-source-manifest.sha256"
+
+        test -d "$release_root"
+        test ! -L "$release_root"
+        test -f "$manifest"
+        test ! -L "$manifest"
+
+        expected_entries="$({
+            awk '
+                {
+                    digest = substr($0, 1, 64)
+                    separator = substr($0, 65, 2)
+                    path = substr($0, 67)
+                    if (length(digest) != 64 || digest !~ /^[0-9a-f]+$/ ||
+                        separator != "  " || path !~ /^[A-Za-z0-9._\/-]+$/) {
+                        exit 1
+                    }
+                    if (path ~ /(^|\/)\.\.($|\/)/ || path ~ /^\//) {
+                        exit 1
+                    }
+                    print path
+                }
+            ' "$manifest"
+        } | sort)"
+        test -n "$expected_entries"
+        test -z "$(printf '%s\n' "$expected_entries" | uniq -d)"
+
+        actual_entries="$({
+            find "$release_root" -type f \
+                ! -path "$manifest" -printf '%P\n'
+        } | sort)"
+        test "$actual_entries" = "$expected_entries"
+
+        expected_directories="$(
+            printf '%s\n' "$expected_entries" |
+                awk '
+                    {
+                        count = split($0, component, "/")
+                        directory = ""
+                        for (part_index = 1; part_index < count; part_index++) {
+                            directory = (directory == "" ? component[part_index] :
+                                directory "/" component[part_index])
+                            print directory
+                        }
+                    }
+                ' | sort -u
+        )"
+        actual_directories="$({
+            find "$release_root" -mindepth 1 -type d -printf '%P\n'
+        } | sort)"
+        test "$actual_directories" = "$expected_directories"
+
+        test -z "$({
+            find "$release_root" -mindepth 1 \
+                \( -type l -o \( ! -type f -a ! -type d \) \) \
+                -print -quit
+        })"
+
+        while IFS= read -r -d '' release_file; do
+            test "$(stat --printf='%a:%u:%g' -- "$release_file")" = '444:0:0'
+        done < <(find "$release_root" -type f -print0)
+
+        while IFS= read -r -d '' release_directory; do
+            test "$(stat --printf='%a:%u:%g' -- "$release_directory")" = '755:0:0'
+        done < <(find "$release_root" -type d -print0)
+
+        cd "$release_root"
+        sha256sum --check --strict .vivolution-source-manifest.sha256
+        manifest_digest="$(sha256sum .vivolution-source-manifest.sha256 | awk '{print $1}')"
+        test "$release_id" = "cp1-$manifest_digest"
+        printf '%s\n' "$manifest_digest"
+      - vivolution-release-validate
+      - "{{ cp_controller_validation_release_id }}"
+      - >-
+        /var/lib/vivolution/releases/{{ cp_controller_validation_release_id }}/controller
+  register: cp_controller_validated_release
+  changed_when: false
+
+- name: Require sanitized staged manifest digest
+  ansible.builtin.assert:
+    that:
+      - >-
+        cp_controller_validated_release.stdout_lines | last is
+        match('^[0-9a-f]{64}$')
+    fail_msg: The staged controller manifest did not produce a valid SHA-256 digest.

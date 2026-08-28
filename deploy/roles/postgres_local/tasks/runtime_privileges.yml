@@ -1,0 +1,48 @@
+---
+- name: Require explicit least-privilege cutover authorization
+  ansible.builtin.assert:
+    that:
+      - cp_postgres_enforce_least_privilege | default(false) | bool
+      - cp_install_local_postgres | bool
+    fail_msg: >-
+      Runtime ACL reconciliation is a post-migration local-PostgreSQL cutover
+      step and must not run during the bridge release.
+
+- name: Reconcile explicit file-session runtime database privileges
+  block:
+    - name: Render protected runtime privilege reconciliation SQL
+      ansible.builtin.template:
+        src: runtime-privileges.sql.j2
+        dest: /run/vivolution-db-runtime-privileges.sql
+        owner: postgres
+        group: postgres
+        mode: '0600'
+      changed_when: false
+
+    - name: Reconcile and prove the runtime database privilege contract
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - --set=ON_ERROR_STOP=1
+          - "--dbname={{ cp_database_name }}"
+          - --file=/run/vivolution-db-runtime-privileges.sql
+      register: cp_db_runtime_privilege_result
+      changed_when: >-
+        'VIVOLUTION_DB_CHANGED:runtime-privileges' in
+        (cp_db_runtime_privilege_result.stdout | default(''))
+
+    - name: Require sanitized runtime privilege verification output
+      ansible.builtin.assert:
+        that:
+          - >-
+            'CP_RUNTIME_PRIVILEGES_OK=file-sessions-auth-readonly-core-dml' in
+            (cp_db_runtime_privilege_result.stdout | default(''))
+        fail_msg: The explicit PostgreSQL runtime privilege contract was not verified.
+  always:
+    - name: Remove runtime privilege reconciliation SQL
+      ansible.builtin.file:
+        path: /run/vivolution-db-runtime-privileges.sql
+        state: absent
+      changed_when: false

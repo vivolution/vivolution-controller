@@ -3,6 +3,8 @@
   hosts: controllers
   become: true
   gather_facts: true
+  vars:
+    cp_verify_rls_fixtures_owned_by_run: false
   tasks:
     - name: Re-run deployment preflight
       ansible.builtin.include_role:
@@ -39,13 +41,44 @@
           - "'[::]:' ~ (cp_controller_web_port | string) not in cp_listeners.stdout"
         fail_msg: PostgreSQL, PgBouncer, or the controller application is exposed beyond loopback.
 
-    - name: Require intended application and ingress listeners
+    - name: Require intended application and ingress listeners only
       ansible.builtin.assert:
         that:
           - "'127.0.0.1:' ~ (cp_controller_web_port | string) in cp_listeners.stdout"
           - "'*:' ~ (cp_ingress_https_port | string) in cp_listeners.stdout"
-          - "'127.0.0.1:2019' in cp_listeners.stdout"
-        fail_msg: The loopback application or declared HTTPS ingress listener is missing.
+          - "':2019' not in cp_listeners.stdout"
+        fail_msg: The declared listeners are missing or the disabled Caddy admin API is listening.
+
+    - name: Prove Caddy admin API is unreachable
+      ansible.builtin.uri:
+        url: http://127.0.0.1:2019/config/
+        method: GET
+        status_code: -1
+        timeout: 2
+      register: cp_caddy_admin_probe
+      failed_when: false
+      changed_when: false
+
+    - name: Require Caddy admin API connection refusal
+      ansible.builtin.assert:
+        that:
+          - cp_caddy_admin_probe.status | default(-1) == -1
+        fail_msg: Caddy's unauthenticated admin API remains reachable from the host network.
+
+    - name: Prove Caddy admin API is unreachable from controller container
+      ansible.builtin.command:
+        argv:
+          - podman
+          - exec
+          - vivolution-cp-web
+          - python
+          - -c
+          - >-
+            import socket;
+            s=socket.socket();
+            s.settimeout(2);
+            raise SystemExit(1 if s.connect_ex(('127.0.0.1', 2019)) == 0 else 0)
+      changed_when: false
 
     - name: Collect active nftables input policy
       ansible.builtin.command:
@@ -115,6 +148,211 @@
     - name: Require ready controller response
       ansible.builtin.assert:
         that: cp_controller_ready.json.status == 'ready'
+
+    - name: Read active controller release marker
+      ansible.builtin.slurp:
+        src: /etc/vivolution/active-release
+      register: cp_verify_active_release_file
+
+    - name: Remember active controller release
+      ansible.builtin.set_fact:
+        cp_verify_active_release: "{{ cp_verify_active_release_file.content | b64decode | trim }}"
+
+    - name: Validate active controller release marker
+      ansible.builtin.assert:
+        that:
+          - cp_verify_active_release is match('^[a-zA-Z0-9][a-zA-Z0-9_.-]{7,79}$')
+        fail_msg: The active controller release marker is invalid.
+
+    - name: Revalidate active staged source and deterministic manifest
+      ansible.builtin.include_role:
+        name: controller_services
+        tasks_from: validate_release.yml
+      vars:
+        cp_controller_validation_release_id: "{{ cp_verify_active_release }}"
+
+    - name: Read active release immutable image registration
+      ansible.builtin.slurp:
+        src: "{{ cp_controller_release_config_root }}/{{ cp_verify_active_release }}/image"
+      register: cp_verify_active_image_file
+
+    - name: Read live Quadlet image reference
+      ansible.builtin.command:
+        argv:
+          - awk
+          - -F=
+          - '$1 == "Image" {sub(/^[^=]*=/, ""); print; exit}'
+          - /etc/containers/systemd/vivolution-cp-web.container
+      register: cp_verify_quadlet_image
+      changed_when: false
+
+    - name: Read live Quadlet runtime environment reference
+      ansible.builtin.command:
+        argv:
+          - awk
+          - -F=
+          - '$1 == "EnvironmentFile" {sub(/^[^=]*=/, ""); print; exit}'
+          - /etc/containers/systemd/vivolution-cp-web.container
+      register: cp_verify_quadlet_runtime_environment
+      changed_when: false
+
+    - name: Inspect active runtime environment
+      ansible.builtin.stat:
+        path: >-
+          {{ cp_controller_release_config_root }}/{{ cp_verify_active_release }}/runtime.env
+        follow: false
+        checksum_algorithm: sha256
+      register: cp_verify_active_runtime_environment
+      no_log: true
+
+    - name: Inspect running controller image ID
+      ansible.builtin.command:
+        argv:
+          - podman
+          - inspect
+          - vivolution-cp-web
+          - --format
+          - "{{ '{{' }}.Image{{ '}}' }}"
+      register: cp_verify_running_image
+      changed_when: false
+
+    - name: Require immutable active and rollback-safe image identity
+      ansible.builtin.assert:
+        that:
+          - >-
+            cp_verify_active_image_file.content | b64decode | trim is
+            match('^sha256:[0-9a-f]{64}$')
+          - >-
+            cp_verify_quadlet_image.stdout | trim ==
+            cp_verify_active_image_file.content | b64decode | trim
+          - >-
+            cp_verify_running_image.stdout | trim | regex_replace('^sha256:', '') ==
+            cp_verify_active_image_file.content | b64decode | trim |
+            regex_replace('^sha256:', '')
+          - >-
+            cp_verify_quadlet_runtime_environment.stdout | trim ==
+            cp_controller_release_config_root ~ '/' ~ cp_verify_active_release ~ '/runtime.env'
+          - cp_verify_active_runtime_environment.stat.isreg | default(false)
+          - not (cp_verify_active_runtime_environment.stat.islnk | default(false))
+          - cp_verify_active_runtime_environment.stat.uid | default(-1) | int == 0
+          - cp_verify_active_runtime_environment.stat.gid | default(-1) | int == 0
+          - cp_verify_active_runtime_environment.stat.mode | default('') == '0600'
+          - cp_verify_active_runtime_environment.stat.nlink | default(-1) | int == 1
+        fail_msg: Active release, Quadlet, image, or protected runtime environment is inconsistent.
+
+    - name: Hash active release source manifest
+      ansible.builtin.command:
+        argv:
+          - sha256sum
+          - "/var/lib/vivolution/releases/{{ cp_verify_active_release }}/controller/.vivolution-source-manifest.sha256"
+      register: cp_verify_source_manifest_sha256
+      changed_when: false
+
+    - name: Inspect active image provenance labels
+      ansible.builtin.command:
+        argv:
+          - podman
+          - image
+          - inspect
+          - "{{ cp_verify_active_image_file.content | b64decode | trim }}"
+          - --format
+          - >-
+            {{ '{{' }} index .Labels "org.vivolution.release.id" {{ '}}' }}|{{
+            '{{' }} index .Labels "org.vivolution.release.manifest-sha256" {{ '}}' }}
+      register: cp_verify_active_image_provenance
+      changed_when: false
+
+    - name: Require active image provenance to match staged source
+      ansible.builtin.assert:
+        that:
+          - >-
+            cp_verify_active_image_provenance.stdout.split('|') | length == 2
+          - >-
+            cp_verify_active_image_provenance.stdout.split('|')[0] ==
+            cp_verify_active_release
+          - >-
+            cp_verify_active_image_provenance.stdout.split('|')[1] ==
+            cp_verify_source_manifest_sha256.stdout.split()[0]
+        fail_msg: The active image is not bound to its manifest-verified release source.
+
+    - name: Check for rollback release marker
+      ansible.builtin.stat:
+        path: /etc/vivolution/previous-release
+      register: cp_verify_previous_release_stat
+
+    - name: Read rollback release marker
+      ansible.builtin.slurp:
+        src: /etc/vivolution/previous-release
+      register: cp_verify_previous_release_file
+      when: cp_verify_previous_release_stat.stat.exists
+
+    - name: Remember rollback release
+      ansible.builtin.set_fact:
+        cp_verify_previous_release: >-
+          {{ (cp_verify_previous_release_file.content | b64decode | trim)
+             if cp_verify_previous_release_stat.stat.exists else '' }}
+
+    - name: Validate rollback release marker
+      ansible.builtin.assert:
+        that:
+          - >-
+            cp_verify_previous_release | length == 0 or
+            cp_verify_previous_release is match('^[a-zA-Z0-9][a-zA-Z0-9_.-]{7,79}$')
+          - >-
+            cp_verify_previous_release | length == 0 or
+            cp_verify_previous_release != cp_verify_active_release
+        fail_msg: The rollback release marker is invalid.
+
+    - name: Read rollback release immutable image registration
+      ansible.builtin.slurp:
+        src: "{{ cp_controller_release_config_root }}/{{ cp_verify_previous_release }}/image"
+      register: cp_verify_previous_image_file
+      when: cp_verify_previous_release | length > 0
+
+    - name: Require immutable rollback image registration
+      ansible.builtin.assert:
+        that:
+          - >-
+            cp_verify_previous_image_file.content | b64decode | trim is
+            match('^sha256:[0-9a-f]{64}$')
+        fail_msg: The rollback release is not registered to an immutable image ID.
+      when: cp_verify_previous_release | length > 0
+
+    - name: Inspect rollback runtime environment
+      ansible.builtin.stat:
+        path: >-
+          {{ cp_controller_release_config_root }}/{{ cp_verify_previous_release }}/runtime.env
+        follow: false
+        checksum_algorithm: sha256
+      register: cp_verify_previous_runtime_environment
+      no_log: true
+      when: cp_verify_previous_release | length > 0
+
+    - name: Require protected rollback runtime environment
+      ansible.builtin.assert:
+        that:
+          - cp_verify_previous_runtime_environment.stat.isreg | default(false)
+          - not (cp_verify_previous_runtime_environment.stat.islnk | default(false))
+          - cp_verify_previous_runtime_environment.stat.uid | default(-1) | int == 0
+          - cp_verify_previous_runtime_environment.stat.gid | default(-1) | int == 0
+          - cp_verify_previous_runtime_environment.stat.mode | default('') == '0600'
+          - cp_verify_previous_runtime_environment.stat.nlink | default(-1) | int == 1
+          - >-
+            cp_verify_previous_runtime_environment.stat.checksum | default('') is
+            match('^[0-9a-f]{64}$')
+        fail_msg: The rollback runtime environment is not a private regular file.
+      no_log: true
+      when: cp_verify_previous_release | length > 0
+
+    - name: Require rollback image to remain locally available
+      ansible.builtin.command:
+        argv:
+          - podman
+          - image
+          - exists
+          - "{{ cp_verify_previous_image_file.content | b64decode | trim }}"
+      changed_when: false
+      when: cp_verify_previous_release | length > 0
 
     - name: Verify trusted HTTPS ingress
       ansible.builtin.uri:
@@ -186,24 +424,40 @@
           - "'CPUQuotaPerSecUSec=1.500000s' in cp_controller_resource_limits.stdout"
         fail_msg: Controller systemd memory or CPU limits are missing.
 
-    - name: Find protected per-release environments
+    - name: Find protected per-release runtime environments
       ansible.builtin.find:
         paths: /etc/vivolution/releases
         recurse: true
         file_type: file
         patterns:
           - runtime.env
-          - migrate.env
       register: cp_controller_secret_files
 
-    - name: Require root-only per-release environments
+    - name: Require root-only per-release runtime environments
       ansible.builtin.assert:
         that:
-          - cp_controller_secret_files.matched >= 2
+          - cp_controller_secret_files.matched >= 1
           - cp_controller_secret_files.files | rejectattr('mode', 'equalto', '0600') | list | length == 0
           - cp_controller_secret_files.files | rejectattr('uid', 'equalto', 0) | list | length == 0
           - cp_controller_secret_files.files | rejectattr('gid', 'equalto', 0) | list | length == 0
-        fail_msg: A controller release environment is not root-owned mode 0600.
+          - cp_controller_secret_files.files | rejectattr('nlink', 'equalto', 1) | list | length == 0
+        fail_msg: A controller runtime environment is not a private root-owned mode-0600 file.
+
+    - name: Find forbidden persistent migration environments
+      ansible.builtin.find:
+        paths: /etc/vivolution/releases
+        recurse: true
+        hidden: true
+        file_type: any
+        patterns:
+          - migrate.env
+      register: cp_controller_persistent_migrate_environments
+
+    - name: Reject persistent schema-owner or administrator credentials
+      ansible.builtin.assert:
+        that:
+          - cp_controller_persistent_migrate_environments.matched == 0
+        fail_msg: A persistent migration environment still retains privileged credentials.
 
     - name: Inspect pinned controller base-image index
       ansible.builtin.command:
@@ -225,10 +479,40 @@
     - name: Verify PostgreSQL row-level tenant isolation
       when: cp_install_local_postgres | bool
       block:
+        - name: Prove deterministic RLS fixture identities are unused
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_database_name }}"
+              - --no-password
+              - --no-align
+              - --tuples-only
+              - --quiet
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-preflight.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          register: cp_verify_rls_fixture_preflight
+          changed_when: false
+          no_log: true
+
+        - name: Refuse to overwrite pre-existing RLS fixture identities
+          ansible.builtin.assert:
+            that:
+              - cp_verify_rls_fixture_preflight.stdout | trim == '0'
+            fail_msg: Qualification fixture UUIDs already exist; no data was changed.
+
         - name: Install deterministic RLS qualification fixtures
           ansible.builtin.command:
             argv:
               - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
               - --host=127.0.0.1
               - "--port={{ cp_db_upstream_port }}"
               - "--username={{ cp_db_owner }}"
@@ -238,13 +522,19 @@
             stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-setup.sql') }}"
           environment:
             PGPASSWORD: "{{ cp_db_owner_password }}"
-          changed_when: false
+          changed_when: true
           no_log: true
+
+        - name: Mark successfully installed RLS fixtures as owned by this run
+          ansible.builtin.set_fact:
+            cp_verify_rls_fixtures_owned_by_run: true
 
         - name: Exercise tenant RLS through the runtime database identity
           ansible.builtin.command:
             argv:
               - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
               - --host=127.0.0.1
               - "--port={{ cp_pgbouncer_port }}"
               - "--username={{ cp_db_runtime_user }}"
@@ -257,20 +547,26 @@
             stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-check.sql') }}"
           environment:
             PGPASSWORD: "{{ cp_db_runtime_password }}"
+            RLS_CONTEXT_SIGNING_KEY: "{{ cp_rls_context_key }}"
           register: cp_rls_check
           changed_when: false
           no_log: true
 
-        - name: Require no-context, tenant A, tenant B, and operator isolation results
+        - name: Require signed read/write tenant and operator isolation results
           ansible.builtin.assert:
             that:
-              - cp_rls_check.stdout_lines == ['0|0|0', '1|0|1|0|1|0', '0|1|0|1|0|1', '2|2|2']
+              - >-
+                cp_rls_check.stdout_lines ==
+                ['0|0|0', '0|0|0', '0|0|0', '0|0|0',
+                 '1|0|1|0|1|0', '1', '0', '0|1|0|1|0|1', '2|2|2', '0']
             fail_msg: PostgreSQL row-level tenant isolation did not match the expected visibility matrix.
       always:
         - name: Remove deterministic RLS qualification fixtures
           ansible.builtin.command:
             argv:
               - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
               - --host=127.0.0.1
               - "--port={{ cp_db_upstream_port }}"
               - "--username={{ cp_db_owner }}"
@@ -280,5 +576,6 @@
             stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-cleanup.sql') }}"
           environment:
             PGPASSWORD: "{{ cp_db_owner_password }}"
-          changed_when: false
+          changed_when: true
           no_log: true
+          when: cp_verify_rls_fixtures_owned_by_run | bool

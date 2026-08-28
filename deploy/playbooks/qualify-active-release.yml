@@ -1,0 +1,189 @@
+---
+- name: Prove the requested immutable controller release is active
+  hosts: controllers
+  become: true
+  gather_facts: false
+  vars:
+    cp_active_release_config_root: /etc/vivolution/releases
+  tasks:
+    - name: Validate expected active release
+      ansible.builtin.assert:
+        that:
+          - cp_expected_active_release is defined
+          - cp_expected_active_release is match('^cp1-[0-9a-f]{64}$')
+
+    - name: Inspect active release marker
+      ansible.builtin.stat:
+        path: /etc/vivolution/active-release
+        follow: false
+      register: cp_active_release_marker_qualification
+
+    - name: Require a safe active release marker
+      ansible.builtin.assert:
+        that:
+          - cp_active_release_marker_qualification.stat.isreg | default(false)
+          - not (cp_active_release_marker_qualification.stat.islnk | default(false))
+          - cp_active_release_marker_qualification.stat.uid | default(-1) | int == 0
+          - cp_active_release_marker_qualification.stat.gid | default(-1) | int == 0
+          - cp_active_release_marker_qualification.stat.mode | default('') == '0644'
+          - cp_active_release_marker_qualification.stat.nlink | default(-1) | int == 1
+        fail_msg: The active release marker is missing, linked, or unsafe.
+
+    - name: Read active release marker
+      ansible.builtin.slurp:
+        src: /etc/vivolution/active-release
+      register: cp_active_release_qualification
+
+    - name: Read active immutable image registration
+      ansible.builtin.slurp:
+        src: >-
+          {{ cp_active_release_config_root }}/{{ cp_expected_active_release }}/image
+      register: cp_active_image_qualification
+
+    - name: Revalidate active staged source and deterministic manifest
+      ansible.builtin.include_role:
+        name: controller_services
+        tasks_from: validate_release.yml
+      vars:
+        cp_controller_validation_release_id: "{{ cp_expected_active_release }}"
+
+    - name: Select validated active source-manifest digest
+      ansible.builtin.set_fact:
+        cp_active_source_manifest_digest: >-
+          {{ cp_controller_validated_release.stdout_lines | last }}
+
+    - name: Inspect running controller state and image
+      ansible.builtin.command:
+        argv:
+          - podman
+          - inspect
+          - vivolution-cp-web
+          - --format
+          - "{{ '{{' }}.State.Running{{ '}}' }}|{{ '{{' }}.Image{{ '}}' }}"
+      register: cp_running_image_qualification
+      changed_when: false
+
+    - name: Inspect active image identity and provenance
+      ansible.builtin.command:
+        argv:
+          - podman
+          - image
+          - inspect
+          - "{{ cp_active_image_qualification.content | b64decode | trim }}"
+          - --format
+          - >-
+            {{ '{{' }}.Id{{ '}}' }}|{{ '{{' }} index .Labels "org.vivolution.release.id" {{ '}}' }}|{{
+            '{{' }} index .Labels "org.vivolution.release.manifest-sha256" {{ '}}' }}
+      register: cp_active_image_provenance_qualification
+      changed_when: false
+
+    - name: Read active Quadlet image
+      ansible.builtin.command:
+        argv:
+          - awk
+          - -F=
+          - '$1 == "Image" {sub(/^[^=]*=/, ""); print; exit}'
+          - /etc/containers/systemd/vivolution-cp-web.container
+      register: cp_active_quadlet_image_qualification
+      changed_when: false
+
+    - name: Read active Quadlet runtime environment
+      ansible.builtin.command:
+        argv:
+          - awk
+          - -F=
+          - '$1 == "EnvironmentFile" {sub(/^[^=]*=/, ""); print; exit}'
+          - /etc/containers/systemd/vivolution-cp-web.container
+      register: cp_active_quadlet_environment_qualification
+      changed_when: false
+
+    - name: Inspect active protected runtime environment
+      ansible.builtin.stat:
+        path: >-
+          {{ cp_active_release_config_root }}/{{ cp_expected_active_release }}/runtime.env
+        follow: false
+        checksum_algorithm: sha256
+      register: cp_active_runtime_environment_qualification
+      no_log: true
+
+    - name: Verify source files embedded in active controller image
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - --rm
+          - --network=none
+          - --pull=never
+          - --read-only
+          - --cap-drop=all
+          - --security-opt=no-new-privileges
+          - --workdir=/app
+          - --entrypoint=/usr/bin/sha256sum
+          - "{{ cp_active_image_qualification.content | b64decode | trim }}"
+          - --check
+          - --strict
+          - .vivolution-source-manifest.sha256
+      changed_when: false
+
+    - name: Hash source manifest embedded in active controller image
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - --rm
+          - --network=none
+          - --pull=never
+          - --read-only
+          - --cap-drop=all
+          - --security-opt=no-new-privileges
+          - --entrypoint=/usr/bin/sha256sum
+          - "{{ cp_active_image_qualification.content | b64decode | trim }}"
+          - /app/.vivolution-source-manifest.sha256
+      register: cp_active_embedded_manifest_qualification
+      changed_when: false
+
+    - name: Require requested release and exact image to be active
+      ansible.builtin.assert:
+        that:
+          - cp_active_release_qualification.content | b64decode | trim == cp_expected_active_release
+          - cp_active_image_qualification.content | b64decode | trim is match('^sha256:[0-9a-f]{64}$')
+          - cp_active_source_manifest_digest is match('^[0-9a-f]{64}$')
+          - cp_running_image_qualification.stdout.split('|') | length == 2
+          - cp_running_image_qualification.stdout.split('|')[0] | lower == 'true'
+          - >-
+            cp_running_image_qualification.stdout.split('|')[1] |
+            trim | regex_replace('^sha256:', '') ==
+            cp_active_image_qualification.content | b64decode | trim |
+            regex_replace('^sha256:', '')
+          - cp_active_image_provenance_qualification.stdout.split('|') | length == 3
+          - >-
+            cp_active_image_provenance_qualification.stdout.split('|')[0] |
+            regex_replace('^sha256:', '') ==
+            cp_active_image_qualification.content | b64decode | trim |
+            regex_replace('^sha256:', '')
+          - >-
+            cp_active_image_provenance_qualification.stdout.split('|')[1] ==
+            cp_expected_active_release
+          - >-
+            cp_active_image_provenance_qualification.stdout.split('|')[2] ==
+            cp_active_source_manifest_digest
+          - >-
+            cp_active_quadlet_image_qualification.stdout | trim ==
+            cp_active_image_qualification.content | b64decode | trim
+          - >-
+            cp_active_quadlet_environment_qualification.stdout | trim ==
+            cp_active_release_config_root ~ '/' ~ cp_expected_active_release ~ '/runtime.env'
+          - cp_active_runtime_environment_qualification.stat.isreg | default(false)
+          - not (cp_active_runtime_environment_qualification.stat.islnk | default(false))
+          - cp_active_runtime_environment_qualification.stat.uid | default(-1) | int == 0
+          - cp_active_runtime_environment_qualification.stat.gid | default(-1) | int == 0
+          - cp_active_runtime_environment_qualification.stat.mode | default('') == '0600'
+          - cp_active_runtime_environment_qualification.stat.nlink | default(-1) | int == 1
+          - >-
+            cp_active_embedded_manifest_qualification.stdout.split()[0] ==
+            cp_active_source_manifest_digest
+        fail_msg: The requested release is not backed by the exact running immutable image.
+
+    - name: Report active release result
+      ansible.builtin.debug:
+        msg: active_release=passed

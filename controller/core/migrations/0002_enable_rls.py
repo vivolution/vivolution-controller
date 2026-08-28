@@ -1,6 +1,5 @@
 from django.db import migrations
 
-
 POLICY_NAME = "tenant_context_isolation"
 SCOPED_TABLES = {
     "core_tenantcontext": "id",

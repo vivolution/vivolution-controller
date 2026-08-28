@@ -5,7 +5,6 @@ from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
 
-
 SHA256_DIGEST_VALIDATOR = RegexValidator(
     regex=r"^$|^sha256:[0-9a-f]{64}$",
     message="Use an empty value or a lowercase sha256:<64 hex characters> digest.",

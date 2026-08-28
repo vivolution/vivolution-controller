@@ -1,27 +1,129 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROOT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 DEPLOY_DIR="$ROOT_DIR/deploy"
 STATE_DIR="$DEPLOY_DIR/.state"
 LAB_SECRETS="$STATE_DIR/lab-secrets.yml"
 LAB_INVENTORY="${VIVO_CP_INVENTORY:-$DEPLOY_DIR/inventories/lab/hosts.yml}"
+CONTROLLER_TEST_VENV="$STATE_DIR/controller-test-venv"
+EVIDENCE_SIGNING_KEY="$STATE_DIR/evidence-signing-key"
+EVIDENCE_PUBLIC_KEY="$DEPLOY_DIR/trust/evidence-signing-key.pub"
+EVIDENCE_ALLOWED_SIGNERS="$DEPLOY_DIR/trust/evidence-allowed-signers"
 
-controller_release_id() {
+# Never trust cleanup targets inherited from the caller's environment. These
+# values are populated only after this process creates the corresponding paths.
+evidence_dir=""
+evidence_sealed=false
+vulnerability_archive=""
+vulnerability_source_archive=""
+vulnerability_source_directory=""
+vulnerability_rootfs=""
+
+hash_file() {
+    hash_output="$(shasum -a 256 "$1")"
+    printf '%s\n' "${hash_output%% *}"
+}
+
+tooling_version() {
+    awk -F'==' -v requested_tool="$1" \
+        '$1 == requested_tool { print $2; found = 1 } END { if (!found) exit 1 }' \
+        "$DEPLOY_DIR/tooling.lock"
+}
+
+select_controller_python() {
+    pinned_python_version="$(tooling_version controller-python)"
+    pinned_python_minor="${pinned_python_version%.*}"
+    for python_candidate_name in "python$pinned_python_minor" python3; do
+        python_candidate="$(command -v "$python_candidate_name" 2>/dev/null || true)"
+        [ -n "$python_candidate" ] || continue
+        python_candidate_version="$($python_candidate -c \
+            'import platform; print(platform.python_version())')"
+        if [ "$python_candidate_version" = "$pinned_python_version" ]; then
+            printf '%s\n' "$python_candidate"
+            return 0
+        fi
+    done
+    printf 'Controller Python %s is required by deploy/tooling.lock.\n' \
+        "$pinned_python_version" >&2
+    return 1
+}
+
+controller_source_manifest() {
     require_command shasum
-    source_digest="$({
+    (
         cd "$ROOT_DIR/controller"
-        find . -type f \
-            ! -path './.venv/*' \
-            ! -path './.test-venv/*' \
+        [ -d core ] && [ -d cp1 ] || {
+            printf 'Controller source directories core/ and cp1/ are required.\n' >&2
+            exit 1
+        }
+        source_list="$(mktemp)"
+        sorted_source_list="$(mktemp)"
+        symlink_list="$(mktemp)"
+        trap 'rm -f "$source_list" "$sorted_source_list" "$symlink_list"' \
+            EXIT HUP INT TERM
+        for required_source_file in \
+            .dockerignore Containerfile constraints.txt entrypoint.sh manage.py requirements.lock; do
+            [ -f "$required_source_file" ] && [ ! -L "$required_source_file" ] || {
+                printf 'Unsafe or missing controller source: %s\n' "$required_source_file" >&2
+                exit 1
+            }
+        done
+        find core cp1 -type l -print > "$symlink_list"
+        if [ -s "$symlink_list" ]; then
+            printf 'Controller code trees must not contain symbolic links.\n' >&2
+            exit 1
+        fi
+        printf '%s\n' \
+            .dockerignore \
+            Containerfile \
+            constraints.txt \
+            entrypoint.sh \
+            manage.py \
+            requirements.lock > "$source_list"
+        find core cp1 -type f \
             ! -path '*/__pycache__/*' \
             ! -name '*.pyc' \
+            ! -name '*.pyo' \
             ! -name '.DS_Store' \
-            -print | LC_ALL=C sort | while IFS= read -r source_file; do
-                shasum -a 256 "$source_file"
-            done
-    } | shasum -a 256 | awk '{print substr($1,1,16)}')"
-    printf 'cp1-%s\n' "$source_digest"
+            ! -path '*/.*' \
+            -print >> "$source_list"
+        LC_ALL=C sort -u "$source_list" > "$sorted_source_list"
+        while IFS= read -r source_file; do
+            [ -f "$source_file" ] && [ ! -L "$source_file" ] || {
+                printf 'Unsafe or missing controller source: %s\n' "$source_file" >&2
+                exit 1
+            }
+            source_hash="$(hash_file "$source_file")"
+            printf '%s  %s\n' "$source_hash" "$source_file"
+        done < "$sorted_source_list"
+    )
+}
+
+controller_release_id() {
+    (
+        manifest_file="$(mktemp)"
+        trap 'rm -f "$manifest_file"' EXIT HUP INT TERM
+        controller_source_manifest > "$manifest_file"
+        printf 'cp1-%s\n' "$(hash_file "$manifest_file")"
+    )
+}
+
+project_source_digest() {
+    require_command git
+    require_command shasum
+    (
+        project_index="$(mktemp)"
+        sorted_project_index="$(mktemp)"
+        trap 'rm -f "$project_index" "$sorted_project_index"' EXIT HUP INT TERM
+        git -C "$ROOT_DIR" ls-files -s > "$project_index"
+        LC_ALL=C sort "$project_index" > "$sorted_project_index"
+        hash_file "$sorted_project_index"
+    )
+}
+
+source_commit() {
+    git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf 'uncommitted\n'
 }
 
 usage() {
@@ -30,7 +132,11 @@ usage() {
         '' \
         'Commands:' \
         '  init       Generate protected, local-only lab credentials' \
-        '  syntax     Parse and syntax-check the Ansible playbooks' \
+        '  trust-init Enroll a local evidence signing identity' \
+        '  verify-evidence <dir>  Verify a sealed evidence directory' \
+        '  preflight  Run all local static, migration, and test gates' \
+        '  release-id Print the deterministic controller release identifier' \
+        '  syntax     Parse and syntax-check every Ansible playbook' \
         '  install    Install or reconcile the local CP1 lab' \
         '  upgrade    Build and activate the current controller source release' \
         '  rollback   Activate the previously deployed controller release' \
@@ -40,6 +146,10 @@ usage() {
         '  reboot-test Prove clean host reboot and complete service recovery' \
         '  resource-test Prove the bounded local resource/endurance envelope' \
         '  secret-test Prove secret non-exposure and record components' \
+        '  admin-test Prove the real HTTPS administrator login flow' \
+        '  bridge-test Prove signed and N-1 RLS bridge compatibility' \
+        '  bridge-qualify Deploy and seal the one-release RLS bridge' \
+        '  vulnerability-test Scan source dependencies and the exact live image' \
         '  verify     Run the CP1 acceptance checks' \
         '  qualify    Run the complete CP1 foundation qualification suite'
 }
@@ -52,56 +162,384 @@ require_command() {
 }
 
 require_inventory() {
-    [ -f "$LAB_INVENTORY" ] || {
+    [ -f "$LAB_INVENTORY" ] && [ ! -L "$LAB_INVENTORY" ] || {
         printf 'Controller inventory is missing: %s\n' "$LAB_INVENTORY" >&2
+        exit 1
+    }
+    inventory_parent="$(CDPATH='' cd -- "$(dirname -- "$LAB_INVENTORY")" && pwd -P)"
+    inventory_absolute="$inventory_parent/$(basename -- "$LAB_INVENTORY")"
+    case "$inventory_absolute" in
+        "$ROOT_DIR"/*) ;;
+        *)
+            printf 'Controller inventory must be inside the CP1 repository.\n' >&2
+            exit 1
+            ;;
+    esac
+    inventory_relative="${inventory_absolute#"$ROOT_DIR"/}"
+    git -C "$ROOT_DIR" ls-files --error-unmatch "$inventory_relative" >/dev/null 2>&1 || {
+        printf 'Controller inventory must be tracked by Git: %s\n' "$inventory_relative" >&2
         exit 1
     }
 }
 
-init_secrets() {
+ensure_private_directory() {
+    private_directory="$1"
+    if [ -e "$private_directory" ] || [ -L "$private_directory" ]; then
+        [ -d "$private_directory" ] && [ ! -L "$private_directory" ] || {
+            printf 'Private state path must be a real directory: %s\n' \
+                "$private_directory" >&2
+            return 1
+        }
+    else
+        mkdir "$private_directory"
+    fi
+    private_directory_owner="$(stat -f '%u' "$private_directory")"
+    [ "$private_directory_owner" = "$(id -u)" ] || {
+        printf 'Private state directory has an unexpected owner: %s\n' \
+            "$private_directory" >&2
+        return 1
+    }
+    chmod 0700 "$private_directory"
+}
+
+require_owned_regular_file() {
+    protected_file="$1"
+    required_mode="$2"
+    [ -f "$protected_file" ] && [ ! -L "$protected_file" ] || {
+        printf 'Protected path must be a regular non-symbolic file: %s\n' \
+            "$protected_file" >&2
+        return 1
+    }
+    protected_file_metadata="$(stat -f '%u:%l:%Lp' "$protected_file")"
+    [ "$protected_file_metadata" = "$(id -u):1:$required_mode" ] || {
+        printf 'Protected file has unsafe ownership, links, or mode: %s\n' \
+            "$protected_file" >&2
+        return 1
+    }
+}
+
+validate_lab_secret_contents() {
+    awk -F': ' '
+        NR == 1 {
+            if ($0 != "---") exit 1
+            next
+        }
+        NF != 2 { exit 1 }
+        $1 == "cp_db_owner_password" {
+            if (++owner != 1 || length($2) != 64 || $2 !~ /^[0-9a-f]+$/) exit 1
+            next
+        }
+        $1 == "cp_db_runtime_password" {
+            if (++runtime != 1 || length($2) != 64 || $2 !~ /^[0-9a-f]+$/) exit 1
+            next
+        }
+        $1 == "cp_rls_context_key" {
+            if (++rls != 1 || length($2) != 64 || $2 !~ /^[0-9a-f]+$/) exit 1
+            next
+        }
+        $1 == "cp_django_secret_key" {
+            if (++django != 1 || length($2) != 64 || $2 !~ /^[A-Za-z0-9+\/]+$/) exit 1
+            next
+        }
+        $1 == "cp_controller_admin_password" {
+            if (++admin != 1 || length($2) != 48 || $2 !~ /^[0-9a-f]+$/) exit 1
+            next
+        }
+        { exit 1 }
+        END {
+            if (NR != 6 || owner != 1 || runtime != 1 || rls != 1 ||
+                django != 1 || admin != 1) exit 1
+        }
+    ' "$1"
+}
+
+validate_lab_secrets() {
+    require_owned_regular_file "$LAB_SECRETS" 600
+    validate_lab_secret_contents "$LAB_SECRETS" || {
+        printf 'Lab secrets do not match the exact protected CP1 schema.\n' >&2
+        return 1
+    }
+}
+
+init_secrets() (
     require_command openssl
     umask 077
-    mkdir -p "$STATE_DIR"
+    ensure_private_directory "$STATE_DIR"
     if [ -e "$LAB_SECRETS" ]; then
-        if ! grep -q '^cp_controller_admin_password:' "$LAB_SECRETS"; then
-            admin_password="$(openssl rand -hex 24)"
-            printf 'cp_controller_admin_password: %s\n' "$admin_password" >> "$LAB_SECRETS"
-            unset admin_password
-            chmod 0600 "$LAB_SECRETS"
-            printf 'Added protected controller operator credential.\n'
-        else
-            printf 'Protected lab secrets already exist: %s\n' "$LAB_SECRETS"
-        fi
-        return 0
+        validate_lab_secrets
+        printf 'Protected lab secrets already exist: %s\n' "$LAB_SECRETS"
+        exit 0
     fi
 
     owner_password="$(openssl rand -hex 32)"
     runtime_password="$(openssl rand -hex 32)"
+    rls_context_key="$(openssl rand -hex 32)"
     django_key="$(openssl rand -base64 48 | tr -d '\n')"
     admin_password="$(openssl rand -hex 24)"
-    temp_file="$STATE_DIR/.lab-secrets.yml.tmp"
+    temp_file="$(mktemp "$STATE_DIR/lab-secrets.XXXXXX")"
+    trap 'rm -f "$temp_file"' EXIT HUP INT TERM
     {
         printf '%s\n' '---'
         printf 'cp_db_owner_password: %s\n' "$owner_password"
         printf 'cp_db_runtime_password: %s\n' "$runtime_password"
+        printf 'cp_rls_context_key: %s\n' "$rls_context_key"
         printf 'cp_django_secret_key: %s\n' "$django_key"
         printf 'cp_controller_admin_password: %s\n' "$admin_password"
     } > "$temp_file"
     chmod 0600 "$temp_file"
-    mv "$temp_file" "$LAB_SECRETS"
-    unset owner_password runtime_password django_key admin_password
+    validate_lab_secret_contents "$temp_file"
+    mv -n "$temp_file" "$LAB_SECRETS"
+    [ ! -e "$temp_file" ] || {
+        printf 'Lab secrets appeared concurrently and were not overwritten.\n' >&2
+        exit 1
+    }
+    validate_lab_secrets
+    trap - EXIT HUP INT TERM
+    unset owner_password runtime_password rls_context_key django_key admin_password
     printf 'Created protected lab secrets: %s\n' "$LAB_SECRETS"
+)
+
+init_evidence_trust() (
+    require_command ssh-keygen
+    umask 077
+    ensure_private_directory "$STATE_DIR"
+    ensure_private_directory "$DEPLOY_DIR/trust"
+
+    evidence_private_public_key="$EVIDENCE_SIGNING_KEY.pub"
+    if [ -e "$EVIDENCE_SIGNING_KEY" ] || [ -L "$EVIDENCE_SIGNING_KEY" ]; then
+        require_owned_regular_file "$EVIDENCE_SIGNING_KEY" 600
+        require_owned_regular_file "$evidence_private_public_key" 600
+    else
+        [ ! -e "$evidence_private_public_key" ] && [ ! -L "$evidence_private_public_key" ] || {
+            printf 'Refusing an orphaned evidence public-key path.\n' >&2
+            exit 1
+        }
+        evidence_key_directory="$(mktemp -d "$STATE_DIR/evidence-key.XXXXXX")"
+        evidence_key_temp="$evidence_key_directory/signing-key"
+        cleanup_evidence_key_temp() {
+            rm -f "$evidence_key_temp" "$evidence_key_temp.pub"
+            rmdir "$evidence_key_directory"
+        }
+        trap cleanup_evidence_key_temp EXIT HUP INT TERM
+        ssh-keygen -q -t ed25519 -N '' \
+            -C vivolution-cp1-evidence-local \
+            -f "$evidence_key_temp"
+        chmod 0600 "$evidence_key_temp" "$evidence_key_temp.pub"
+        mv -n "$evidence_key_temp" "$EVIDENCE_SIGNING_KEY"
+        mv -n "$evidence_key_temp.pub" "$evidence_private_public_key"
+        [ ! -e "$evidence_key_temp" ] && [ ! -e "$evidence_key_temp.pub" ] || {
+            printf 'Evidence signing-key paths appeared concurrently and were not overwritten.\n' >&2
+            exit 1
+        }
+        trap - EXIT HUP INT TERM
+        rmdir "$evidence_key_directory"
+    fi
+    require_owned_regular_file "$EVIDENCE_SIGNING_KEY" 600
+    require_owned_regular_file "$evidence_private_public_key" 600
+
+    public_key_record="$(ssh-keygen -y -f "$EVIDENCE_SIGNING_KEY")"
+    public_key="$(
+        printf '%s\n' "$public_key_record" |
+            awk 'NR == 1 { print $1 " " $2 }'
+    )"
+    private_public_key_record="$(awk 'NR == 1 { print $1 " " $2 }' \
+        "$evidence_private_public_key")"
+    [ "$private_public_key_record" = "$public_key" ] || {
+        printf 'Stored evidence public key does not match its private key.\n' >&2
+        exit 1
+    }
+
+    for trust_output in "$EVIDENCE_PUBLIC_KEY" "$EVIDENCE_ALLOWED_SIGNERS"; do
+        if [ -e "$trust_output" ] || [ -L "$trust_output" ]; then
+            require_owned_regular_file "$trust_output" 644
+        fi
+    done
+    evidence_public_temp="$(mktemp "$DEPLOY_DIR/trust/evidence-public.XXXXXX")"
+    evidence_allowed_temp="$(mktemp "$DEPLOY_DIR/trust/evidence-allowed.XXXXXX")"
+    cleanup_evidence_trust_temp() {
+        rm -f "$evidence_public_temp" "$evidence_allowed_temp"
+    }
+    trap cleanup_evidence_trust_temp EXIT HUP INT TERM
+    printf '%s %s\n' "$public_key" vivolution-cp1-evidence-local > "$evidence_public_temp"
+    printf 'vivolution-cp1 namespaces="vivolution-cp1" %s\n' "$public_key" \
+        > "$evidence_allowed_temp"
+    chmod 0644 "$evidence_public_temp" "$evidence_allowed_temp"
+    mv "$evidence_public_temp" "$EVIDENCE_PUBLIC_KEY"
+    mv "$evidence_allowed_temp" "$EVIDENCE_ALLOWED_SIGNERS"
+    trap - EXIT HUP INT TERM
+    chmod 0644 "$EVIDENCE_PUBLIC_KEY" "$EVIDENCE_ALLOWED_SIGNERS"
+    signer_fingerprint_record="$(ssh-keygen -lf "$EVIDENCE_SIGNING_KEY")"
+    set -- $signer_fingerprint_record
+    printf 'Evidence signer enrolled: %s\n' "$2"
+    printf 'Commit deploy/trust before producing authoritative evidence.\n'
+)
+
+cleanup_committed_evidence_trust() {
+    rm -f \
+        "$committed_trust_dir/evidence-signing-key.pub" \
+        "$committed_trust_dir/evidence-allowed-signers" \
+        "$committed_trust_dir/expected-allowed-signers" \
+        "$committed_trust_dir/allowed-signer-key.pub"
+    rmdir "$committed_trust_dir"
+}
+
+materialize_committed_evidence_trust() {
+    require_command cmp
+    require_command git
+    require_command ssh-keygen
+
+    project_top="$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+    [ "$project_top" = "$ROOT_DIR" ] || {
+        printf 'CP1 evidence trust must come from its own Git repository.\n' >&2
+        return 1
+    }
+    committed_trust_revision="$(
+        git -C "$ROOT_DIR" rev-parse --verify 'HEAD^{commit}' 2>/dev/null
+    )" || {
+        printf 'CP1 evidence trust requires a committed Git HEAD.\n' >&2
+        return 1
+    }
+
+    for trust_file in "$EVIDENCE_PUBLIC_KEY" "$EVIDENCE_ALLOWED_SIGNERS"; do
+        [ -f "$trust_file" ] && [ ! -L "$trust_file" ] || {
+            printf 'Evidence trust file must be regular and non-symbolic: %s\n' \
+                "$trust_file" >&2
+            return 1
+        }
+        trust_relative="${trust_file#"$ROOT_DIR"/}"
+        [ "$trust_relative" != "$trust_file" ] || {
+            printf 'Evidence trust file is outside the CP1 repository: %s\n' \
+                "$trust_file" >&2
+            return 1
+        }
+        git -C "$ROOT_DIR" ls-files --error-unmatch "$trust_relative" \
+            >/dev/null 2>&1 || {
+            printf 'Evidence trust file is not tracked by Git: %s\n' \
+                "$trust_relative" >&2
+            return 1
+        }
+        committed_trust_type="$(
+            git -C "$ROOT_DIR" ls-tree "$committed_trust_revision" -- "$trust_relative" |
+                awk 'NR == 1 { print $1 " " $2 }'
+        )"
+        case "$committed_trust_type" in
+            '100644 blob'|'100755 blob') ;;
+            *)
+                printf 'Evidence trust file is not a committed regular file: %s\n' \
+                    "$trust_relative" >&2
+                return 1
+                ;;
+        esac
+    done
+
+    committed_evidence_public_key="$committed_trust_dir/evidence-signing-key.pub"
+    committed_evidence_allowed_signers="$committed_trust_dir/evidence-allowed-signers"
+    git -C "$ROOT_DIR" show \
+        "$committed_trust_revision:deploy/trust/evidence-signing-key.pub" \
+        > "$committed_evidence_public_key"
+    git -C "$ROOT_DIR" show \
+        "$committed_trust_revision:deploy/trust/evidence-allowed-signers" \
+        > "$committed_evidence_allowed_signers"
+    cmp -s "$EVIDENCE_PUBLIC_KEY" "$committed_evidence_public_key" || {
+        printf 'Evidence public key differs from committed HEAD.\n' >&2
+        return 1
+    }
+    cmp -s "$EVIDENCE_ALLOWED_SIGNERS" "$committed_evidence_allowed_signers" || {
+        printf 'Evidence allowed-signers file differs from committed HEAD.\n' >&2
+        return 1
+    }
+
+    if ! committed_evidence_public_material="$(
+        awk '
+            NF == 0 { next }
+            {
+                count++
+                if (count != 1 || NF < 2) exit 1
+                print $1 " " $2
+            }
+            END { if (count != 1) exit 1 }
+        ' "$committed_evidence_public_key"
+    )"; then
+        printf 'Committed evidence public key is not one canonical key.\n' >&2
+        return 1
+    fi
+    ssh-keygen -E sha256 -lf "$committed_evidence_public_key" >/dev/null || {
+        printf 'Committed evidence public key is invalid.\n' >&2
+        return 1
+    }
+
+    expected_allowed_signers="$committed_trust_dir/expected-allowed-signers"
+    printf 'vivolution-cp1 namespaces="vivolution-cp1" %s\n' \
+        "$committed_evidence_public_material" > "$expected_allowed_signers"
+    cmp -s "$committed_evidence_allowed_signers" "$expected_allowed_signers" || {
+        printf 'Committed allowed signer is not canonically bound to the committed public key.\n' >&2
+        return 1
+    }
+
+    allowed_signer_key="$committed_trust_dir/allowed-signer-key.pub"
+    printf '%s\n' "$committed_evidence_public_material" > "$allowed_signer_key"
+    committed_public_fingerprint_record="$(
+        ssh-keygen -E sha256 -lf "$committed_evidence_public_key"
+    )"
+    set -- $committed_public_fingerprint_record
+    committed_evidence_signer_fingerprint="$2"
+    allowed_signer_fingerprint_record="$(
+        ssh-keygen -E sha256 -lf "$allowed_signer_key"
+    )"
+    set -- $allowed_signer_fingerprint_record
+    [ "$2" = "$committed_evidence_signer_fingerprint" ] || {
+        printf 'Committed allowed signer fingerprint does not match the public key.\n' >&2
+        return 1
+    }
+    [ "$(git -C "$ROOT_DIR" rev-parse --verify 'HEAD^{commit}')" = \
+        "$committed_trust_revision" ] || {
+        printf 'Git HEAD changed while evidence trust was being loaded.\n' >&2
+        return 1
+    }
+}
+
+validated_local_evidence_signer_fingerprint() (
+    committed_trust_dir="$(mktemp -d)"
+    trap cleanup_committed_evidence_trust EXIT HUP INT TERM
+    materialize_committed_evidence_trust
+    signer_public_key_record="$(ssh-keygen -y -f "$EVIDENCE_SIGNING_KEY")"
+    signer_public_key="$(
+        printf '%s\n' "$signer_public_key_record" |
+            awk 'NR == 1 { print $1 " " $2 }'
+    )"
+    [ "$signer_public_key" = "$committed_evidence_public_material" ] || {
+        printf 'Evidence signing key does not match committed deploy/trust.\n' >&2
+        exit 1
+    }
+    printf '%s\n' "$committed_evidence_signer_fingerprint"
+)
+
+ensure_secrets() {
+    if [ ! -e "$LAB_SECRETS" ] && [ ! -L "$LAB_SECRETS" ]; then
+        init_secrets
+    else
+        validate_lab_secrets
+    fi
+}
+
+run_ansible_clean() {
+    [ -n "${HOME:-}" ] || {
+        printf 'A user home directory is required for the pinned SSH identity.\n' >&2
+        return 1
+    }
+    env -i \
+        PATH="$PATH" \
+        HOME="$HOME" \
+        ANSIBLE_CONFIG="$DEPLOY_DIR/ansible.cfg" \
+        "$@"
 }
 
 playbook() {
     require_command ansible-playbook
     require_inventory
-    if [ ! -f "$LAB_SECRETS" ] || ! grep -q '^cp_controller_admin_password:' "$LAB_SECRETS"; then
-        init_secrets
-    fi
+    ensure_secrets
     release_id="$(controller_release_id)"
-    ANSIBLE_CONFIG="$DEPLOY_DIR/ansible.cfg" \
-        ansible-playbook \
+    run_ansible_clean ansible-playbook \
         --inventory "$LAB_INVENTORY" \
         --extra-vars "@$LAB_SECRETS" \
         --extra-vars "cp_controller_release_id=$release_id" \
@@ -111,11 +549,8 @@ playbook() {
 rollback_playbook() {
     require_command ansible-playbook
     require_inventory
-    if [ ! -f "$LAB_SECRETS" ] || ! grep -q '^cp_controller_admin_password:' "$LAB_SECRETS"; then
-        init_secrets
-    fi
-    ANSIBLE_CONFIG="$DEPLOY_DIR/ansible.cfg" \
-        ansible-playbook \
+    ensure_secrets
+    run_ansible_clean ansible-playbook \
         --inventory "$LAB_INVENTORY" \
         --extra-vars "@$LAB_SECRETS" \
         "$DEPLOY_DIR/playbooks/rollback.yml"
@@ -124,11 +559,8 @@ rollback_playbook() {
 protected_playbook() {
     require_command ansible-playbook
     require_inventory
-    if [ ! -f "$LAB_SECRETS" ] || ! grep -q '^cp_controller_admin_password:' "$LAB_SECRETS"; then
-        init_secrets
-    fi
-    ANSIBLE_CONFIG="$DEPLOY_DIR/ansible.cfg" \
-        ansible-playbook \
+    ensure_secrets
+    run_ansible_clean ansible-playbook \
         --inventory "$LAB_INVENTORY" \
         --extra-vars "@$LAB_SECRETS" \
         "$@"
@@ -137,16 +569,934 @@ protected_playbook() {
 plain_playbook() {
     require_command ansible-playbook
     require_inventory
-    ANSIBLE_CONFIG="$DEPLOY_DIR/ansible.cfg" \
-        ansible-playbook \
+    run_ansible_clean ansible-playbook \
         --inventory "$LAB_INVENTORY" \
         "$@"
+}
+
+require_clean_project() {
+    require_command git
+    project_top="$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+    [ "$project_top" = "$ROOT_DIR" ] || {
+        printf 'CP1 must be qualified from its own Git repository: %s\n' "$ROOT_DIR" >&2
+        exit 1
+    }
+    git -C "$ROOT_DIR" diff --quiet
+    git -C "$ROOT_DIR" diff --cached --quiet
+    untracked_files="$(git -C "$ROOT_DIR" ls-files --others --exclude-standard)"
+    [ -z "$untracked_files" ] || {
+        printf 'CP1 source has untracked files; commit or ignore them before qualification.\n' >&2
+        exit 1
+    }
+}
+
+normalized_inventory() {
+    require_command ansible-inventory
+    require_inventory
+    run_ansible_clean ansible-inventory --inventory "$LAB_INVENTORY" --list
+}
+
+require_single_controller_inventory() {
+    inventory_snapshot="$(mktemp)"
+    if ! normalized_inventory > "$inventory_snapshot"; then
+        rm -f "$inventory_snapshot"
+        return 1
+    fi
+    inventory_python="$(select_controller_python)"
+    controller_hosts="$("$inventory_python" -c '
+import json
+import sys
+
+inventory = json.load(open(sys.argv[1], encoding="utf-8"))
+
+def resolve(group_name, seen):
+    if group_name in seen:
+        return set()
+    seen.add(group_name)
+    group = inventory.get(group_name, {})
+    hosts = set(group.get("hosts", []))
+    for child in group.get("children", []):
+        hosts.update(resolve(child, seen))
+    return hosts
+
+print("\n".join(sorted(resolve("controllers", set()))))
+' "$inventory_snapshot")"
+    rm -f "$inventory_snapshot"
+    controller_host_count="$(printf '%s\n' "$controller_hosts" |
+        awk 'NF { count += 1 } END { print count + 0 }')"
+    [ "$controller_host_count" -eq 1 ] || {
+        printf 'Qualification requires exactly one controller host; inventory resolved %s.\n' \
+            "$controller_host_count" >&2
+        return 1
+    }
+}
+
+write_host_identity_snapshot() {
+    host_identity_inventory="$1"
+    host_identity_output="$2"
+    host_identity_python="$(select_controller_python)"
+    known_hosts_absolute="$("$host_identity_python" - \
+        "$host_identity_inventory" "$inventory_parent" "$ROOT_DIR" \
+        "$host_identity_output" <<'PY'
+import json
+import pathlib
+import re
+import shlex
+import sys
+
+inventory_file = pathlib.Path(sys.argv[1])
+inventory_dir = pathlib.Path(sys.argv[2]).resolve(strict=True)
+project_root = pathlib.Path(sys.argv[3]).resolve(strict=True)
+output_file = pathlib.Path(sys.argv[4])
+inventory = json.loads(inventory_file.read_text(encoding="utf-8"))
+
+
+def resolve(group_name, seen):
+    if group_name in seen:
+        return set()
+    seen.add(group_name)
+    group = inventory.get(group_name, {})
+    hosts = set(group.get("hosts", []))
+    for child in group.get("children", []):
+        hosts.update(resolve(child, seen))
+    return hosts
+
+
+hosts = sorted(resolve("controllers", set()))
+if len(hosts) != 1:
+    raise SystemExit("host identity requires exactly one controller")
+inventory_host = hosts[0]
+hostvars = inventory.get("_meta", {}).get("hostvars", {}).get(inventory_host, {})
+host = hostvars.get("ansible_host")
+port = hostvars.get("ansible_port")
+user = hostvars.get("ansible_user")
+common_args = hostvars.get("ansible_ssh_common_args")
+if not isinstance(host, str) or not host or "\n" in host:
+    raise SystemExit("invalid controller SSH host")
+if not isinstance(port, int) or not 1 <= port <= 65535:
+    raise SystemExit("invalid controller SSH port")
+if not isinstance(user, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]*", user):
+    raise SystemExit("invalid controller SSH user")
+if not isinstance(common_args, str):
+    raise SystemExit("missing strict controller SSH arguments")
+
+resolved_args = re.sub(r"\{\{\s*inventory_dir\s*\}\}", str(inventory_dir), common_args)
+tokens = shlex.split(resolved_args)
+if len(tokens) != 10 or tokens[:7] != [
+    "-F",
+    "/dev/null",
+    "-o",
+    "IdentitiesOnly=yes",
+    "-o",
+    "StrictHostKeyChecking=yes",
+    "-o",
+] or tokens[8:] != ["-o", "GlobalKnownHostsFile=/dev/null"]:
+    raise SystemExit("controller SSH arguments are not the strict pinned form")
+known_hosts_option = tokens[7]
+prefix = "UserKnownHostsFile="
+if not known_hosts_option.startswith(prefix):
+    raise SystemExit("controller SSH known-hosts option is missing")
+known_hosts_value = known_hosts_option[len(prefix):]
+if (
+    len(known_hosts_value) >= 2
+    and known_hosts_value[0] == known_hosts_value[-1]
+    and known_hosts_value[0] in {'"', "'"}
+):
+    known_hosts_value = known_hosts_value[1:-1]
+known_hosts_input = pathlib.Path(known_hosts_value)
+if not known_hosts_input.is_absolute():
+    raise SystemExit("controller SSH known-hosts path must be absolute")
+known_hosts_path = known_hosts_input.resolve(strict=True)
+generated_dir = (project_root / "lab" / "utm" / "generated").resolve(strict=True)
+if known_hosts_path.parent != generated_dir:
+    raise SystemExit("controller SSH known-hosts path is outside the guarded generated directory")
+
+relative_known_hosts = known_hosts_path.relative_to(project_root)
+output_file.write_text(
+    "controller_inventory_host=" + inventory_host + "\n"
+    "ansible_host=" + host + "\n"
+    "ansible_port=" + str(port) + "\n"
+    "ansible_user=" + user + "\n"
+    "known_hosts_path=" + relative_known_hosts.as_posix() + "\n",
+    encoding="utf-8",
+)
+print(known_hosts_path)
+PY
+    )"
+    [ -n "$known_hosts_absolute" ] || {
+        printf 'Controller SSH host-key path was not resolved.\n' >&2
+        return 1
+    }
+    require_owned_regular_file "$known_hosts_absolute" 600
+
+    host_identity_host="$(sed -n 's/^ansible_host=//p' "$host_identity_output")"
+    host_identity_port="$(sed -n 's/^ansible_port=//p' "$host_identity_output")"
+    expected_known_host="[$host_identity_host]:$host_identity_port"
+    awk -v expected_host="$expected_known_host" '
+        /^[[:space:]]*($|#)/ { next }
+        {
+            count++
+            if (count != 1 || $1 != expected_host || $2 != "ssh-ed25519" || NF < 3) {
+                exit 1
+            }
+        }
+        END { if (count != 1) exit 1 }
+    ' "$known_hosts_absolute" || {
+        printf 'Controller known-hosts file is not one pinned Ed25519 endpoint.\n' >&2
+        return 1
+    }
+    known_host_fingerprints="$(ssh-keygen -E sha256 -lf "$known_hosts_absolute")" || {
+        printf 'Controller known-hosts key cannot be fingerprinted.\n' >&2
+        return 1
+    }
+    known_host_fingerprint_count="$(printf '%s\n' "$known_host_fingerprints" |
+        awk 'NF { count++ } END { print count + 0 }')"
+    [ "$known_host_fingerprint_count" -eq 1 ] || {
+        printf 'Controller known-hosts file must contain exactly one fingerprint.\n' >&2
+        return 1
+    }
+    set -- $known_host_fingerprints
+    [ "$1" = 256 ] && [ "$4" = '(ED25519)' ] || {
+        printf 'Controller host key must be a 256-bit Ed25519 key.\n' >&2
+        return 1
+    }
+    case "$2" in
+        SHA256:*) ;;
+        *)
+            printf 'Controller host-key fingerprint is not SHA-256.\n' >&2
+            return 1
+            ;;
+    esac
+    {
+        printf 'known_hosts_sha256=%s\n' "$(hash_file "$known_hosts_absolute")"
+        printf 'host_key_fingerprint=%s\n' "$2"
+    } >> "$host_identity_output"
+}
+
+syntax_checks() {
+    release_id="$(controller_release_id)"
+    find "$DEPLOY_DIR/playbooks" -maxdepth 1 -type f -name '*.yml' -print |
+        LC_ALL=C sort | while IFS= read -r playbook_file; do
+            protected_playbook \
+                --extra-vars "cp_controller_release_id=$release_id" \
+                --syntax-check "$playbook_file"
+        done
+}
+
+require_tool_versions() {
+    require_command ansible
+    require_command ansible-community
+    require_command ansible-playbook
+    pinned_ansible_core="$(tooling_version ansible-core)"
+    pinned_ansible_package="$(tooling_version ansible-package)"
+    ansible_version_output="$(ansible --version)"
+    case "$ansible_version_output" in
+        "ansible [core $pinned_ansible_core]"*) ;;
+        *)
+            printf 'Ansible Core %s is required.\n' "$pinned_ansible_core" >&2
+            return 1
+            ;;
+    esac
+    ansible_community_version="$(ansible-community --version)"
+    [ "$ansible_community_version" = "Ansible community version $pinned_ansible_package" ] || {
+        printf 'Ansible community package %s is required.\n' "$pinned_ansible_package" >&2
+        return 1
+    }
+    require_command shellcheck
+    pinned_shellcheck_version="$(tooling_version shellcheck)"
+    shellcheck_version="$(shellcheck --version |
+        awk -F': ' '$1 == "version" { print $2; found = 1 } END { if (!found) exit 1 }')"
+    [ "$shellcheck_version" = "$pinned_shellcheck_version" ] || {
+        printf 'ShellCheck %s is required.\n' "$pinned_shellcheck_version" >&2
+        return 1
+    }
+}
+
+ensure_controller_test_venv() {
+    require_command shasum
+    ensure_private_directory "$STATE_DIR"
+    if [ -e "$CONTROLLER_TEST_VENV" ] || [ -L "$CONTROLLER_TEST_VENV" ]; then
+        ensure_private_directory "$CONTROLLER_TEST_VENV"
+    fi
+    controller_python="$(select_controller_python)"
+    pinned_python_version="$(tooling_version controller-python)"
+    requirements_hash="$(hash_file "$ROOT_DIR/controller/requirements.lock")"
+    tooling_requirements_hash="$(hash_file "$DEPLOY_DIR/tooling-requirements.lock")"
+    environment_marker="$CONTROLLER_TEST_VENV/.vivolution-tooling-state"
+    expected_environment_state="python=$pinned_python_version requirements=$requirements_hash tooling=$tooling_requirements_hash"
+
+    if [ -e "$environment_marker" ] || [ -L "$environment_marker" ]; then
+        require_owned_regular_file "$environment_marker" 600
+    fi
+
+    existing_python_version=""
+    if [ -x "$CONTROLLER_TEST_VENV/bin/python" ]; then
+        existing_python_version="$("$CONTROLLER_TEST_VENV/bin/python" -c \
+            'import platform; print(platform.python_version())' 2>/dev/null || true)"
+    fi
+    if [ -d "$CONTROLLER_TEST_VENV" ] && \
+        [ "$existing_python_version" != "$pinned_python_version" ]; then
+        mv "$CONTROLLER_TEST_VENV" \
+            "$CONTROLLER_TEST_VENV.obsolete.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    fi
+    if [ ! -x "$CONTROLLER_TEST_VENV/bin/python" ]; then
+        "$controller_python" -m venv "$CONTROLLER_TEST_VENV"
+    fi
+    ensure_private_directory "$CONTROLLER_TEST_VENV"
+    installed_environment_state="$(sed -n '1p' "$environment_marker" 2>/dev/null || true)"
+    if [ "$installed_environment_state" != "$expected_environment_state" ]; then
+        "$CONTROLLER_TEST_VENV/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --require-hashes \
+            --requirement "$ROOT_DIR/controller/requirements.lock"
+        "$CONTROLLER_TEST_VENV/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --require-hashes \
+            --requirement "$DEPLOY_DIR/tooling-requirements.lock"
+        printf '%s\n' "$expected_environment_state" > "$environment_marker"
+        chmod 0600 "$environment_marker"
+    fi
+    actual_venv_python="$("$CONTROLLER_TEST_VENV/bin/python" -c \
+        'import platform; print(platform.python_version())')"
+    [ "$actual_venv_python" = "$pinned_python_version" ]
+    ruff_version="$(tooling_version ruff)"
+    ruff_output="$("$CONTROLLER_TEST_VENV/bin/python" -m ruff --version)"
+    [ "$ruff_output" = "ruff $ruff_version" ] || {
+        printf 'Ruff %s is required.\n' "$ruff_version" >&2
+        return 1
+    }
+}
+
+static_checks() {
+    require_tool_versions
+    ensure_controller_test_venv
+    git -C "$ROOT_DIR" diff --check
+
+    shell_source_list="$(mktemp)"
+    find "$ROOT_DIR/bin" "$ROOT_DIR/controller" "$ROOT_DIR/deploy/tests" "$ROOT_DIR/lab" \
+        -type f \( -name '*.sh' -o -name cpctl \) -print |
+        LC_ALL=C sort > "$shell_source_list"
+    while IFS= read -r shell_file; do
+        sh -n "$shell_file"
+        if ! shellcheck --severity=warning "$shell_file"; then
+            rm -f "$shell_source_list"
+            return 1
+        fi
+    done < "$shell_source_list"
+    rm -f "$shell_source_list"
+
+    syntax_checks
+
+    (
+        cd "$ROOT_DIR/controller"
+        "$CONTROLLER_TEST_VENV/bin/python" -m pip check
+        "$CONTROLLER_TEST_VENV/bin/python" -m ruff check . "$DEPLOY_DIR/tests"
+        "$CONTROLLER_TEST_VENV/bin/python" manage.py check --settings=cp1.settings_test
+        "$CONTROLLER_TEST_VENV/bin/python" manage.py makemigrations \
+            --check --dry-run --settings=cp1.settings_test
+        "$CONTROLLER_TEST_VENV/bin/python" manage.py test \
+            --settings=cp1.settings_test --verbosity=1
+    )
+
+    if command -v osacompile >/dev/null 2>&1; then
+        applescript_output="$(mktemp -d)"
+        applescript_status=0
+        for applescript_file in "$ROOT_DIR"/lab/utm/*.applescript; do
+            if ! osacompile -o "$applescript_output/$(basename "$applescript_file").scpt" \
+                "$applescript_file" >/dev/null; then
+                applescript_status=1
+                break
+            fi
+        done
+        find "$applescript_output" -type f -delete
+        rmdir "$applescript_output"
+        [ "$applescript_status" -eq 0 ] || return 1
+    fi
+}
+
+begin_evidence() {
+    require_clean_project
+    require_inventory
+    require_single_controller_inventory
+    require_command openssl
+    require_command ssh-keygen
+    ensure_private_directory "$STATE_DIR"
+    ensure_private_directory "$DEPLOY_DIR/evidence"
+    [ -f "$EVIDENCE_SIGNING_KEY" ] && [ ! -L "$EVIDENCE_SIGNING_KEY" ] || {
+        printf 'The local evidence signing identity is unavailable. Run bin/cpctl trust-init.\n' >&2
+        exit 1
+    }
+    require_owned_regular_file "$EVIDENCE_SIGNING_KEY" 600
+    CP_EVIDENCE_SIGNER_FINGERPRINT="$(validated_local_evidence_signer_fingerprint)"
+    CP_SOURCE_COMMIT="$(source_commit)"
+    CP_PROJECT_SOURCE_SHA256="$(project_source_digest)"
+    CP_CONTROLLER_RELEASE="$(controller_release_id)"
+    CP_EVIDENCE_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-$(openssl rand -hex 8)"
+    export CP_EVIDENCE_RUN_ID CP_SOURCE_COMMIT CP_PROJECT_SOURCE_SHA256 \
+        CP_CONTROLLER_RELEASE CP_EVIDENCE_SIGNER_FINGERPRINT
+    evidence_dir="$DEPLOY_DIR/evidence/$CP_EVIDENCE_RUN_ID"
+    mkdir "$evidence_dir"
+    chmod 0700 "$evidence_dir"
+    normalized_inventory > "$evidence_dir/INVENTORY.json"
+    write_host_identity_snapshot \
+        "$evidence_dir/INVENTORY.json" "$evidence_dir/HOST-IDENTITY"
+    CP_INVENTORY_SHA256="$(hash_file "$evidence_dir/INVENTORY.json")"
+    export CP_INVENTORY_SHA256
+    {
+        printf 'run_id=%s\n' "$CP_EVIDENCE_RUN_ID"
+        printf 'started_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'inventory=%s\n' "$inventory_relative"
+        printf 'inventory_sha256=%s\n' "$CP_INVENTORY_SHA256"
+        printf 'source_commit=%s\n' "$CP_SOURCE_COMMIT"
+        printf 'project_source_sha256=%s\n' "$CP_PROJECT_SOURCE_SHA256"
+        printf 'controller_release=%s\n' "$CP_CONTROLLER_RELEASE"
+        printf 'evidence_signer_sha256=%s\n' "$CP_EVIDENCE_SIGNER_FINGERPRINT"
+    } > "$evidence_dir/SOURCE"
+    controller_source_manifest > "$evidence_dir/CONTROLLER-SOURCE-MANIFEST.sha256"
+    project_index_unsorted="$(mktemp)"
+    git -C "$ROOT_DIR" ls-files -s > "$project_index_unsorted"
+    LC_ALL=C sort "$project_index_unsorted" > "$evidence_dir/PROJECT-INDEX"
+    rm -f "$project_index_unsorted"
+}
+
+verify_source_snapshot() {
+    require_clean_project
+    [ "$(source_commit)" = "$CP_SOURCE_COMMIT" ] || {
+        printf 'Source commit changed during qualification.\n' >&2
+        return 1
+    }
+    [ "$(project_source_digest)" = "$CP_PROJECT_SOURCE_SHA256" ] || {
+        printf 'Project source changed during qualification.\n' >&2
+        return 1
+    }
+    [ "$(controller_release_id)" = "$CP_CONTROLLER_RELEASE" ] || {
+        printf 'Controller release changed during qualification.\n' >&2
+        return 1
+    }
+    current_inventory="$(mktemp)"
+    normalized_inventory > "$current_inventory"
+    current_inventory_sha256="$(hash_file "$current_inventory")"
+    [ "$current_inventory_sha256" = "$CP_INVENTORY_SHA256" ] || {
+        rm -f "$current_inventory"
+        printf 'Normalized inventory changed during qualification.\n' >&2
+        return 1
+    }
+    current_host_identity="$(mktemp)"
+    if ! write_host_identity_snapshot "$current_inventory" "$current_host_identity"; then
+        rm -f "$current_inventory" "$current_host_identity"
+        return 1
+    fi
+    rm -f "$current_inventory"
+    cmp -s "$evidence_dir/HOST-IDENTITY" "$current_host_identity" || {
+        rm -f "$current_host_identity"
+        printf 'Controller SSH host identity changed during qualification.\n' >&2
+        return 1
+    }
+    rm -f "$current_host_identity"
+}
+
+verify_evidence_dir() {
+    evidence_to_verify="$1"
+    [ -d "$evidence_to_verify" ] || {
+        printf 'Evidence directory is unavailable: %s\n' "$evidence_to_verify" >&2
+        return 1
+    }
+    (
+        committed_trust_dir="$(mktemp -d)"
+        trap cleanup_committed_evidence_trust EXIT HUP INT TERM
+        materialize_committed_evidence_trust
+        cd "$evidence_to_verify"
+        [ -f MANIFEST.sha256 ] && [ ! -L MANIFEST.sha256 ] && \
+            [ -f MANIFEST.sha256.sig ] && [ ! -L MANIFEST.sha256.sig ]
+        unsafe_entries="$(find . -mindepth 1 ! -type d ! -type f -print)"
+        [ -z "$unsafe_entries" ] || {
+            printf 'Evidence contains a non-regular entry.\n' >&2
+            exit 1
+        }
+        linked_entries="$(find . -type f -links +1 -print)"
+        [ -z "$linked_entries" ] || {
+            printf 'Evidence contains a multiply-linked file.\n' >&2
+            exit 1
+        }
+        declared_files="$(mktemp)"
+        declared_files_unsorted="$(mktemp)"
+        actual_files="$(mktemp)"
+        actual_files_unsorted="$(mktemp)"
+        trap 'rm -f "$declared_files" "$declared_files_unsorted" "$actual_files" "$actual_files_unsorted"; cleanup_committed_evidence_trust' \
+            EXIT HUP INT TERM
+        awk '{ sub(/^[0-9a-f]{64}  /, ""); print }' MANIFEST.sha256 \
+            > "$declared_files_unsorted"
+        LC_ALL=C sort "$declared_files_unsorted" > "$declared_files"
+        find . -type f ! -name MANIFEST.sha256 ! -name MANIFEST.sha256.sig -print \
+            > "$actual_files_unsorted"
+        LC_ALL=C sort "$actual_files_unsorted" > "$actual_files"
+        cmp -s "$declared_files" "$actual_files" || {
+            printf 'Evidence manifest has missing or extra files.\n' >&2
+            exit 1
+        }
+        shasum -a 256 -c MANIFEST.sha256 >/dev/null
+        ssh-keygen -q -Y verify \
+            -f "$committed_evidence_allowed_signers" \
+            -I vivolution-cp1 \
+            -n vivolution-cp1 \
+            -s MANIFEST.sha256.sig \
+            < MANIFEST.sha256
+    )
+}
+
+finalize_evidence() {
+    require_owned_regular_file "$EVIDENCE_SIGNING_KEY" 600
+    final_signer_fingerprint="$(validated_local_evidence_signer_fingerprint)"
+    [ "$final_signer_fingerprint" = "$CP_EVIDENCE_SIGNER_FINGERPRINT" ] || {
+        printf 'Evidence signing identity changed during qualification.\n' >&2
+        return 1
+    }
+    (
+        cd "$evidence_dir"
+        evidence_file_list="$(mktemp)"
+        sorted_evidence_file_list="$(mktemp)"
+        trap 'rm -f "$evidence_file_list" "$sorted_evidence_file_list"' \
+            EXIT HUP INT TERM
+        find . -type f \
+            ! -name MANIFEST.sha256 \
+            ! -name MANIFEST.sha256.sig \
+            -print > "$evidence_file_list"
+        LC_ALL=C sort "$evidence_file_list" > "$sorted_evidence_file_list"
+        while IFS= read -r evidence_file; do
+            shasum -a 256 "$evidence_file"
+        done < "$sorted_evidence_file_list"
+    ) > "$evidence_dir/MANIFEST.sha256"
+    ssh-keygen -q -Y sign \
+        -f "$EVIDENCE_SIGNING_KEY" \
+        -n vivolution-cp1 \
+        "$evidence_dir/MANIFEST.sha256"
+    verify_evidence_dir "$evidence_dir"
+    chmod 0400 "$evidence_dir"/*
+    chmod 0500 "$evidence_dir"
+}
+
+is_current_evidence_child() {
+    evidence_child_candidate="$1"
+    evidence_child_name="$2"
+    case "${evidence_dir:-}" in
+        "$DEPLOY_DIR"/evidence/*)
+            evidence_run_component="${evidence_dir#"$DEPLOY_DIR"/evidence/}"
+            case "$evidence_run_component" in
+                ''|.|..|*/*) return 1 ;;
+            esac
+            [ "$evidence_child_candidate" = "$evidence_dir/$evidence_child_name" ]
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+cleanup_vulnerability_inputs() {
+    if [ -n "${vulnerability_archive:-}" ] && [ -f "$vulnerability_archive" ] &&
+        is_current_evidence_child "$vulnerability_archive" controller-image.oci; then
+        rm -f "$vulnerability_archive"
+    fi
+    if [ -n "${vulnerability_source_archive:-}" ] &&
+        [ -f "$vulnerability_source_archive" ]; then
+        case "$vulnerability_source_archive" in
+            "$STATE_DIR"/vulnerability-source.*) rm -f "$vulnerability_source_archive" ;;
+        esac
+    fi
+    if [ -n "${vulnerability_source_directory:-}" ] &&
+        [ -d "$vulnerability_source_directory" ] &&
+        [ ! -L "$vulnerability_source_directory" ]; then
+        case "$vulnerability_source_directory" in
+            "$STATE_DIR"/vulnerability-source-dir.*)
+                find "$vulnerability_source_directory" -depth -delete || true
+                ;;
+        esac
+    fi
+    if [ -n "${vulnerability_rootfs:-}" ] && [ -d "$vulnerability_rootfs" ] &&
+        [ ! -L "$vulnerability_rootfs" ] &&
+        is_current_evidence_child "$vulnerability_rootfs" guest-rootfs; then
+        find "$vulnerability_rootfs" -depth -delete || true
+    fi
+    vulnerability_archive=""
+    vulnerability_source_archive=""
+    vulnerability_source_directory=""
+    vulnerability_rootfs=""
+}
+
+validate_trivy_cache_tree() {
+    [ -d "$vulnerability_cache" ] && [ ! -L "$vulnerability_cache" ] || {
+        printf 'Trivy cache must be a real directory.\n' >&2
+        return 1
+    }
+    trivy_cache_metadata="$(stat -f '%u:%Lp' "$vulnerability_cache")"
+    [ "$trivy_cache_metadata" = "$(id -u):700" ] || {
+        printf 'Trivy cache has unsafe ownership or mode.\n' >&2
+        return 1
+    }
+    unsafe_cache_entries="$(find "$vulnerability_cache" -mindepth 1 \
+        ! -type d ! -type f -print)"
+    [ -z "$unsafe_cache_entries" ] || {
+        printf 'Trivy cache contains an unsupported filesystem entry.\n' >&2
+        return 1
+    }
+    linked_cache_entries="$(find "$vulnerability_cache" -type f -links +1 -print)"
+    [ -z "$linked_cache_entries" ] || {
+        printf 'Trivy cache contains a multiply-linked file.\n' >&2
+        return 1
+    }
+}
+
+vulnerability_gate() {
+    require_command trivy
+    require_command git
+    require_command tar
+    vulnerability_trivy_binary="$(command -v trivy)"
+    pinned_trivy_version="$(tooling_version trivy)"
+    vulnerability_db_repository="$(tooling_version trivy-db-repository)"
+    [ "$vulnerability_db_repository" = 'public.ecr.aws/aquasecurity/trivy-db:2' ] || {
+        printf 'Unexpected Trivy DB repository in deploy/tooling.lock.\n' >&2
+        return 1
+    }
+    trivy_version_output="$(env -i PATH="$PATH" "$vulnerability_trivy_binary" \
+        --config /dev/null --version)"
+    trivy_first_line="$(printf '%s\n' "$trivy_version_output" | sed -n '1p')"
+    [ "$trivy_first_line" = "Version: $pinned_trivy_version" ] || {
+        printf 'Trivy %s is required by deploy/tooling.lock.\n' \
+            "$pinned_trivy_version" >&2
+        return 1
+    }
+
+    umask 077
+    [ ! -L "$STATE_DIR" ] || {
+        printf 'CP1 state directory must not be a symbolic link.\n' >&2
+        return 1
+    }
+    mkdir -p "$STATE_DIR"
+    chmod 0700 "$STATE_DIR"
+    vulnerability_archive="$evidence_dir/controller-image.oci"
+    vulnerability_rootfs="$evidence_dir/guest-rootfs"
+    vulnerability_cache="$STATE_DIR/trivy-cache"
+    if [ -e "$vulnerability_cache" ] &&
+        { [ ! -d "$vulnerability_cache" ] || [ -L "$vulnerability_cache" ]; }; then
+        printf 'Trivy cache must be a real directory.\n' >&2
+        return 1
+    fi
+    mkdir -p "$vulnerability_cache"
+    chmod 0700 "$vulnerability_cache"
+    validate_trivy_cache_tree
+    vulnerability_source_archive="$(mktemp "$STATE_DIR/vulnerability-source.XXXXXX")"
+    vulnerability_source_directory="$(mktemp -d "$STATE_DIR/vulnerability-source-dir.XXXXXX")"
+    vulnerability_status=0
+
+    run_trivy_clean() {
+        env -i PATH="$PATH" "$vulnerability_trivy_binary" \
+            --config /dev/null --cache-dir "$vulnerability_cache" "$@"
+    }
+
+    if ! run_trivy_clean image \
+        --db-repository "$vulnerability_db_repository" \
+        --download-db-only --timeout 15m --no-progress; then
+        vulnerability_status=1
+    fi
+    vulnerability_db_metadata="$vulnerability_cache/db/metadata.json"
+    if [ -f "$vulnerability_db_metadata" ] && [ ! -L "$vulnerability_db_metadata" ]; then
+        controller_python="$(select_controller_python)"
+        if ! "$controller_python" - "$vulnerability_db_metadata" <<'PY'
+import datetime as dt
+import json
+import pathlib
+import sys
+
+metadata = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+
+def timestamp(name):
+    value = metadata.get(name)
+    if not isinstance(value, str):
+        raise SystemExit(f"missing Trivy DB timestamp: {name}")
+    return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+now = dt.datetime.now(dt.timezone.utc)
+updated = timestamp("UpdatedAt")
+next_update = timestamp("NextUpdate")
+if updated > now + dt.timedelta(minutes=10):
+    raise SystemExit("Trivy DB update time is in the future")
+if now - updated > dt.timedelta(hours=48):
+    raise SystemExit("Trivy DB is older than 48 hours")
+if next_update <= now:
+    raise SystemExit("Trivy DB is beyond its next-update deadline")
+PY
+        then
+            vulnerability_status=1
+        fi
+        cp "$vulnerability_db_metadata" "$evidence_dir/TRIVY-DB-METADATA.json"
+    else
+        printf 'Trivy vulnerability DB metadata is unavailable.\n' >&2
+        vulnerability_status=1
+    fi
+
+    vulnerability_source_archived=true
+    if ! git -C "$ROOT_DIR" archive --format=tar \
+        --output="$vulnerability_source_archive" "$CP_SOURCE_COMMIT" controller; then
+        vulnerability_status=1
+        vulnerability_source_archived=false
+    fi
+    if [ "$vulnerability_source_archived" = true ] &&
+        ! tar -xf "$vulnerability_source_archive" -C "$vulnerability_source_directory"; then
+        vulnerability_status=1
+    fi
+    vulnerability_committed_requirements="$vulnerability_source_directory/controller/requirements.lock"
+    vulnerability_scanner_requirements="$vulnerability_source_directory/controller/requirements.txt"
+    if [ -f "$vulnerability_committed_requirements" ] &&
+        [ ! -L "$vulnerability_committed_requirements" ] &&
+        [ ! -e "$vulnerability_scanner_requirements" ] &&
+        [ ! -L "$vulnerability_scanner_requirements" ]; then
+        cp "$vulnerability_committed_requirements" "$vulnerability_scanner_requirements"
+        chmod 0600 "$vulnerability_scanner_requirements"
+    else
+        printf 'Committed Python lock could not be materialized for Trivy coverage.\n' >&2
+        vulnerability_status=1
+    fi
+
+    protected_playbook \
+        --extra-vars "cp_vulnerability_evidence_run_id=$CP_EVIDENCE_RUN_ID" \
+        --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+        "$DEPLOY_DIR/playbooks/export-vulnerability-image.yml" || vulnerability_status=1
+    protected_playbook \
+        --extra-vars "cp_vulnerability_evidence_run_id=$CP_EVIDENCE_RUN_ID" \
+        --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+        "$DEPLOY_DIR/playbooks/export-vulnerability-rootfs.yml" || vulnerability_status=1
+
+    if [ -d "$vulnerability_source_directory/controller" ]; then
+        run_trivy_clean filesystem \
+            --db-repository "$vulnerability_db_repository" \
+            --timeout 15m \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed=false \
+            --ignorefile /dev/null \
+            --exit-code 1 \
+            --no-progress \
+            --format json \
+            --output "$evidence_dir/source-vulnerabilities.json" \
+            "$vulnerability_source_directory/controller" || vulnerability_status=1
+        run_trivy_clean filesystem \
+            --db-repository "$vulnerability_db_repository" \
+            --timeout 15m \
+            --scanners vuln \
+            --ignore-unfixed=false \
+            --ignorefile /dev/null \
+            --no-progress \
+            --format cyclonedx \
+            --output "$evidence_dir/source-sbom.cdx.json" \
+            "$vulnerability_source_directory/controller" || vulnerability_status=1
+    else
+        vulnerability_status=1
+    fi
+
+    if [ -f "$vulnerability_archive" ] && [ ! -L "$vulnerability_archive" ]; then
+        run_trivy_clean image \
+            --db-repository "$vulnerability_db_repository" \
+            --timeout 15m \
+            --input "$vulnerability_archive" \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed=false \
+            --ignorefile /dev/null \
+            --exit-code 1 \
+            --no-progress \
+            --format json \
+            --output "$evidence_dir/image-vulnerabilities.json" || vulnerability_status=1
+        run_trivy_clean image \
+            --db-repository "$vulnerability_db_repository" \
+            --timeout 15m \
+            --input "$vulnerability_archive" \
+            --scanners vuln \
+            --ignore-unfixed=false \
+            --ignorefile /dev/null \
+            --no-progress \
+            --format cyclonedx \
+            --output "$evidence_dir/image-sbom.cdx.json" || vulnerability_status=1
+    else
+        vulnerability_status=1
+    fi
+
+    if [ -d "$vulnerability_rootfs" ] && [ ! -L "$vulnerability_rootfs" ]; then
+        run_trivy_clean rootfs \
+            --db-repository "$vulnerability_db_repository" \
+            --timeout 15m \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed=false \
+            --ignorefile /dev/null \
+            --exit-code 1 \
+            --no-progress \
+            --format json \
+            --output "$evidence_dir/guest-os-vulnerabilities.json" \
+            "$vulnerability_rootfs" || vulnerability_status=1
+        run_trivy_clean rootfs \
+            --db-repository "$vulnerability_db_repository" \
+            --timeout 15m \
+            --scanners vuln \
+            --ignore-unfixed=false \
+            --ignorefile /dev/null \
+            --no-progress \
+            --format cyclonedx \
+            --output "$evidence_dir/guest-os-sbom.cdx.json" \
+            "$vulnerability_rootfs" || vulnerability_status=1
+    else
+        vulnerability_status=1
+    fi
+
+    vulnerability_coverage_python="$(select_controller_python)"
+    if ! "$vulnerability_coverage_python" - \
+        "$evidence_dir/source-vulnerabilities.json" \
+        "$evidence_dir/image-vulnerabilities.json" \
+        "$evidence_dir/guest-os-vulnerabilities.json" \
+        "$vulnerability_scanner_requirements" \
+        "$evidence_dir/VULNERABILITY-COVERAGE" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+source_report_path = pathlib.Path(sys.argv[1])
+image_report_path = pathlib.Path(sys.argv[2])
+guest_report_path = pathlib.Path(sys.argv[3])
+requirements_path = pathlib.Path(sys.argv[4])
+coverage_path = pathlib.Path(sys.argv[5])
+
+
+def normalized_name(value):
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+
+expected_packages = set()
+for line in requirements_path.read_text(encoding="utf-8").splitlines():
+    match = re.match(
+        r"^([A-Za-z0-9_.-]+)(?:\[[^]]+\])?==([A-Za-z0-9_.+!-]+)\s*\\?$",
+        line,
+    )
+    if match:
+        expected_packages.add((normalized_name(match.group(1)), match.group(2)))
+if not expected_packages:
+    raise SystemExit("no pinned Python packages were parsed for vulnerability coverage")
+
+
+def report_results(path):
+    report = json.loads(path.read_text(encoding="utf-8"))
+    if report.get("SchemaVersion") != 2:
+        raise SystemExit(f"unexpected Trivy schema in {path.name}")
+    results = report.get("Results")
+    if not isinstance(results, list):
+        raise SystemExit(f"Trivy results are missing in {path.name}")
+    return results
+
+
+def package_set(result):
+    packages = result.get("Packages")
+    if not isinstance(packages, list):
+        raise SystemExit("Trivy result omitted package coverage")
+    return {
+        (normalized_name(package["Name"]), package["Version"])
+        for package in packages
+        if isinstance(package, dict)
+        and isinstance(package.get("Name"), str)
+        and isinstance(package.get("Version"), str)
+    }
+
+
+source_results = report_results(source_report_path)
+source_pip = [
+    result
+    for result in source_results
+    if result.get("Class") == "lang-pkgs"
+    and result.get("Type") == "pip"
+    and pathlib.PurePosixPath(result.get("Target", "")).name == "requirements.txt"
+]
+if len(source_pip) != 1 or package_set(source_pip[0]) != expected_packages:
+    raise SystemExit("source vulnerability scan did not cover the exact Python lock")
+
+image_results = report_results(image_report_path)
+image_os_packages = set()
+image_python_packages = set()
+for result in image_results:
+    if result.get("Class") == "os-pkgs" and result.get("Type") == "debian":
+        image_os_packages.update(package_set(result))
+    if result.get("Class") == "lang-pkgs" and result.get("Type") in {"pip", "python-pkg"}:
+        image_python_packages.update(package_set(result))
+if not image_os_packages:
+    raise SystemExit("controller image scan did not cover Debian packages")
+if not expected_packages.issubset(image_python_packages):
+    raise SystemExit("controller image scan did not cover the exact locked Python packages")
+
+guest_results = report_results(guest_report_path)
+guest_os_packages = set()
+for result in guest_results:
+    if result.get("Class") == "os-pkgs" and result.get("Type") == "debian":
+        guest_os_packages.update(package_set(result))
+if not guest_os_packages:
+    raise SystemExit("guest rootfs scan did not cover the Debian package database")
+
+coverage_path.write_text(
+    "coverage=passed\n"
+    f"source_python_packages={len(expected_packages)}\n"
+    f"image_python_packages={len(image_python_packages)}\n"
+    f"image_os_packages={len(image_os_packages)}\n"
+    f"guest_os_packages={len(guest_os_packages)}\n",
+    encoding="utf-8",
+)
+PY
+    then
+        vulnerability_status=1
+    fi
+
+    {
+        printf 'source_archive_sha256=%s\n' \
+            "$(hash_file "$vulnerability_source_archive" 2>/dev/null || printf unavailable)"
+        if [ -f "$vulnerability_archive" ]; then
+            printf 'controller_image_archive_sha256=%s\n' \
+                "$(hash_file "$vulnerability_archive")"
+        else
+            printf 'controller_image_archive_sha256=unavailable\n'
+        fi
+        if [ -f "$vulnerability_rootfs/etc/os-release" ]; then
+            printf 'guest_os_release_sha256=%s\n' \
+                "$(hash_file "$vulnerability_rootfs/etc/os-release")"
+        fi
+        if [ -f "$vulnerability_rootfs/var/lib/dpkg/status" ]; then
+            printf 'guest_dpkg_status_sha256=%s\n' \
+                "$(hash_file "$vulnerability_rootfs/var/lib/dpkg/status")"
+        fi
+        if [ -f "$vulnerability_scanner_requirements" ]; then
+            printf 'source_scanner_requirements_sha256=%s\n' \
+                "$(hash_file "$vulnerability_scanner_requirements")"
+        fi
+    } > "$evidence_dir/VULNERABILITY-INPUTS"
+    printf 'database_repository=%s\n' "$vulnerability_db_repository" \
+        >> "$evidence_dir/VULNERABILITY-INPUTS"
+    run_trivy_clean --version > "$evidence_dir/TRIVY-VERSION"
+
+    validate_trivy_cache_tree || vulnerability_status=1
+    database_file_list="$(mktemp)"
+    find "$vulnerability_cache" -type f -print | LC_ALL=C sort > "$database_file_list"
+    while IFS= read -r database_file; do
+        database_relative="${database_file#"$vulnerability_cache"/}"
+        printf '%s  %s\n' "$(hash_file "$database_file")" "$database_relative"
+    done < "$database_file_list" > "$evidence_dir/TRIVY-CACHE-MANIFEST.sha256"
+    rm -f "$database_file_list"
+
+    cleanup_vulnerability_inputs
+    return "$vulnerability_status"
 }
 
 run_logged() {
     log_file="$1"
     shift
-    if "$@" >"$log_file" 2>&1; then
+    if {
+        printf 'run_id=%s\n' "${CP_EVIDENCE_RUN_ID:-standalone}"
+        printf 'stage=%s\n' "$(basename "$log_file" .log)"
+        printf 'started_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'source_commit=%s\n' "$(source_commit)"
+        "$@"
+    } >"$log_file" 2>&1; then
         sed -n '1,$p' "$log_file"
         return 0
     else
@@ -156,22 +1506,141 @@ run_logged() {
     fi
 }
 
+state_fingerprint_from_log() {
+    state_log="$1"
+    state_fingerprint="$(
+        sed -n 's/.*CP_STATE_FINGERPRINT=\([0-9a-f][0-9a-f]*\).*/\1/p' "$state_log" |
+            tail -n 1
+    )"
+    printf '%s\n' "$state_fingerprint" | grep -Eq '^[0-9a-f]{64}$' || {
+        printf 'A valid bounded-state fingerprint was not recorded in %s.\n' "$state_log" >&2
+        return 1
+    }
+    printf '%s\n' "$state_fingerprint"
+}
+
+require_successful_install_recap() {
+    install_log="$1"
+    require_zero_changes="${2:-false}"
+    recap_file="$(mktemp)"
+    awk '/^[^[:space:]].*: ok=[0-9]+/ { print }' "$install_log" > "$recap_file"
+    recap_count="$(awk 'END { print NR + 0 }' "$recap_file")"
+    if [ "$recap_count" -ne 1 ]; then
+        printf 'An Ansible recap was not recorded in %s.\n' "$install_log" >&2
+        rm -f "$recap_file"
+        return 1
+    fi
+    recap_line="$(sed -n '1p' "$recap_file")"
+    rm -f "$recap_file"
+    for required_recap_value in unreachable=0 failed=0 rescued=0 ignored=0; do
+        case " $recap_line " in
+            *" $required_recap_value "*) ;;
+            *)
+                printf 'Install recap did not satisfy %s: %s\n' \
+                    "$required_recap_value" "$install_log" >&2
+                return 1
+                ;;
+        esac
+    done
+    if [ "$require_zero_changes" = true ]; then
+        case " $recap_line " in
+            *" changed=0 "*) ;;
+            *)
+                printf 'Second install reported real Ansible changes: %s\n' \
+                    "$install_log" >&2
+                return 1
+                ;;
+        esac
+    fi
+}
+
+seal_failed_qualification() {
+    qualification_status="${1:-1}"
+    trap - EXIT HUP INT TERM
+    cleanup_vulnerability_inputs
+    if [ "${evidence_sealed:-false}" != true ] && [ -n "${evidence_dir:-}" ] &&
+        [ -d "$evidence_dir" ]; then
+        {
+            printf 'result=failed\n'
+            printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'run_id=%s\n' "${CP_EVIDENCE_RUN_ID:-unknown}"
+            printf 'source_commit=%s\n' "${CP_SOURCE_COMMIT:-unknown}"
+            printf 'project_source_sha256=%s\n' "${CP_PROJECT_SOURCE_SHA256:-unknown}"
+            printf 'controller_release=%s\n' "${CP_CONTROLLER_RELEASE:-unknown}"
+        } > "$evidence_dir/RESULT"
+        finalize_evidence || true
+    fi
+    if [ "$qualification_status" -eq 0 ]; then
+        qualification_status=1
+    fi
+    exit "$qualification_status"
+}
+
+arm_qualification_traps() {
+    evidence_sealed=false
+    trap 'seal_failed_qualification "$?"' EXIT
+    trap 'seal_failed_qualification 129' HUP
+    trap 'seal_failed_qualification 130' INT
+    trap 'seal_failed_qualification 143' TERM
+}
+
+disarm_qualification_traps() {
+    evidence_sealed=true
+    trap - EXIT HUP INT TERM
+}
+
+bridge_post_activation_checks() {
+    run_logged "$evidence_dir/active-release.log" protected_playbook \
+        --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+        "$DEPLOY_DIR/playbooks/qualify-active-release.yml" || return $?
+    run_logged "$evidence_dir/rls-bridge.log" protected_playbook \
+        "$DEPLOY_DIR/playbooks/qualify-rls-bridge.yml" || return $?
+    run_logged "$evidence_dir/admin-login.log" protected_playbook \
+        "$DEPLOY_DIR/playbooks/qualify-admin-login.yml" || return $?
+    run_logged "$evidence_dir/final-active-release.log" protected_playbook \
+        --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+        "$DEPLOY_DIR/playbooks/qualify-active-release.yml" || return $?
+    verify_source_snapshot || return $?
+}
+
+recover_failed_bridge_transaction() {
+    if run_logged "$evidence_dir/bridge-failure-active-marker.log" protected_playbook \
+        --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+        "$DEPLOY_DIR/playbooks/qualify-active-marker.yml"; then
+        if ! run_logged "$evidence_dir/bridge-recovery-rollback.log" \
+            rollback_playbook; then
+            printf 'Bridge transaction failed and automatic rollback also failed.\n' >&2
+        fi
+    else
+        printf 'Bridge transaction failed before its release became the active marker; no command-level rollback was attempted.\n' >&2
+    fi
+}
+
 command_name="${1:-}"
 case "$command_name" in
     init)
         init_secrets
         ;;
+    trust-init)
+        init_evidence_trust
+        ;;
+    verify-evidence)
+        [ -n "${2:-}" ] || {
+            printf 'Usage: bin/cpctl verify-evidence <evidence-directory>\n' >&2
+            exit 2
+        }
+        verify_evidence_dir "$2"
+        printf 'CP1 evidence verified: %s\n' "$2"
+        ;;
+    preflight)
+        static_checks
+        printf 'CP1 local preflight passed.\n'
+        ;;
+    release-id)
+        controller_release_id
+        ;;
     syntax)
-        playbook --syntax-check "$DEPLOY_DIR/playbooks/install.yml"
-        playbook --syntax-check "$DEPLOY_DIR/playbooks/verify.yml"
-        playbook --syntax-check "$DEPLOY_DIR/playbooks/rollback.yml"
-        protected_playbook --extra-vars "cp_controller_release_id=cp1-failure-probe" \
-            --syntax-check "$DEPLOY_DIR/playbooks/qualify-failed-upgrade.yml"
-        protected_playbook --syntax-check "$DEPLOY_DIR/playbooks/qualify-backup-restore.yml"
-        playbook --syntax-check "$DEPLOY_DIR/playbooks/qualify-db-outage.yml"
-        playbook --syntax-check "$DEPLOY_DIR/playbooks/qualify-reboot.yml"
-        plain_playbook --syntax-check "$DEPLOY_DIR/playbooks/qualify-resource-endurance.yml"
-        protected_playbook --syntax-check "$DEPLOY_DIR/playbooks/qualify-secret-inventory.yml"
+        syntax_checks
         ;;
     install|upgrade)
         playbook "$DEPLOY_DIR/playbooks/install.yml"
@@ -192,48 +1661,140 @@ case "$command_name" in
     reboot-test)
         playbook "$DEPLOY_DIR/playbooks/qualify-reboot.yml"
         ;;
+    admin-test)
+        protected_playbook "$DEPLOY_DIR/playbooks/qualify-admin-login.yml"
+        ;;
+    bridge-test)
+        protected_playbook "$DEPLOY_DIR/playbooks/qualify-rls-bridge.yml"
+        ;;
+    bridge-qualify)
+        umask 077
+        arm_qualification_traps
+        begin_evidence
+        bridge_install_log="$evidence_dir/bridge-install.log"
+        run_logged "$evidence_dir/static-preflight.log" static_checks
+        bridge_transaction_status=0
+        run_logged "$bridge_install_log" playbook "$DEPLOY_DIR/playbooks/install.yml" || \
+            bridge_transaction_status=$?
+        if [ "$bridge_transaction_status" -eq 0 ]; then
+            require_successful_install_recap "$bridge_install_log" false || \
+                bridge_transaction_status=$?
+        fi
+        if [ "$bridge_transaction_status" -eq 0 ]; then
+            bridge_post_activation_checks || bridge_transaction_status=$?
+        fi
+        if [ "$bridge_transaction_status" -ne 0 ]; then
+            recover_failed_bridge_transaction
+            exit "$bridge_transaction_status"
+        fi
+        {
+            printf 'result=passed\n'
+            printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'run_id=%s\n' "$CP_EVIDENCE_RUN_ID"
+            printf 'source_commit=%s\n' "$CP_SOURCE_COMMIT"
+            printf 'project_source_sha256=%s\n' "$CP_PROJECT_SOURCE_SHA256"
+            printf 'controller_release=%s\n' "$CP_CONTROLLER_RELEASE"
+            printf 'qualification=rls-compatibility-bridge\n'
+            printf 'security_release_gate=transitional-not-passed\n'
+        } > "$evidence_dir/RESULT"
+        finalize_evidence
+        disarm_qualification_traps
+        printf 'CP1 RLS compatibility bridge passed. Evidence: %s\n' "$evidence_dir"
+        ;;
     resource-test)
         umask 077
-        evidence_dir="$DEPLOY_DIR/evidence/$(date -u +%Y%m%dT%H%M%SZ)-$$"
-        mkdir -p "$evidence_dir"
+        arm_qualification_traps
+        begin_evidence
+        run_logged "$evidence_dir/active-release.log" protected_playbook \
+            --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+            "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
         run_logged "$evidence_dir/resource-endurance.log" plain_playbook \
             "$DEPLOY_DIR/playbooks/qualify-resource-endurance.yml"
+        run_logged "$evidence_dir/final-active-release.log" protected_playbook \
+            --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+            "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
+        verify_source_snapshot
         {
             printf 'result=passed\n'
             printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             printf 'qualification=resource-endurance\n'
         } >"$evidence_dir/RESULT"
+        finalize_evidence
+        disarm_qualification_traps
         printf 'CP1 resource/endurance qualification passed. Evidence: %s\n' "$evidence_dir"
         ;;
     secret-test)
         umask 077
-        evidence_dir="$DEPLOY_DIR/evidence/$(date -u +%Y%m%dT%H%M%SZ)-$$"
-        mkdir -p "$evidence_dir"
+        arm_qualification_traps
+        begin_evidence
+        run_logged "$evidence_dir/active-release.log" protected_playbook \
+            --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+            "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
         run_logged "$evidence_dir/secret-inventory.log" protected_playbook \
             "$DEPLOY_DIR/playbooks/qualify-secret-inventory.yml"
+        run_logged "$evidence_dir/final-active-release.log" protected_playbook \
+            --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+            "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
+        verify_source_snapshot
         {
             printf 'result=passed\n'
             printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             printf 'qualification=secret-non-exposure-and-component-inventory\n'
-            printf 'vulnerability_scan=not-performed\n'
+            printf 'vulnerability_scan=separate-required-gate\n'
         } >"$evidence_dir/RESULT"
+        finalize_evidence
+        disarm_qualification_traps
         printf 'CP1 secret/component qualification passed. Evidence: %s\n' "$evidence_dir"
+        ;;
+    vulnerability-test)
+        umask 077
+        arm_qualification_traps
+        begin_evidence
+        run_logged "$evidence_dir/active-release.log" protected_playbook \
+            --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+            "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
+        run_logged "$evidence_dir/vulnerability.log" vulnerability_gate
+        run_logged "$evidence_dir/final-active-release.log" protected_playbook \
+            --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+            "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
+        verify_source_snapshot
+        {
+            printf 'result=passed\n'
+            printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'qualification=high-critical-vulnerability-scan\n'
+            printf 'scanner=trivy-%s\n' "$(tooling_version trivy)"
+        } >"$evidence_dir/RESULT"
+        finalize_evidence
+        disarm_qualification_traps
+        printf 'CP1 vulnerability qualification passed. Evidence: %s\n' "$evidence_dir"
         ;;
     verify)
         playbook "$DEPLOY_DIR/playbooks/verify.yml"
         ;;
     qualify)
         umask 077
-        evidence_dir="$DEPLOY_DIR/evidence/$(date -u +%Y%m%dT%H%M%SZ)-$$"
-        mkdir -p "$evidence_dir"
+        arm_qualification_traps
+        begin_evidence
         first_log="$evidence_dir/install-first.log"
         second_log="$evidence_dir/install-second.log"
+        run_logged "$evidence_dir/static-preflight.log" static_checks
         run_logged "$first_log" playbook "$DEPLOY_DIR/playbooks/install.yml"
+        require_successful_install_recap "$first_log" false
+        run_logged "$evidence_dir/state-before-second.log" protected_playbook \
+            "$DEPLOY_DIR/playbooks/qualify-idempotency-state.yml"
         run_logged "$second_log" playbook "$DEPLOY_DIR/playbooks/install.yml"
-        if ! tail -n 8 "$second_log" | grep -Eq 'changed=0([[:space:]]|$)'; then
-            printf 'Second install was not idempotent. Review: %s\n' "$second_log" >&2
+        require_successful_install_recap "$second_log" true
+        run_logged "$evidence_dir/active-release.log" protected_playbook \
+            --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+            "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
+        run_logged "$evidence_dir/state-after-second.log" protected_playbook \
+            "$DEPLOY_DIR/playbooks/qualify-idempotency-state.yml"
+        state_before="$(state_fingerprint_from_log "$evidence_dir/state-before-second.log")"
+        state_after="$(state_fingerprint_from_log "$evidence_dir/state-after-second.log")"
+        [ "$state_before" = "$state_after" ] || {
+            printf 'Second install changed bounded persistent/runtime state.\n' >&2
             exit 1
-        fi
+        }
         run_logged "$evidence_dir/failed-upgrade.log" protected_playbook \
             --extra-vars "cp_controller_release_id=cp1-failure-probe" \
             "$DEPLOY_DIR/playbooks/qualify-failed-upgrade.yml"
@@ -242,19 +1803,35 @@ case "$command_name" in
         run_logged "$evidence_dir/database-outage.log" playbook \
             "$DEPLOY_DIR/playbooks/qualify-db-outage.yml"
         run_logged "$evidence_dir/verify.log" playbook "$DEPLOY_DIR/playbooks/verify.yml"
+        run_logged "$evidence_dir/admin-login.log" protected_playbook \
+            "$DEPLOY_DIR/playbooks/qualify-admin-login.yml"
         run_logged "$evidence_dir/resource-endurance.log" plain_playbook \
             "$DEPLOY_DIR/playbooks/qualify-resource-endurance.yml"
         run_logged "$evidence_dir/reboot-recovery.log" playbook \
             "$DEPLOY_DIR/playbooks/qualify-reboot.yml"
+        run_logged "$evidence_dir/vulnerability.log" vulnerability_gate
         run_logged "$evidence_dir/secret-inventory.log" protected_playbook \
             "$DEPLOY_DIR/playbooks/qualify-secret-inventory.yml"
+        run_logged "$evidence_dir/final-active-release.log" protected_playbook \
+            --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
+            "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
+        verify_source_snapshot
         {
             printf 'result=passed\n'
             printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            printf 'controller_release=%s\n' "$(controller_release_id)"
+            printf 'run_id=%s\n' "$CP_EVIDENCE_RUN_ID"
+            printf 'source_commit=%s\n' "$CP_SOURCE_COMMIT"
+            printf 'project_source_sha256=%s\n' "$CP_PROJECT_SOURCE_SHA256"
+            printf 'controller_release=%s\n' "$CP_CONTROLLER_RELEASE"
+            printf 'bounded_state_idempotency=passed\n'
+            printf 'admin_https_login=passed\n'
+            printf 'high_critical_vulnerabilities=none\n'
             printf 'ansible=%s\n' "$(ansible --version | sed -n '1p')"
+            printf 'trivy=%s\n' "$(trivy --version | sed -n '1p')"
         } >"$evidence_dir/RESULT"
-        printf 'CP1 foundation qualification passed. Evidence: %s\n' "$evidence_dir"
+        finalize_evidence
+        disarm_qualification_traps
+        printf 'CP1 local release qualification passed. Evidence: %s\n' "$evidence_dir"
         ;;
     -h|--help|help|'')
         usage

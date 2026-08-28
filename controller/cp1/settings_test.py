@@ -1,6 +1,5 @@
 import os
 
-
 os.environ.setdefault("DJANGO_TESTING", "1")
 os.environ.setdefault("DJANGO_ALLOWED_HOSTS", "testserver")
 

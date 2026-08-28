@@ -3,10 +3,18 @@ from unittest.mock import patch
 from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase
 
-from cp1.settings import database_config, env_bool
+from cp1 import settings
+from cp1.settings import database_config, env_bool, env_int
 
 
 class SettingsHelpersTests(SimpleTestCase):
+    def test_operator_sessions_use_ephemeral_file_backend(self):
+        self.assertEqual(
+            settings.SESSION_ENGINE,
+            "django.contrib.sessions.backends.file",
+        )
+        self.assertEqual(settings.SESSION_FILE_PATH, "/tmp")
+
     def test_database_url_is_parsed_without_logging_credentials(self):
         with patch.dict("os.environ", {"DB_CONN_MAX_AGE": "30"}):
             config = database_config(
@@ -33,3 +41,13 @@ class SettingsHelpersTests(SimpleTestCase):
         with patch.dict("os.environ", {"SETTING_UNDER_TEST": "perhaps"}):
             with self.assertRaises(ImproperlyConfigured):
                 env_bool("SETTING_UNDER_TEST")
+
+    def test_bounded_integer_is_validated(self):
+        with patch.dict("os.environ", {"SETTING_UNDER_TEST": "61"}):
+            self.assertEqual(
+                env_int("SETTING_UNDER_TEST", 60, minimum=5, maximum=300),
+                61,
+            )
+        with patch.dict("os.environ", {"SETTING_UNDER_TEST": "301"}):
+            with self.assertRaises(ImproperlyConfigured):
+                env_int("SETTING_UNDER_TEST", 60, minimum=5, maximum=300)

@@ -1,0 +1,46 @@
+---
+- name: Read the active CP1 release marker without changing the guest
+  hosts: controllers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Validate expected active release input
+      ansible.builtin.assert:
+        that:
+          - cp_expected_active_release is defined
+          - >-
+            cp_expected_active_release | default('') is
+            match('^cp1-[0-9a-f]{64}$')
+
+    - name: Inspect active release marker
+      ansible.builtin.stat:
+        path: /etc/vivolution/active-release
+        follow: false
+      register: cp_active_marker_probe_stat
+
+    - name: Require a safe active release marker
+      ansible.builtin.assert:
+        that:
+          - cp_active_marker_probe_stat.stat.isreg | default(false)
+          - not (cp_active_marker_probe_stat.stat.islnk | default(false))
+          - cp_active_marker_probe_stat.stat.uid | default(-1) | int == 0
+          - cp_active_marker_probe_stat.stat.gid | default(-1) | int == 0
+          - cp_active_marker_probe_stat.stat.mode | default('') == '0644'
+          - cp_active_marker_probe_stat.stat.nlink | default(-1) | int == 1
+
+    - name: Read active release marker
+      ansible.builtin.slurp:
+        src: /etc/vivolution/active-release
+      register: cp_active_marker_probe_file
+
+    - name: Require the requested release to be the active marker
+      ansible.builtin.assert:
+        that:
+          - >-
+            cp_active_marker_probe_file.content | b64decode | trim ==
+            cp_expected_active_release
+        fail_msg: The requested release is not the active CP1 marker.
+
+    - name: Report exact active release marker
+      ansible.builtin.debug:
+        msg: "active_release={{ cp_expected_active_release }}"

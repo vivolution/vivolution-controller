@@ -55,6 +55,43 @@
       register: cp_failure_probe_image_before
       changed_when: false
 
+    - name: Validate running image ID before failure injection
+      ansible.builtin.assert:
+        that:
+          - >-
+            cp_failure_probe_image_before.stdout | trim |
+            regex_replace('^sha256:', '') is match('^[0-9a-f]{64}$')
+        fail_msg: The known-good controller is not running from a full SHA-256 image ID.
+
+    - name: Select exact known-good base image for failure probe
+      ansible.builtin.set_fact:
+        cp_failure_probe_base_image: >-
+          sha256:{{ cp_failure_probe_image_before.stdout | trim | regex_replace('^sha256:', '') }}
+
+    - name: Inspect failure-probe release configuration before injection
+      ansible.builtin.stat:
+        path: "{{ cp_failure_probe_release_config_root }}/{{ cp_failure_probe_release }}"
+        follow: false
+      register: cp_failure_probe_existing_configuration
+
+    - name: Inspect failure-probe image tag before injection
+      ansible.builtin.command:
+        argv:
+          - podman
+          - image
+          - exists
+          - "{{ cp_failure_probe_image_repository }}:{{ cp_failure_probe_release }}"
+      register: cp_failure_probe_existing_image
+      changed_when: false
+      failed_when: cp_failure_probe_existing_image.rc not in [0, 1]
+
+    - name: Refuse to overwrite stale failure-probe state
+      ansible.builtin.assert:
+        that:
+          - not cp_failure_probe_existing_configuration.stat.exists
+          - cp_failure_probe_existing_image.rc == 1
+        fail_msg: Stale failure-probe state exists and was not overwritten.
+
     - name: Create temporary failure-probe build directory
       ansible.builtin.tempfile:
         state: directory
@@ -78,10 +115,27 @@
               - build
               - --pull=never
               - --network=none
-              - "--build-arg=BASE_IMAGE={{ cp_failure_probe_image_repository }}:{{ cp_failure_probe_prior_release }}"
+              - "--iidfile={{ cp_failure_probe_directory.path }}/image.iid"
+              - "--build-arg=BASE_IMAGE={{ cp_failure_probe_base_image }}"
               - "--tag={{ cp_failure_probe_image_repository }}:{{ cp_failure_probe_release }}"
               - "{{ cp_failure_probe_directory.path }}"
           changed_when: true
+
+        - name: Read immutable failure-probe image ID
+          ansible.builtin.slurp:
+            src: "{{ cp_failure_probe_directory.path }}/image.iid"
+          register: cp_failure_probe_image_id_file
+
+        - name: Select immutable failure-probe image ID
+          ansible.builtin.set_fact:
+            cp_controller_image_immutable: >-
+              {{ cp_failure_probe_image_id_file.content | b64decode | trim }}
+
+        - name: Require immutable failure-probe image ID
+          ansible.builtin.assert:
+            that:
+              - cp_controller_image_immutable is match('^sha256:[0-9a-f]{64}$')
+            fail_msg: The failure-probe build did not emit an immutable image ID.
 
         - name: Configure bounded failure-probe activation
           ansible.builtin.set_fact:
@@ -158,14 +212,30 @@
                 method: GET
                 status_code: 200
 
-        - name: Remove proven-inactive failure-probe image
+      always:
+        - name: Read active marker before failure-probe cleanup
+          ansible.builtin.slurp:
+            src: /etc/vivolution/active-release
+          register: cp_failure_probe_cleanup_active
+          failed_when: false
+
+        - name: Prohibit cleanup of an active failure probe
+          ansible.builtin.assert:
+            that:
+              - cp_failure_probe_cleanup_active.failed | default(false) or
+                cp_failure_probe_cleanup_active.content | b64decode | trim != cp_failure_probe_release
+            fail_msg: The failure probe remains active and cannot be cleaned up safely.
+
+        - name: Remove proven-inactive failure-probe image tag
           ansible.builtin.command:
             argv:
               - podman
               - image
               - rm
               - "{{ cp_failure_probe_image_repository }}:{{ cp_failure_probe_release }}"
-          changed_when: true
+          register: cp_failure_probe_image_cleanup
+          changed_when: cp_failure_probe_image_cleanup.rc == 0
+          failed_when: false
 
         - name: Remove protected failure-probe release environment
           ansible.builtin.file:
@@ -173,7 +243,6 @@
             state: absent
           no_log: true
 
-      always:
         - name: Remove failure-probe build directory
           ansible.builtin.file:
             path: "{{ cp_failure_probe_directory.path }}"

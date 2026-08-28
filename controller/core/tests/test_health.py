@@ -11,7 +11,10 @@ class LivenessTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok"})
-        self.assertEqual(response["Cache-Control"], "max-age=0, no-cache, no-store, must-revalidate, private")
+        self.assertEqual(
+            response["Cache-Control"],
+            "max-age=0, no-cache, no-store, must-revalidate, private",
+        )
 
     def test_health_endpoints_reject_state_changing_methods(self):
         self.assertEqual(self.client.post(reverse("liveness")).status_code, 405)
@@ -26,7 +29,10 @@ class ReadinessTests(TestCase):
         self.assertEqual(response.json(), {"status": "ready"})
 
     def test_database_failure_is_reported_without_details(self):
-        with patch("core.views.connection.cursor", side_effect=OperationalError("sensitive detail")):
+        with patch(
+            "core.views.connection.cursor",
+            side_effect=OperationalError("sensitive detail"),
+        ):
             response = self.client.get(reverse("readiness"))
 
         self.assertEqual(response.status_code, 503)

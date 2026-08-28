@@ -1,23 +1,230 @@
 \set ON_ERROR_STOP on
 
-SELECT format('CREATE ROLE %I LOGIN', '{{ cp_db_owner }}')
-WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ cp_db_owner }}')\gexec
-ALTER ROLE {{ cp_db_owner }} PASSWORD '{{ cp_db_owner_password }}';
+DO $vivolution$
+DECLARE
+    unexpected_membership record;
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ cp_db_owner }}') THEN
+        EXECUTE format('CREATE ROLE %I LOGIN', '{{ cp_db_owner }}');
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:owner-role-created';
+    END IF;
 
-SELECT format('CREATE ROLE %I LOGIN', '{{ cp_db_runtime_user }}')
-WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ cp_db_runtime_user }}')\gexec
-ALTER ROLE {{ cp_db_runtime_user }} PASSWORD '{{ cp_db_runtime_password }}';
-ALTER ROLE {{ cp_db_runtime_user }} NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+    IF EXISTS (
+        SELECT FROM pg_roles
+        WHERE rolname = '{{ cp_db_owner }}'
+          AND (NOT rolcanlogin OR rolinherit OR rolsuper OR rolcreatedb OR rolcreaterole
+               OR rolreplication OR rolbypassrls)
+    ) THEN
+        EXECUTE format(
+            'ALTER ROLE %I LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS',
+            '{{ cp_db_owner }}'
+        );
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:owner-role-attributes';
+    END IF;
 
-SELECT format('CREATE DATABASE %I OWNER %I', '{{ cp_database_name }}', '{{ cp_db_owner }}')
-WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '{{ cp_database_name }}')\gexec
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ cp_db_runtime_user }}') THEN
+        EXECUTE format('CREATE ROLE %I LOGIN', '{{ cp_db_runtime_user }}');
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:runtime-role-created';
+    END IF;
 
-REVOKE ALL ON DATABASE {{ cp_database_name }} FROM PUBLIC;
-GRANT CONNECT ON DATABASE {{ cp_database_name }} TO {{ cp_db_runtime_user }};
+    IF EXISTS (
+        SELECT FROM pg_roles
+        WHERE rolname = '{{ cp_db_runtime_user }}'
+          AND (NOT rolcanlogin OR rolinherit OR rolsuper OR rolcreatedb OR rolcreaterole
+               OR rolreplication OR rolbypassrls)
+    ) THEN
+        EXECUTE format(
+            'ALTER ROLE %I LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS',
+            '{{ cp_db_runtime_user }}'
+        );
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:runtime-role-attributes';
+    END IF;
+
+    FOR unexpected_membership IN
+        SELECT parent.rolname AS parent_role, member.rolname AS member_role
+        FROM pg_auth_members membership
+        JOIN pg_roles parent ON parent.oid = membership.roleid
+        JOIN pg_roles member ON member.oid = membership.member
+        WHERE member.rolname IN ('{{ cp_db_owner }}', '{{ cp_db_runtime_user }}')
+    LOOP
+        EXECUTE format(
+            'REVOKE %I FROM %I',
+            unexpected_membership.parent_role,
+            unexpected_membership.member_role
+        );
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:unexpected-role-membership';
+    END LOOP;
+END
+$vivolution$;
+
+{#
+  A libpq authentication probe is the source of truth here. PostgreSQL salts a
+  new SCRAM verifier on every ALTER ROLE PASSWORD, so comparing verifier text
+  cannot establish whether the desired plaintext credential already works.
+#}
+{% if cp_db_owner_password_probe.rc | int != 0 %}
+ALTER ROLE "{{ cp_db_owner }}" PASSWORD '{{ cp_db_owner_password }}';
+\echo VIVOLUTION_DB_CHANGED:owner-password
+{% endif %}
+{% if cp_db_runtime_password_probe.rc | int != 0 %}
+ALTER ROLE "{{ cp_db_runtime_user }}" PASSWORD '{{ cp_db_runtime_password }}';
+\echo VIVOLUTION_DB_CHANGED:runtime-password
+{% endif %}
+
+SELECT NOT EXISTS (
+    SELECT FROM pg_database WHERE datname = '{{ cp_database_name }}'
+) AS cp_create_database\gset
+\if :cp_create_database
+CREATE DATABASE "{{ cp_database_name }}" OWNER "{{ cp_db_owner }}";
+\echo VIVOLUTION_DB_CHANGED:database-created
+\endif
+
+DO $vivolution$
+BEGIN
+    IF EXISTS (
+        SELECT FROM pg_database
+        WHERE datname = '{{ cp_database_name }}'
+          AND datdba != (SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_owner }}')
+    ) THEN
+        EXECUTE format(
+            'ALTER DATABASE %I OWNER TO %I',
+            '{{ cp_database_name }}',
+            '{{ cp_db_owner }}'
+        );
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:database-owner';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_database AS database_acl
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(database_acl.datacl, acldefault('d', database_acl.datdba))
+        ) AS privilege
+        WHERE database_acl.datname = '{{ cp_database_name }}'
+          AND privilege.grantee = 0
+    ) THEN
+        REVOKE ALL ON DATABASE "{{ cp_database_name }}" FROM PUBLIC;
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:database-public-privileges';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_database AS database_acl
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(database_acl.datacl, acldefault('d', database_acl.datdba))
+        ) AS privilege
+        WHERE database_acl.datname = '{{ cp_database_name }}'
+          AND privilege.grantee = (
+              SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_runtime_user }}'
+          )
+          AND privilege.privilege_type = 'CONNECT'
+    ) THEN
+        GRANT CONNECT ON DATABASE "{{ cp_database_name }}" TO "{{ cp_db_runtime_user }}";
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:runtime-database-connect';
+    END IF;
+END
+$vivolution$;
 
 \connect {{ cp_database_name }}
-GRANT USAGE ON SCHEMA public TO {{ cp_db_runtime_user }};
-ALTER DEFAULT PRIVILEGES FOR ROLE {{ cp_db_owner }} IN SCHEMA public
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {{ cp_db_runtime_user }};
-ALTER DEFAULT PRIVILEGES FOR ROLE {{ cp_db_owner }} IN SCHEMA public
-    GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {{ cp_db_runtime_user }};
+
+DO $vivolution$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_namespace AS schema_acl
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(schema_acl.nspacl, acldefault('n', schema_acl.nspowner))
+        ) AS privilege
+        WHERE schema_acl.nspname = 'public'
+          AND privilege.grantee = (
+              SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_runtime_user }}'
+          )
+          AND privilege.privilege_type = 'USAGE'
+    ) THEN
+        GRANT USAGE ON SCHEMA public TO "{{ cp_db_runtime_user }}";
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:runtime-schema-usage';
+    END IF;
+
+{% if not (cp_postgres_enforce_least_privilege | default(false) | bool) %}
+    {#
+      Transitional bridge only.  The signed-context bridge release must be
+      running before file-backed sessions and the final explicit ACL contract
+      are enabled.  The guarded runtime-privilege reconciliation removes these
+      legacy defaults permanently when that final phase is selected.
+    #}
+    IF (
+        SELECT count(DISTINCT privilege.privilege_type)
+        FROM pg_default_acl AS default_acl
+        CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) AS privilege
+        WHERE default_acl.defaclrole = (
+                  SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_owner }}'
+              )
+          AND default_acl.defaclnamespace = 'public'::regnamespace
+          AND default_acl.defaclobjtype = 'r'
+          AND privilege.grantee = (
+              SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_runtime_user }}'
+          )
+          AND privilege.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+    ) < 4 THEN
+        ALTER DEFAULT PRIVILEGES FOR ROLE "{{ cp_db_owner }}" IN SCHEMA public
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "{{ cp_db_runtime_user }}";
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:runtime-default-table-privileges';
+    END IF;
+
+    IF (
+        SELECT count(DISTINCT privilege.privilege_type)
+        FROM pg_default_acl AS default_acl
+        CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) AS privilege
+        WHERE default_acl.defaclrole = (
+                  SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_owner }}'
+              )
+          AND default_acl.defaclnamespace = 'public'::regnamespace
+          AND default_acl.defaclobjtype = 'S'
+          AND privilege.grantee = (
+              SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_runtime_user }}'
+          )
+          AND privilege.privilege_type IN ('USAGE', 'SELECT', 'UPDATE')
+    ) < 3 THEN
+        ALTER DEFAULT PRIVILEGES FOR ROLE "{{ cp_db_owner }}" IN SCHEMA public
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO "{{ cp_db_runtime_user }}";
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:runtime-default-sequence-privileges';
+    END IF;
+{% else %}
+    IF EXISTS (
+        SELECT 1
+        FROM pg_default_acl AS default_acl
+        CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) AS privilege
+        WHERE default_acl.defaclrole = (
+                  SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_owner }}'
+              )
+          AND default_acl.defaclnamespace = 'public'::regnamespace
+          AND default_acl.defaclobjtype = 'r'
+          AND privilege.grantee = (
+              SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_runtime_user }}'
+          )
+    ) THEN
+        ALTER DEFAULT PRIVILEGES FOR ROLE "{{ cp_db_owner }}" IN SCHEMA public
+            REVOKE ALL PRIVILEGES ON TABLES FROM "{{ cp_db_runtime_user }}";
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:runtime-default-table-privileges-revoked';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_default_acl AS default_acl
+        CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) AS privilege
+        WHERE default_acl.defaclrole = (
+                  SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_owner }}'
+              )
+          AND default_acl.defaclnamespace = 'public'::regnamespace
+          AND default_acl.defaclobjtype = 'S'
+          AND privilege.grantee = (
+              SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_runtime_user }}'
+          )
+    ) THEN
+        ALTER DEFAULT PRIVILEGES FOR ROLE "{{ cp_db_owner }}" IN SCHEMA public
+            REVOKE ALL PRIVILEGES ON SEQUENCES FROM "{{ cp_db_runtime_user }}";
+        RAISE NOTICE 'VIVOLUTION_DB_CHANGED:runtime-default-sequence-privileges-revoked';
+    END IF;
+{% endif %}
+END
+$vivolution$;

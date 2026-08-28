@@ -1,5 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group, User
 from django.test import RequestFactory, TestCase
 from django.urls import reverse
 
@@ -7,6 +8,10 @@ from core.models import AuditEvent
 
 
 class OperatorAdminSmokeTests(TestCase):
+    def test_identity_and_permission_models_are_not_runtime_administered(self):
+        self.assertNotIn(User, admin.site._registry)
+        self.assertNotIn(Group, admin.site._registry)
+
     def setUp(self):
         self.operator = get_user_model().objects.create_superuser(
             username="operator", email="operator@example.test", password="test-only-password"

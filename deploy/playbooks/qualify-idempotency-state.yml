@@ -1,0 +1,282 @@
+---
+- name: Fingerprint bounded persistent and runtime CP1 state
+  hosts: controllers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Require the local PostgreSQL qualification profile
+      ansible.builtin.assert:
+        that:
+          - cp_install_local_postgres | bool
+          - cp_database_name is match('^(?!pg_)[a-z_][a-z0-9_]{0,62}$')
+          - cp_db_owner is match('^(?!pg_)[a-z_][a-z0-9_]{0,62}$')
+          - cp_db_runtime_user is match('^(?!pg_)[a-z_][a-z0-9_]{0,62}$')
+        fail_msg: The current state fingerprint requires the local PostgreSQL lab profile.
+      no_log: true
+      run_once: true
+
+    - name: Collect and hash bounded controller state privately
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          export LC_ALL=C
+
+          emit_file() {
+              local label="$1"
+              local path="$2"
+              local metadata
+              local digest
+
+              test -f "$path"
+              metadata="$(stat --printf='%a:%u:%g:%s' -- "$path")"
+              digest="$(sha256sum -- "$path" | awk '{print $1}')"
+              printf 'file|%s|%s|%s\n' "$label" "$metadata" "$digest"
+          }
+
+          emit_tree() {
+              local label="$1"
+              local root="$2"
+              local path
+              local relative
+              local metadata
+              local target_digest
+
+              test -d "$root"
+              metadata="$(stat --printf='%a:%u:%g' -- "$root")"
+              printf 'tree|%s|root|%s\n' "$label" "$metadata"
+
+              while IFS= read -r -d '' path; do
+                  relative="${path#"$root"/}"
+                  if test -L "$path"; then
+                      metadata="$(stat --printf='%a:%u:%g' -- "$path")"
+                      target_digest="$(readlink -- "$path" | sha256sum | awk '{print $1}')"
+                      printf 'link|%s/%s|%s|%s\n' \
+                          "$label" "$relative" "$metadata" "$target_digest"
+                  elif test -f "$path"; then
+                      emit_file "$label/$relative" "$path"
+                  elif test -d "$path"; then
+                      metadata="$(stat --printf='%a:%u:%g' -- "$path")"
+                      printf 'directory|%s/%s|%s\n' "$label" "$relative" "$metadata"
+                  else
+                      metadata="$(stat --printf='%F:%a:%u:%g' -- "$path")"
+                      printf 'special|%s/%s|%s\n' "$label" "$relative" "$metadata"
+                  fi
+              done < <(find "$root" -mindepth 1 -print0 | sort -z)
+          }
+
+          emit_unit() {
+              local unit="$1"
+              local properties
+              local config_digest
+
+              properties="$(
+                  systemctl show "$unit" --no-pager \
+                      --property=Id \
+                      --property=LoadState \
+                      --property=ActiveState \
+                      --property=SubState \
+                      --property=UnitFileState \
+                      --property=FragmentPath \
+                      --property=DropInPaths |
+                      tr '\n' ','
+              )"
+              config_digest="$(
+                  systemctl cat "$unit" --no-pager | sha256sum | awk '{print $1}'
+              )"
+              printf 'unit|%s|%s|%s\n' "$unit" "$properties" "$config_digest"
+          }
+
+          collect_state() {
+              local active_release
+              local previous_release
+              local active_image_record
+              local previous_image_record
+              local quadlet_image
+              local running_image
+              local nftables_runtime_digest
+              local pg_database_acl_digest
+              local pg_role_count
+              local pg_scram_digest
+              local rls_key_count
+              local rls_key_state_digest
+
+              printf 'schema|vivolution-cp1-state-v2\n'
+
+              active_release="$(tr -d '\r\n' </etc/vivolution/active-release)"
+              test "$active_release" != ""
+              [[ "$active_release" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{7,79}$ ]]
+
+              if test -f /etc/vivolution/previous-release; then
+                  previous_release="$(tr -d '\r\n' </etc/vivolution/previous-release)"
+                  if test "$previous_release" != ""; then
+                      [[ "$previous_release" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{7,79}$ ]]
+                  fi
+              else
+                  previous_release="<absent>"
+              fi
+
+              active_image_record="$(
+                  tr -d '\r\n' \
+                      <"/etc/vivolution/releases/$active_release/image"
+              )"
+              [[ "$active_image_record" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+              if test "$previous_release" != "<absent>" && test "$previous_release" != ""; then
+                  previous_image_record="$(
+                      tr -d '\r\n' \
+                          <"/etc/vivolution/releases/$previous_release/image"
+                  )"
+                  [[ "$previous_image_record" =~ ^sha256:[0-9a-f]{64}$ ]]
+              else
+                  previous_image_record="<absent>"
+              fi
+
+              quadlet_image="$(
+                  awk -F= '$1 == "Image" {sub(/^[^=]*=/, ""); print; exit}' \
+                      /etc/containers/systemd/vivolution-cp-web.container
+              )"
+              [[ "$quadlet_image" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+              running_image="$(
+                  podman inspect vivolution-cp-web \
+                      --format '{{ '{{' }}.Image{{ '}}' }}'
+              )"
+              running_image="sha256:${running_image#sha256:}"
+              [[ "$running_image" =~ ^sha256:[0-9a-f]{64}$ ]]
+              test "$running_image" = "$active_image_record"
+              test "$quadlet_image" = "$active_image_record"
+
+              printf 'release|active|%s\n' "$active_release"
+              printf 'release|previous|%s\n' "$previous_release"
+              printf 'image|active-record|%s\n' "$active_image_record"
+              printf 'image|previous-record|%s\n' "$previous_image_record"
+              printf 'image|quadlet|%s\n' "$quadlet_image"
+              printf 'image|running|%s\n' "$running_image"
+
+              emit_tree controller-release-source /var/lib/vivolution/releases
+              emit_tree controller-release-config /etc/vivolution
+
+              emit_file controller-quadlet \
+                  /etc/containers/systemd/vivolution-cp-web.container
+              emit_file caddy-config /etc/caddy/Caddyfile
+              emit_file caddy-local-trust \
+                  /usr/local/share/ca-certificates/vivolution-lab-caddy.crt
+              emit_file pgbouncer-config /etc/pgbouncer/pgbouncer.ini
+              emit_file pgbouncer-auth /etc/pgbouncer/userlist.txt
+              emit_file nftables-config /etc/nftables.conf
+              emit_file postgresql-config /etc/postgresql/17/main/postgresql.conf
+              emit_file postgresql-host-auth /etc/postgresql/17/main/pg_hba.conf
+              emit_file journald-config \
+                  /etc/systemd/journald.conf.d/20-vivolution-limits.conf
+              emit_file unattended-upgrades-config \
+                  /etc/apt/apt.conf.d/52vivolution-unattended-upgrades
+              emit_file apt-periodic-config /etc/apt/apt.conf.d/20auto-upgrades
+              emit_file sshd-config /etc/ssh/sshd_config
+              emit_tree sshd-dropins /etc/ssh/sshd_config.d
+              emit_file hosts-config /etc/hosts
+
+              nftables_runtime_digest="$(
+                  nft --numeric list ruleset | sha256sum | awk '{print $1}'
+              )"
+              printf 'runtime|nftables|%s\n' "$nftables_runtime_digest"
+              printf 'runtime|hostname|%s\n' "$(hostnamectl hostname)"
+
+              emit_unit ssh.service
+              emit_unit nftables.service
+              emit_unit postgresql.service
+              emit_unit pgbouncer.service
+              emit_unit caddy.service
+              emit_unit vivolution-cp-web.service
+              emit_unit systemd-journald.service
+              emit_unit unattended-upgrades.service
+              emit_unit apt-daily.timer
+              emit_unit apt-daily-upgrade.timer
+              emit_unit podman-auto-update.timer
+
+              pg_role_count="$(
+                  runuser --user postgres -- \
+                      psql -XAtq --set=ON_ERROR_STOP=1 --dbname=postgres \
+                      --command="SELECT count(*) FROM pg_authid WHERE rolname IN ('{{ cp_db_owner }}', '{{ cp_db_runtime_user }}') AND rolpassword IS NOT NULL" |
+                      tr -d '[:space:]'
+              )"
+              test "$pg_role_count" = "2"
+              pg_scram_digest="$(
+                  runuser --user postgres -- \
+                      psql -XAtq --set=ON_ERROR_STOP=1 --dbname=postgres \
+                      --command="SELECT rolname || ':' || rolpassword FROM pg_authid WHERE rolname IN ('{{ cp_db_owner }}', '{{ cp_db_runtime_user }}') ORDER BY rolname" |
+                      sha256sum | awk '{print $1}'
+              )"
+              [[ "$pg_scram_digest" =~ ^[0-9a-f]{64}$ ]]
+              printf 'database|scram-verifiers|%s\n' "$pg_scram_digest"
+
+              pg_database_acl_digest="$(
+                  runuser --user postgres -- \
+                      psql -XAtq --set=ON_ERROR_STOP=1 --dbname=postgres \
+                      --command="
+                          WITH facts AS (
+                              SELECT 'database-owner|' || target_database.datname || '|' || owner.rolname AS fact
+                              FROM pg_database target_database
+                              JOIN pg_roles owner ON owner.oid = target_database.datdba
+                              WHERE target_database.datname = '{{ cp_database_name }}'
+                              UNION ALL
+                              SELECT 'database-acl|' || target_database.datname || '|' ||
+                                     grantor.rolname || '|' ||
+                                     CASE
+                                         WHEN privilege.grantee = 0 THEN 'PUBLIC'
+                                         ELSE grantee.rolname
+                                     END || '|' || privilege.privilege_type || '|' ||
+                                     privilege.is_grantable::text
+                              FROM pg_database target_database
+                              CROSS JOIN LATERAL aclexplode(
+                                  COALESCE(
+                                      target_database.datacl,
+                                      acldefault('d', target_database.datdba)
+                                  )
+                              ) privilege
+                              JOIN pg_roles grantor ON grantor.oid = privilege.grantor
+                              LEFT JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+                              WHERE target_database.datname = '{{ cp_database_name }}'
+                          )
+                          SELECT fact FROM facts ORDER BY fact
+                      " |
+                      sha256sum | awk '{print $1}'
+              )"
+              [[ "$pg_database_acl_digest" =~ ^[0-9a-f]{64}$ ]]
+              printf 'database|owner-acl|%s\n' "$pg_database_acl_digest"
+
+              rls_key_count="$(
+                  runuser --user postgres -- \
+                      psql -XAtq --set=ON_ERROR_STOP=1 --dbname='{{ cp_database_name }}' \
+                      --command='SELECT count(*) FROM cp_security.rls_signing_key WHERE singleton AND octet_length(key_material) = 32' |
+                      tr -d '[:space:]'
+              )"
+              test "$rls_key_count" = "1"
+              rls_key_state_digest="$(
+                  runuser --user postgres -- \
+                      psql -XAtq --set=ON_ERROR_STOP=1 --dbname='{{ cp_database_name }}' \
+                      --command="SELECT encode(key_material, 'hex') || ':' || rotated_at::text FROM cp_security.rls_signing_key WHERE singleton" |
+                      sha256sum | awk '{print $1}'
+              )"
+              [[ "$rls_key_state_digest" =~ ^[0-9a-f]{64}$ ]]
+              printf 'database|rls-key-state|%s\n' "$rls_key_state_digest"
+          }
+
+          collect_state | sha256sum | awk '{print $1}'
+      register: cp_state_fingerprint_raw
+      changed_when: false
+      no_log: true
+      run_once: true
+
+    - name: Validate the sanitized state fingerprint
+      ansible.builtin.assert:
+        that:
+          - cp_state_fingerprint_raw.stdout | trim is match('^[0-9a-f]{64}$')
+        fail_msg: Bounded CP1 state could not be reduced to one SHA-256 fingerprint.
+      no_log: true
+      run_once: true
+
+    - name: Emit the sanitized state fingerprint
+      ansible.builtin.debug:
+        msg: "CP_STATE_FINGERPRINT={{ cp_state_fingerprint_raw.stdout | trim }}"
+      run_once: true

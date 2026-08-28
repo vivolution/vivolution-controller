@@ -1,0 +1,317 @@
+---
+- name: Qualify the Django administrator login through trusted HTTPS
+  hosts: controllers
+  become: true
+  gather_facts: false
+  vars:
+    cp_admin_host_helper_source: "{{ playbook_dir }}/../tests/admin-host-session-check.py"
+    cp_admin_host_ca_path: >-
+      {{ cp_ingress_ca_export_path |
+         default(playbook_dir + '/../../lab/utm/generated/caddy-root.crt') }}
+  tasks:
+    - name: Validate administrator login qualification variables
+      ansible.builtin.assert:
+        that:
+          - cp_controller_admin_username is defined
+          - cp_controller_admin_username | length > 0
+          - cp_controller_admin_password is defined
+          - cp_controller_admin_password | length > 0
+          - cp_ingress_server_name is defined
+          - cp_ingress_server_name | length > 0
+          - cp_ingress_https_port is defined
+          - cp_ingress_https_port | int >= 1
+          - cp_ingress_https_port | int <= 65535
+        fail_msg: Administrator credentials and the trusted HTTPS endpoint are required.
+      no_log: true
+
+    - name: Remember trusted administrator URLs
+      ansible.builtin.set_fact:
+        cp_admin_base_url: >-
+          https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}
+        cp_admin_login_url: >-
+          https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/admin/login/?next=/admin/
+        cp_admin_index_url: >-
+          https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/admin/
+        cp_admin_logout_url: >-
+          https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/admin/logout/
+
+    - name: Exercise an authenticated administrator session
+      block:
+        - name: Start trusted HTTPS administrator login session
+          ansible.builtin.uri:
+            url: "{{ cp_admin_login_url }}"
+            method: GET
+            follow_redirects: none
+            return_content: true
+            status_code: 200
+            validate_certs: true
+            use_proxy: false
+          register: cp_admin_login_page
+          changed_when: false
+          no_log: true
+
+        - name: Require a CSRF cookie from the login form
+          ansible.builtin.assert:
+            that:
+              - cp_admin_login_page.cookies is defined
+              - cp_admin_login_page.cookies.csrftoken is defined
+              - cp_admin_login_page.cookies.csrftoken | length >= 32
+              - cp_admin_login_page.cookies_string is defined
+            fail_msg: The administrator login form did not establish a CSRF-protected session.
+          no_log: true
+
+        - name: Authenticate the configured Django administrator
+          ansible.builtin.uri:
+            url: "{{ cp_admin_login_url }}"
+            method: POST
+            body_format: form-urlencoded
+            body:
+              username: "{{ cp_controller_admin_username }}"
+              password: "{{ cp_controller_admin_password }}"
+              csrfmiddlewaretoken: "{{ cp_admin_login_page.cookies.csrftoken }}"
+              next: /admin/
+            headers:
+              Cookie: "{{ cp_admin_login_page.cookies_string }}"
+              Referer: "{{ cp_admin_login_url }}"
+            follow_redirects: none
+            return_content: true
+            status_code: 302
+            validate_certs: true
+            use_proxy: false
+          register: cp_admin_login_result
+          changed_when: false
+          no_log: true
+
+        - name: Require a new authenticated session and administrator redirect
+          ansible.builtin.assert:
+            that:
+              - cp_admin_login_result.cookies is defined
+              - cp_admin_login_result.cookies.sessionid is defined
+              - cp_admin_login_result.cookies.csrftoken is defined
+              - cp_admin_login_result.cookies_string is defined
+              - "'/admin/' in (cp_admin_login_result.location | default(''))"
+            fail_msg: Django did not establish an authenticated administrator session.
+          no_log: true
+
+        - name: Open the administrator index with the authenticated session
+          ansible.builtin.uri:
+            url: "{{ cp_admin_index_url }}"
+            method: GET
+            headers:
+              Cookie: "{{ cp_admin_login_result.cookies_string }}"
+            follow_redirects: none
+            return_content: true
+            status_code: 200
+            validate_certs: true
+            use_proxy: false
+          register: cp_admin_authenticated_page
+          changed_when: false
+          no_log: true
+
+        - name: Require authenticated administrator content
+          ansible.builtin.assert:
+            that:
+              - "'/admin/logout/' in cp_admin_authenticated_page.content"
+              - "'Log out' in cp_admin_authenticated_page.content"
+            fail_msg: The authenticated response was not the Django administrator index.
+          no_log: true
+      always:
+        - name: Remember whether an administrator session needs cleanup
+          ansible.builtin.set_fact:
+            cp_admin_session_was_established: >-
+              {{ cp_admin_login_result is defined and
+                 cp_admin_login_result.cookies is defined and
+                 cp_admin_login_result.cookies.sessionid is defined and
+                 cp_admin_login_result.cookies_string is defined }}
+            cp_admin_session_was_cleared: false
+          no_log: true
+
+        - name: Log out the qualification administrator session
+          ansible.builtin.uri:
+            url: "{{ cp_admin_logout_url }}"
+            method: POST
+            body_format: form-urlencoded
+            body:
+              csrfmiddlewaretoken: "{{ cp_admin_login_result.cookies.csrftoken }}"
+            headers:
+              Cookie: "{{ cp_admin_login_result.cookies_string }}"
+              Referer: "{{ cp_admin_index_url }}"
+            follow_redirects: none
+            return_content: true
+            status_code:
+              - 200
+              - 302
+            validate_certs: true
+            use_proxy: false
+          register: cp_admin_logout_result
+          changed_when: false
+          failed_when: false
+          when:
+            - cp_admin_session_was_established | bool
+            - cp_admin_login_result.cookies.csrftoken is defined
+          no_log: true
+
+        - name: Prove the logged-out session no longer reaches the administrator index
+          ansible.builtin.uri:
+            url: "{{ cp_admin_index_url }}"
+            method: GET
+            headers:
+              Cookie: "{{ cp_admin_login_result.cookies_string }}"
+            follow_redirects: none
+            return_content: true
+            status_code:
+              - 200
+              - 302
+            validate_certs: true
+            use_proxy: false
+          register: cp_admin_logged_out_probe
+          changed_when: false
+          failed_when: false
+          when:
+            - cp_admin_session_was_established | bool
+          no_log: true
+
+        - name: Record sanitized administrator session cleanup result
+          ansible.builtin.set_fact:
+            cp_admin_session_was_cleared: >-
+              {{ cp_admin_logged_out_probe.status | default(-1) | int == 302 and
+                 '/admin/login/' in (cp_admin_logged_out_probe.location | default('')) }}
+          when:
+            - cp_admin_session_was_established | bool
+          no_log: true
+
+        - name: Discard administrator qualification session facts
+          ansible.builtin.set_fact:
+            cp_admin_login_page: null
+            cp_admin_login_result: null
+            cp_admin_authenticated_page: null
+            cp_admin_logout_result: null
+            cp_admin_logged_out_probe: null
+          no_log: true
+
+        - name: Require established administrator session cleanup
+          ansible.builtin.assert:
+            that:
+              - not cp_admin_session_was_established | bool or cp_admin_session_was_cleared | bool
+            fail_msg: The administrator qualification session was not invalidated.
+
+    - name: Exercise the administrator session through the UTM loopback forward
+      when: cp_profile == 'lab'
+      run_once: true
+      block:
+        - name: Validate host-forwarded administrator qualification variables
+          ansible.builtin.assert:
+            that:
+              - ansible_host == '127.0.0.1'
+              - cp_resource_host_https_port is defined
+              - cp_resource_host_https_port | int >= 1
+              - cp_resource_host_https_port | int <= 65535
+              - cp_admin_host_ca_path is string
+              - cp_admin_host_ca_path | length > 0
+            fail_msg: The local Lab requires a loopback HTTPS forward and exported Caddy CA.
+
+        - name: Inspect exported Caddy CA on the Ansible controller
+          ansible.builtin.stat:
+            path: "{{ cp_admin_host_ca_path }}"
+          delegate_to: localhost
+          become: false
+          register: cp_admin_host_ca
+
+        - name: Require a regular exported Caddy CA
+          ansible.builtin.assert:
+            that:
+              - cp_admin_host_ca.stat.exists
+              - cp_admin_host_ca.stat.isreg | default(false)
+            fail_msg: The exported Caddy CA is unavailable on the Ansible controller.
+
+        - name: Create protected host administrator acceptance workspace
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: vivolution-admin-host-
+          delegate_to: localhost
+          become: false
+          register: cp_admin_host_workspace
+          no_log: true
+
+        - name: Run protected host-forwarded administrator acceptance
+          block:
+            - name: Install ephemeral host administrator acceptance helper
+              ansible.builtin.copy:
+                src: "{{ cp_admin_host_helper_source }}"
+                dest: "{{ cp_admin_host_workspace.path }}/admin-host-session-check.py"
+                mode: '0700'
+              delegate_to: localhost
+              become: false
+
+            - name: Authenticate through loopback with hostname-verified TLS
+              ansible.builtin.command:
+                argv:
+                  - python3
+                  - "{{ cp_admin_host_workspace.path }}/admin-host-session-check.py"
+                stdin: >-
+                  {{ {
+                    'server_name': cp_ingress_server_name,
+                    'port': cp_resource_host_https_port | int,
+                    'ca_path': cp_admin_host_ca_path,
+                    'username': cp_controller_admin_username,
+                    'password': cp_controller_admin_password
+                  } | to_json }}
+                stdin_add_newline: true
+              delegate_to: localhost
+              become: false
+              register: cp_admin_host_probe
+              changed_when: false
+              failed_when: false
+              no_log: true
+
+            - name: Require structured host administrator acceptance output
+              ansible.builtin.assert:
+                that:
+                  - cp_admin_host_probe.stdout is defined
+                  - cp_admin_host_probe.stdout.startswith('{')
+                fail_msg: Host administrator acceptance did not return a sanitized result.
+              no_log: true
+
+            - name: Parse sanitized host administrator acceptance result
+              ansible.builtin.set_fact:
+                cp_admin_host_result: "{{ cp_admin_host_probe.stdout | from_json }}"
+              no_log: true
+
+            - name: Require a closed authenticated host administrator session
+              ansible.builtin.assert:
+                that:
+                  - cp_admin_host_probe.rc == 0
+                  - cp_admin_host_result.status == 'passed'
+                  - cp_admin_host_result.reason == 'authenticated_session_closed'
+                fail_msg: >-
+                  Host-forwarded administrator acceptance failed with the sanitized reason
+                  {{ cp_admin_host_result.reason | default('unknown') }}.
+
+            - name: Remember sanitized host administrator acceptance
+              ansible.builtin.set_fact:
+                cp_admin_host_session_passed: true
+          always:
+            - name: Remove host administrator acceptance workspace
+              ansible.builtin.file:
+                path: "{{ cp_admin_host_workspace.path }}"
+                state: absent
+              delegate_to: localhost
+              become: false
+              when:
+                - cp_admin_host_workspace is defined
+                - cp_admin_host_workspace.path is defined
+              no_log: true
+
+        - name: Require completed host administrator acceptance
+          ansible.builtin.assert:
+            that:
+              - cp_admin_host_session_passed | default(false) | bool
+            fail_msg: The host-forwarded administrator acceptance did not complete.
+
+        - name: Report sanitized host administrator qualification result
+          ansible.builtin.debug:
+            msg: host_forwarded_admin_login=passed
+
+    - name: Report administrator login qualification result
+      ansible.builtin.debug:
+        msg: admin_login=passed

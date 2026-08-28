@@ -1,37 +1,518 @@
 ---
-- name: Create immutable controller release directory
+- name: Define deterministic controller release paths
+  ansible.builtin.set_fact:
+    cp_controller_source_root: "{{ (playbook_dir | dirname | dirname) }}/controller"
+    cp_controller_release_parent: >-
+      /var/lib/vivolution/releases/{{ cp_controller_release_id }}
+    cp_controller_release_root: >-
+      /var/lib/vivolution/releases/{{ cp_controller_release_id }}/controller
+    cp_controller_release_manifest_path: >-
+      /var/lib/vivolution/releases/{{ cp_controller_release_id }}/controller/.vivolution-source-manifest.sha256
+
+- name: Inventory allowed top-level controller release files
+  ansible.builtin.find:
+    paths: "{{ cp_controller_source_root }}"
+    recurse: false
+    hidden: true
+    file_type: file
+    patterns: "{{ cp_controller_release_root_files }}"
+  delegate_to: localhost
+  become: false
+  register: cp_controller_source_root_inventory
+
+- name: Inventory allowed controller code trees
+  ansible.builtin.find:
+    paths:
+      - "{{ cp_controller_source_root }}/core"
+      - "{{ cp_controller_source_root }}/cp1"
+    recurse: true
+    hidden: false
+    file_type: file
+    excludes:
+      - __pycache__
+      - '*.pyc'
+      - '*.pyo'
+      - .DS_Store
+  delegate_to: localhost
+  become: false
+  register: cp_controller_source_code_inventory
+
+- name: Reject links from controller release source trees
+  ansible.builtin.find:
+    paths:
+      - "{{ cp_controller_source_root }}/core"
+      - "{{ cp_controller_source_root }}/cp1"
+    recurse: true
+    hidden: true
+    file_type: link
+  delegate_to: localhost
+  become: false
+  register: cp_controller_source_links
+
+- name: Select sorted controller release source allowlist
+  ansible.builtin.set_fact:
+    cp_controller_source_files: >-
+      {{ (cp_controller_source_root_inventory.files +
+          (cp_controller_source_code_inventory.files |
+           rejectattr('path', 'search', '/__pycache__/') |
+           rejectattr('path', 'match', '.*\\.py[co]$') |
+           rejectattr('path', 'match', '.*/\\.DS_Store$') | list))
+         | sort(attribute='path') }}
+
+- name: Require complete, regular, link-free controller source allowlist
+  ansible.builtin.assert:
+    that:
+      - cp_controller_source_root_inventory.matched == cp_controller_release_root_files | length
+      - cp_controller_source_files | length > cp_controller_release_root_files | length
+      - cp_controller_source_links.matched == 0
+    fail_msg: >-
+      The controller release source does not match its declared allowlist or contains a symbolic link.
+
+- name: Require safe relative paths in controller source allowlist
+  ansible.builtin.assert:
+    that:
+      - >-
+        (item.path | regex_replace('^' ~ (cp_controller_source_root | regex_escape) ~ '/', ''))
+        is match('^[A-Za-z0-9._/-]+$')
+      - >-
+        not (item.path | regex_replace('^' ~ (cp_controller_source_root | regex_escape) ~ '/', ''))
+        is search('(^|/)\.\.(/|$)')
+    fail_msg: The release allowlist contains an unsafe relative path.
+  loop: "{{ cp_controller_source_files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Collect source checksums for deterministic release manifest
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    checksum_algorithm: sha256
+    follow: false
+  loop: "{{ cp_controller_source_files }}"
+  loop_control:
+    label: "{{ item.path | regex_replace('^' ~ (cp_controller_source_root | regex_escape) ~ '/', '') }}"
+  delegate_to: localhost
+  become: false
+  register: cp_controller_source_checksums
+
+- name: Initialise deterministic controller source manifest
+  ansible.builtin.set_fact:
+    cp_controller_source_manifest_lines: []
+    cp_controller_source_relative_files: []
+
+- name: Assemble deterministic controller source manifest
+  ansible.builtin.set_fact:
+    cp_controller_source_manifest_lines: >-
+      {{ cp_controller_source_manifest_lines +
+         [item.stat.checksum ~ '  ' ~
+          (item.stat.path | regex_replace('^' ~ (cp_controller_source_root | regex_escape) ~ '/', ''))] }}
+    cp_controller_source_relative_files: >-
+      {{ cp_controller_source_relative_files +
+         [item.stat.path | regex_replace('^' ~ (cp_controller_source_root | regex_escape) ~ '/', '')] }}
+  loop: "{{ cp_controller_source_checksums.results }}"
+  loop_control:
+    label: "{{ item.stat.path | regex_replace('^' ~ (cp_controller_source_root | regex_escape) ~ '/', '') }}"
+
+- name: Finalise deterministic controller source manifest
+  ansible.builtin.set_fact:
+    cp_controller_source_manifest: "{{ (cp_controller_source_manifest_lines | join('\n')) ~ '\n' }}"
+    cp_controller_source_manifest_sha256: >-
+      {{ ((cp_controller_source_manifest_lines | join('\n')) ~ '\n') | hash('sha256') }}
+
+- name: Require release ID to equal deterministic source manifest digest
+  ansible.builtin.assert:
+    that:
+      - cp_controller_release_id == 'cp1-' ~ cp_controller_source_manifest_sha256
+    fail_msg: >-
+      The selected release ID is not the full SHA-256 digest of the declared controller source.
+
+- name: Inspect release storage and release parent paths
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /var/lib/vivolution/releases
+    - "{{ cp_controller_release_parent }}"
+  register: cp_controller_release_parent_paths
+
+- name: Require safe release storage and parent paths
+  ansible.builtin.assert:
+    that:
+      - cp_controller_release_parent_paths.results[0].stat.isdir | default(false)
+      - not (cp_controller_release_parent_paths.results[0].stat.islnk | default(false))
+      - cp_controller_release_parent_paths.results[0].stat.uid | default(-1) | int == 0
+      - cp_controller_release_parent_paths.results[0].stat.gid | default(-1) | int == 0
+      - cp_controller_release_parent_paths.results[0].stat.mode | default('') == '0750'
+      - >-
+        not cp_controller_release_parent_paths.results[1].stat.exists or
+        ((cp_controller_release_parent_paths.results[1].stat.isdir | default(false)) and
+         not (cp_controller_release_parent_paths.results[1].stat.islnk | default(false)) and
+         cp_controller_release_parent_paths.results[1].stat.uid | default(-1) | int == 0 and
+         cp_controller_release_parent_paths.results[1].stat.gid | default(-1) | int == 0 and
+         cp_controller_release_parent_paths.results[1].stat.mode | default('') == '0755')
+    fail_msg: Release storage or release parent path is linked or unsafe.
+
+- name: Create immutable release parent directory
   ansible.builtin.file:
-    path: "/var/lib/vivolution/releases/{{ cp_controller_release_id }}/controller"
+    path: "{{ cp_controller_release_parent }}"
     state: directory
     owner: root
     group: root
     mode: '0755'
 
-- name: Copy controller source into immutable release directory
-  ansible.builtin.copy:
-    src: "{{ playbook_dir }}/../../controller/"
-    dest: "/var/lib/vivolution/releases/{{ cp_controller_release_id }}/controller/"
+- name: Check for an existing immutable release tree
+  ansible.builtin.stat:
+    path: "{{ cp_controller_release_root }}"
+  register: cp_controller_release_root_stat
+
+- name: Check for an existing immutable release manifest
+  ansible.builtin.stat:
+    path: "{{ cp_controller_release_manifest_path }}"
+  register: cp_controller_release_manifest_stat
+
+- name: Reject linked or unsafe existing release paths
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cp_controller_release_root_stat.stat.exists or
+        ((cp_controller_release_root_stat.stat.isdir | default(false)) and
+         not (cp_controller_release_root_stat.stat.islnk | default(false)) and
+         cp_controller_release_root_stat.stat.uid | default(-1) | int == 0 and
+         cp_controller_release_root_stat.stat.gid | default(-1) | int == 0 and
+         cp_controller_release_root_stat.stat.mode | default('') == '0755')
+      - >-
+        not cp_controller_release_manifest_stat.stat.exists or
+        ((cp_controller_release_manifest_stat.stat.isreg | default(false)) and
+         not (cp_controller_release_manifest_stat.stat.islnk | default(false)) and
+         cp_controller_release_manifest_stat.stat.uid | default(-1) | int == 0 and
+         cp_controller_release_manifest_stat.stat.gid | default(-1) | int == 0 and
+         cp_controller_release_manifest_stat.stat.mode | default('') == '0444' and
+         cp_controller_release_manifest_stat.stat.nlink | default(-1) | int == 1)
+    fail_msg: Existing release source or manifest path is linked or has unsafe metadata.
+
+- name: Reject unmanifested reuse of a controller release ID
+  ansible.builtin.assert:
+    that:
+      - not cp_controller_release_root_stat.stat.exists or cp_controller_release_manifest_stat.stat.exists
+    fail_msg: >-
+      Release {{ cp_controller_release_id }} already exists without a trusted source manifest.
+      Select a new release ID rather than mutating the legacy release tree.
+
+- name: Read existing immutable release manifest
+  ansible.builtin.slurp:
+    src: "{{ cp_controller_release_manifest_path }}"
+  register: cp_controller_existing_release_manifest
+  when: cp_controller_release_manifest_stat.stat.exists
+
+- name: Require existing release manifest to match local source exactly
+  ansible.builtin.assert:
+    that:
+      - cp_controller_existing_release_manifest.content | b64decode == cp_controller_source_manifest
+    fail_msg: >-
+      Release {{ cp_controller_release_id }} is already bound to different controller source.
+  when: cp_controller_release_manifest_stat.stat.exists
+
+- name: Create new controller release root
+  ansible.builtin.file:
+    path: "{{ cp_controller_release_root }}"
+    state: directory
     owner: root
     group: root
-    mode: preserve
+    mode: '0755'
+  when: not cp_controller_release_manifest_stat.stat.exists
 
-- name: Check for immutable controller image
+- name: Create allowed controller release directories
+  ansible.builtin.file:
+    path: >-
+      {{ cp_controller_release_root }}/{{
+         (item.path | regex_replace('^' ~ (cp_controller_source_root | regex_escape) ~ '/', '')) | dirname }}
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop: "{{ cp_controller_source_files }}"
+  loop_control:
+    label: "{{ item.path | regex_replace('^' ~ (cp_controller_source_root | regex_escape) ~ '/', '') | dirname }}"
+  when: not cp_controller_release_manifest_stat.stat.exists
+
+- name: Copy allowed controller source into new release tree
+  ansible.builtin.copy:
+    src: "{{ item.path }}"
+    dest: >-
+      {{ cp_controller_release_root }}/{{
+         item.path | regex_replace('^' ~ (cp_controller_source_root | regex_escape) ~ '/', '') }}
+    owner: root
+    group: root
+    mode: '0444'
+  loop: "{{ cp_controller_source_files }}"
+  loop_control:
+    label: "{{ item.path | regex_replace('^' ~ (cp_controller_source_root | regex_escape) ~ '/', '') }}"
+  when: not cp_controller_release_manifest_stat.stat.exists
+
+- name: Bind new release tree to deterministic source manifest
+  ansible.builtin.copy:
+    dest: "{{ cp_controller_release_manifest_path }}"
+    owner: root
+    group: root
+    mode: '0444'
+    content: "{{ cp_controller_source_manifest }}"
+  when: not cp_controller_release_manifest_stat.stat.exists
+
+- name: Inventory staged release files
+  ansible.builtin.find:
+    paths: "{{ cp_controller_release_root }}"
+    recurse: true
+    hidden: true
+    file_type: file
+  register: cp_controller_staged_files
+
+- name: Reject links from staged release tree
+  ansible.builtin.find:
+    paths: "{{ cp_controller_release_root }}"
+    recurse: true
+    hidden: true
+    file_type: link
+  register: cp_controller_staged_links
+
+- name: Initialise staged release allowlist
+  ansible.builtin.set_fact:
+    cp_controller_staged_relative_files: []
+
+- name: Assemble staged release allowlist
+  ansible.builtin.set_fact:
+    cp_controller_staged_relative_files: >-
+      {{ cp_controller_staged_relative_files +
+         [item.path | regex_replace('^' ~ (cp_controller_release_root | regex_escape) ~ '/', '')] }}
+  loop: "{{ cp_controller_staged_files.files | sort(attribute='path') }}"
+  loop_control:
+    label: "{{ item.path | regex_replace('^' ~ (cp_controller_release_root | regex_escape) ~ '/', '') }}"
+
+- name: Require staged tree to contain only manifest-declared files
+  ansible.builtin.assert:
+    that:
+      - cp_controller_staged_links.matched == 0
+      - >-
+        cp_controller_staged_relative_files | sort ==
+        (cp_controller_source_relative_files + ['.vivolution-source-manifest.sha256']) | sort
+      - cp_controller_staged_files.files | rejectattr('mode', 'equalto', '0444') | list | length == 0
+      - cp_controller_staged_files.files | rejectattr('uid', 'equalto', 0) | list | length == 0
+      - cp_controller_staged_files.files | rejectattr('gid', 'equalto', 0) | list | length == 0
+    fail_msg: The staged controller release contains undeclared, linked, or writable content.
+
+- name: Verify every staged file against deterministic manifest
   ansible.builtin.command:
-    argv: [podman, image, exists, "{{ cp_controller_image }}"]
+    argv:
+      - sha256sum
+      - --check
+      - --strict
+      - .vivolution-source-manifest.sha256
+  args:
+    chdir: "{{ cp_controller_release_root }}"
+  changed_when: false
+
+- name: Inspect release configuration paths before image lookup
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ cp_controller_release_config_root }}"
+    - "{{ cp_controller_release_config_root }}/{{ cp_controller_release_id }}"
+  register: cp_controller_build_config_paths
+
+- name: Require safe release configuration paths before image lookup
+  ansible.builtin.assert:
+    that:
+      - cp_controller_build_config_paths.results[0].stat.isdir | default(false)
+      - not (cp_controller_build_config_paths.results[0].stat.islnk | default(false))
+      - cp_controller_build_config_paths.results[0].stat.uid | default(-1) | int == 0
+      - cp_controller_build_config_paths.results[0].stat.gid | default(-1) | int == 0
+      - cp_controller_build_config_paths.results[0].stat.mode | default('') == '0700'
+      - >-
+        not cp_controller_build_config_paths.results[1].stat.exists or
+        ((cp_controller_build_config_paths.results[1].stat.isdir | default(false)) and
+         not (cp_controller_build_config_paths.results[1].stat.islnk | default(false)) and
+         cp_controller_build_config_paths.results[1].stat.uid | default(-1) | int == 0 and
+         cp_controller_build_config_paths.results[1].stat.gid | default(-1) | int == 0 and
+         cp_controller_build_config_paths.results[1].stat.mode | default('') == '0700')
+    fail_msg: Release configuration root or target directory is linked or unsafe.
+
+- name: Check for a registered immutable image for this release
+  ansible.builtin.stat:
+    path: "{{ cp_controller_release_config_root }}/{{ cp_controller_release_id }}/image"
+    follow: false
+  register: cp_controller_registered_image_stat
+
+- name: Require safe registered immutable image path
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cp_controller_registered_image_stat.stat.exists or
+        ((cp_controller_registered_image_stat.stat.isreg | default(false)) and
+         not (cp_controller_registered_image_stat.stat.islnk | default(false)) and
+         cp_controller_registered_image_stat.stat.uid | default(-1) | int == 0 and
+         cp_controller_registered_image_stat.stat.gid | default(-1) | int == 0 and
+         cp_controller_registered_image_stat.stat.mode | default('') == '0600' and
+         cp_controller_registered_image_stat.stat.nlink | default(-1) | int == 1)
+    fail_msg: Registered immutable image path is linked or unsafe.
+
+- name: Read registered immutable image for this release
+  ansible.builtin.slurp:
+    src: "{{ cp_controller_release_config_root }}/{{ cp_controller_release_id }}/image"
+  register: cp_controller_registered_image_file
+  when: cp_controller_registered_image_stat.stat.exists
+
+- name: Select registered immutable image
+  ansible.builtin.set_fact:
+    cp_controller_build_image_candidate: >-
+      {{ cp_controller_registered_image_file.content | b64decode | trim }}
+  when: cp_controller_registered_image_stat.stat.exists
+
+- name: Validate registered immutable image reference
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cp_controller_registered_image_stat.stat.exists or
+        cp_controller_build_image_candidate is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: The registered release image is not an immutable SHA-256 image ID.
+
+- name: Check for registered immutable controller image
+  ansible.builtin.command:
+    argv: [podman, image, exists, "{{ cp_controller_build_image_candidate }}"]
   register: cp_controller_image_exists
   changed_when: false
   failed_when: cp_controller_image_exists.rc not in [0, 1]
+  when: cp_controller_registered_image_stat.stat.exists
 
-- name: Build immutable controller image
+- name: Reject a missing registered immutable image
+  ansible.builtin.assert:
+    that:
+      - not cp_controller_registered_image_stat.stat.exists or cp_controller_image_exists.rc == 0
+    fail_msg: The registered immutable image is missing; refusing to rebuild it under the same release ID.
+
+- name: Build and capture an unregistered controller image
+  when: not cp_controller_registered_image_stat.stat.exists
+  block:
+    - name: Allocate private image-ID capture file
+      ansible.builtin.tempfile:
+        state: file
+        path: /run
+        prefix: vivolution-controller-image-
+        suffix: .iid
+      register: cp_controller_build_iidfile
+
+    - name: Build controller image from manifest-verified release tree
+      ansible.builtin.command:
+        argv:
+          - podman
+          - build
+          - --network=host
+          - --pull=missing
+          - "--iidfile={{ cp_controller_build_iidfile.path }}"
+          - "--label=org.vivolution.release.id={{ cp_controller_release_id }}"
+          - "--label=org.vivolution.release.manifest-sha256={{ cp_controller_source_manifest_sha256 }}"
+          - "--tag={{ cp_controller_image }}"
+          - "{{ cp_controller_release_root }}"
+      register: cp_controller_image_build
+      changed_when: true
+
+    - name: Read immutable ID emitted by this build
+      ansible.builtin.slurp:
+        src: "{{ cp_controller_build_iidfile.path }}"
+      register: cp_controller_build_iidfile_content
+
+    - name: Select the image emitted by this build
+      ansible.builtin.set_fact:
+        cp_controller_build_image_candidate: >-
+          {{ cp_controller_build_iidfile_content.content | b64decode | trim }}
+  always:
+    - name: Remove private image-ID capture file
+      ansible.builtin.file:
+        path: "{{ cp_controller_build_iidfile.path }}"
+        state: absent
+      when:
+        - cp_controller_build_iidfile is defined
+        - cp_controller_build_iidfile.path is defined
+
+- name: Require a captured immutable build result
+  ansible.builtin.assert:
+    that:
+      - cp_controller_build_image_candidate is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: The controller build did not produce a valid immutable SHA-256 image ID.
+
+- name: Inspect selected controller image provenance
   ansible.builtin.command:
     argv:
       - podman
-      - build
-      - --network=host
-      - --pull=missing
-      - "--tag={{ cp_controller_image }}"
-      - "/var/lib/vivolution/releases/{{ cp_controller_release_id }}/controller"
-  when: cp_controller_image_exists.rc == 1
-  register: cp_controller_image_build
-  changed_when: true
+      - image
+      - inspect
+      - "{{ cp_controller_build_image_candidate }}"
+      - --format
+      - >-
+        {{ '{{' }}.Id{{ '}}' }}|{{ '{{' }} index .Labels "org.vivolution.release.id" {{ '}}' }}|{{
+        '{{' }} index .Labels "org.vivolution.release.manifest-sha256" {{ '}}' }}
+  register: cp_controller_image_provenance
+  changed_when: false
 
+- name: Parse selected controller image provenance
+  ansible.builtin.set_fact:
+    cp_controller_image_provenance_fields: "{{ cp_controller_image_provenance.stdout.split('|') }}"
+
+- name: Require image to match its release and source manifest
+  ansible.builtin.assert:
+    that:
+      - cp_controller_image_provenance_fields | length == 3
+      - >-
+        cp_controller_image_provenance_fields[0] |
+        regex_replace('^sha256:', '') is match('^[0-9a-f]{64}$')
+      - cp_controller_image_provenance_fields[1] == cp_controller_release_id
+      - cp_controller_image_provenance_fields[2] == cp_controller_source_manifest_sha256
+    fail_msg: >-
+      The selected image metadata does not match this release source manifest.
+
+- name: Verify source files embedded in selected controller image
+  ansible.builtin.command:
+    argv:
+      - podman
+      - run
+      - --rm
+      - --network=none
+      - --pull=never
+      - --read-only
+      - --cap-drop=all
+      - --security-opt=no-new-privileges
+      - --workdir=/app
+      - --entrypoint=/usr/bin/sha256sum
+      - "{{ cp_controller_build_image_candidate }}"
+      - --check
+      - --strict
+      - .vivolution-source-manifest.sha256
+  changed_when: false
+
+- name: Hash source manifest embedded in selected controller image
+  ansible.builtin.command:
+    argv:
+      - podman
+      - run
+      - --rm
+      - --network=none
+      - --pull=never
+      - --read-only
+      - --cap-drop=all
+      - --security-opt=no-new-privileges
+      - --entrypoint=/usr/bin/sha256sum
+      - "{{ cp_controller_build_image_candidate }}"
+      - /app/.vivolution-source-manifest.sha256
+  register: cp_controller_image_manifest_digest
+  changed_when: false
+
+- name: Require embedded source manifest to match the selected release
+  ansible.builtin.assert:
+    that:
+      - >-
+        cp_controller_image_manifest_digest.stdout.split()[0] ==
+        cp_controller_source_manifest_sha256
+    fail_msg: The selected image embeds a different source manifest.
+
+- name: Publish immutable target image ID to activation
+  ansible.builtin.set_fact:
+    cp_controller_image_immutable: >-
+      sha256:{{ cp_controller_image_provenance_fields[0] | regex_replace('^sha256:', '') }}

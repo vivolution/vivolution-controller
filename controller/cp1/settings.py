@@ -1,9 +1,9 @@
 import os
+import re
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from django.core.exceptions import ImproperlyConfigured
-
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -25,6 +25,19 @@ def env_list(name, default=()):
     if value is None:
         return list(default)
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def env_int(name, default, *, minimum=None, maximum=None):
+    value = os.environ.get(name, str(default))
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ImproperlyConfigured(f"{name} must be an integer") from exc
+    if minimum is not None and parsed < minimum:
+        raise ImproperlyConfigured(f"{name} must be at least {minimum}")
+    if maximum is not None and parsed > maximum:
+        raise ImproperlyConfigured(f"{name} must be at most {maximum}")
+    return parsed
 
 
 def database_config(database_url):
@@ -57,6 +70,18 @@ def database_config(database_url):
 
 TESTING = env_bool("DJANGO_TESTING", False)
 DEBUG = env_bool("DJANGO_DEBUG", False)
+
+RLS_CONTEXT_SIGNING_KEY = os.environ.get("RLS_CONTEXT_SIGNING_KEY", "")
+if RLS_CONTEXT_SIGNING_KEY:
+    if not re.fullmatch(r"[0-9a-f]{64}", RLS_CONTEXT_SIGNING_KEY):
+        raise ImproperlyConfigured(
+            "RLS_CONTEXT_SIGNING_KEY must be exactly 64 lowercase hex characters"
+        )
+elif not TESTING:
+    raise ImproperlyConfigured("RLS_CONTEXT_SIGNING_KEY is required")
+RLS_CONTEXT_TTL_SECONDS = env_int(
+    "RLS_CONTEXT_TTL_SECONDS", 60, minimum=5, maximum=300
+)
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
 if not SECRET_KEY:
@@ -144,6 +169,12 @@ CSRF_COOKIE_SECURE = env_bool("DJANGO_CSRF_COOKIE_SECURE", not DEBUG and not TES
 SESSION_COOKIE_SECURE = env_bool("DJANGO_SESSION_COOKIE_SECURE", not DEBUG and not TESTING)
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
+# Authentication sessions intentionally live in the container's bounded /tmp
+# tmpfs instead of the runtime database. This keeps the least-privilege web
+# role away from reusable session material and makes a controller restart
+# invalidate every operator session.
+SESSION_ENGINE = "django.contrib.sessions.backends.file"
+SESSION_FILE_PATH = "/tmp"
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "same-origin"
 SECURE_SSL_REDIRECT = env_bool("DJANGO_SECURE_SSL_REDIRECT", False)

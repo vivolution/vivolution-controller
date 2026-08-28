@@ -4,6 +4,23 @@
   become: true
   gather_facts: true
   tasks:
+    - name: Inspect previous release marker
+      ansible.builtin.stat:
+        path: /etc/vivolution/previous-release
+        follow: false
+      register: cp_previous_release_marker_stat
+
+    - name: Require a safe previous release marker
+      ansible.builtin.assert:
+        that:
+          - cp_previous_release_marker_stat.stat.isreg | default(false)
+          - not (cp_previous_release_marker_stat.stat.islnk | default(false))
+          - cp_previous_release_marker_stat.stat.uid | default(-1) | int == 0
+          - cp_previous_release_marker_stat.stat.gid | default(-1) | int == 0
+          - cp_previous_release_marker_stat.stat.mode | default('') == '0644'
+          - cp_previous_release_marker_stat.stat.nlink | default(-1) | int == 1
+        fail_msg: No safe previous controller release marker is available.
+
     - name: Read previous release marker
       ansible.builtin.slurp:
         src: /etc/vivolution/previous-release
@@ -16,6 +33,7 @@
         cp_controller_refresh_release_environment: false
         cp_controller_run_migrations: false
         cp_controller_create_initial_operator: false
+        cp_controller_allow_legacy_rls_rollback: true
 
     - name: Validate rollback release identifier
       ansible.builtin.assert:

@@ -41,11 +41,36 @@
       - cp_db_owner_password | length >= 32
       - cp_db_runtime_password is defined
       - cp_db_runtime_password | length >= 32
+      - cp_rls_context_key is defined
+      - cp_rls_context_key | length == 64
       - cp_django_secret_key is defined
       - cp_django_secret_key | length >= 48
       - cp_controller_admin_password is defined
       - cp_controller_admin_password | length >= 32
     fail_msg: Generate the protected profile secrets before installation.
+  no_log: true
+
+# The database credentials are currently embedded in libpq URLs, PgBouncer's
+# quoted user list, and a protected SQL bootstrap file. Until those consumers
+# accept independently escaped values, keep this interface deliberately
+# conservative: these identifiers and passwords are safe in every one of those
+# syntaxes without changing their meaning.
+- name: Validate portable database credentials
+  ansible.builtin.assert:
+    that:
+      - cp_database_name is match('^(?!pg_)[a-z_][a-z0-9_]{0,62}$')
+      - cp_db_owner is match('^(?!pg_)[a-z_][a-z0-9_]{0,62}$')
+      - cp_db_runtime_user is match('^(?!pg_)[a-z_][a-z0-9_]{0,62}$')
+      - cp_db_owner != cp_db_runtime_user
+      - cp_db_owner_password is match('^[A-Za-z0-9_-]{32,128}$')
+      - cp_db_runtime_password is match('^[A-Za-z0-9_-]{32,128}$')
+      - cp_rls_context_key is match('^[a-f0-9]{64}$')
+    fail_msg: >-
+      Database names and roles must be restricted lowercase PostgreSQL
+      identifiers, the two roles must be distinct, and database passwords must
+      contain 32-128 URL/SQL-safe ASCII characters (letters, digits,
+      underscore, or hyphen). The RLS context key must be exactly 64 lowercase
+      hexadecimal characters.
   no_log: true
 
 - name: Validate immutable controller release identifier

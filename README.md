@@ -1,6 +1,6 @@
 # Vivolution SBC
 
-Status: Local Debian 13.6 ARM64 CP1 foundation qualified; Azure acceptance and data-plane discovery pending
+Status: Local Debian 13.6 ARM64 CP1 functional POC working; security/release requalification in progress; Azure is no-go
 
 ## Working hypothesis
 
@@ -28,23 +28,25 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 - Jay authorized a disposable local CP1 lab on this Mac. Debian 13.6 ARM64 runs
   in UTM, and the first Django/PostgreSQL controller vertical slice is deployed
   through the repeatable Ansible kit.
-- The first clean rebuild exposed a PgBouncer startup-ordering defect. The
-  ordering was fixed and the complete foundation suite then passed after
-  repairing that interrupted deployment. Evidence:
-  `deploy/evidence/20260827T180455Z-19848`.
-- A final untouched clean rebuild passed the complete suite from its first
-  application install; the required second install reported `changed=0`.
-  Evidence: `deploy/evidence/20260827T183743Z-74252`.
-- The final 120-second endurance gate used eight concurrent HTTPS workers and
-  recorded 896 successful requests, zero failures, 0.175329 seconds maximum
-  latency, 101.95 MiB peak controller memory, 3.17% peak CPU, 0.2 MiB root-disk
-  growth, and zero journal growth.
+- Clean UTM rebuilds and the local functional suite passed on August 27 and 28,
+  including HTTPS/admin access, backup/restore, controlled database outage,
+  failed-release recovery, reboot recovery, and two-minute readiness soaks.
+  The latest untouched-OS run recorded 904 successful requests, zero failures,
+  101.46 MiB peak controller memory, and 3.01% peak CPU.
+- An independent August 28 audit withdrew the broader “qualified” conclusion.
+  It proved the prior `changed=0` result hid changing PostgreSQL SCRAM state and
+  found material RLS, Caddy-admin, mutable-image, credential, evidence, and
+  coverage gaps. Those historical runs remain credible bounded functional
+  evidence, not current security/release acceptance.
+- Remediation is being promoted through a one-release signed-RLS compatibility
+  bridge, then a signed-only/least-privilege release and a new guarded clean
+  rebuild. Do not treat the bridge itself as the final isolation boundary.
 - This is a management-plane foundation POC, not a working SBC product. Edge
   enrollment/PKI, signed configuration, telemetry, SIP signaling, RTP/media,
   Teams onboarding, and carrier interworking are not implemented yet.
-- No qualified vulnerability scanner is installed, so a vulnerability scan was
-  not performed. Component inventory and secret-non-exposure checks are not a
-  substitute for that pending gate.
+- Trivy is now pinned for the replacement qualification, but no release passes
+  the new security gate until its committed source, exact running OCI image,
+  and guest package database all pass the signed HIGH/CRITICAL scan.
 - The existing Azure CP1 VM remains outside this automation and has not been
   changed by the local qualification work. Azure Database for PostgreSQL has
   not been provisioned by this kit.

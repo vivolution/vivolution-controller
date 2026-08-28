@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.contrib.auth.models import Group, User
 
 from .models import (
     AuditEvent,
@@ -9,6 +10,13 @@ from .models import (
     M365Tenant,
     TenantContext,
 )
+
+# Operator identity is provisioned only by the owner-credential deployment
+# command. The runtime database role cannot mutate passwords, superuser/staff
+# flags, groups, or permissions, so those models must not be exposed here.
+for authentication_model in (User, Group):
+    if admin.site.is_registered(authentication_model):
+        admin.site.unregister(authentication_model)
 
 
 @admin.register(CustomerAccount)
@@ -60,8 +68,8 @@ class ConfigurationVersionAdmin(admin.ModelAdmin):
     list_display = ("tenant_context", "version", "state", "artifact_digest", "published_at")
     list_filter = ("state",)
     search_fields = ("tenant_context__name", "artifact_digest")
-    autocomplete_fields = ("tenant_context", "created_by")
-    readonly_fields = ("id", "created_at", "updated_at")
+    autocomplete_fields = ("tenant_context",)
+    readonly_fields = ("id", "created_by", "created_at", "updated_at")
 
 
 @admin.register(AuditEvent)

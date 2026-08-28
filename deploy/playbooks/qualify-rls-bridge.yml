@@ -1,0 +1,147 @@
+---
+- name: Qualify signed and N-1 RLS compatibility bridge
+  hosts: controllers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Collect listeners before the bridge authorization gate
+      ansible.builtin.command:
+        argv: [ss, -ltnH]
+      register: cp_rls_bridge_listeners
+      changed_when: false
+
+    - name: Require the Caddy admin API to remain disabled for the bridge
+      ansible.builtin.assert:
+        that:
+          - "':2019' not in cp_rls_bridge_listeners.stdout"
+        fail_msg: Caddy's unauthenticated admin API is listening during the bridge gate.
+
+    - name: Prove the Caddy admin API is unreachable from the bridge container
+      ansible.builtin.command:
+        argv:
+          - podman
+          - exec
+          - vivolution-cp-web
+          - python
+          - -c
+          - >-
+            import socket;
+            s=socket.socket();
+            s.settimeout(2);
+            raise SystemExit(1 if s.connect_ex(('127.0.0.1', 2019)) == 0 else 0)
+      changed_when: false
+
+    - name: Initialize bridge fixture ownership
+      ansible.builtin.set_fact:
+        cp_rls_bridge_fixtures_owned_by_run: false
+
+    - name: Restrict the bridge gate to local PostgreSQL
+      ansible.builtin.assert:
+        that:
+          - cp_install_local_postgres | bool
+          - cp_rls_context_key is defined
+          - cp_rls_context_key is match('^[0-9a-f]{64}$')
+
+    - name: Exercise signed and legacy RLS bridge behavior
+      block:
+        - name: Prove deterministic bridge fixture identities are unused
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_database_name }}"
+              - --no-password
+              - --no-align
+              - --tuples-only
+              - --quiet
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-preflight.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          register: cp_rls_bridge_fixture_preflight
+          changed_when: false
+          no_log: true
+
+        - name: Refuse to overwrite pre-existing bridge fixture identities
+          ansible.builtin.assert:
+            that:
+              - cp_rls_bridge_fixture_preflight.stdout | trim == '0'
+            fail_msg: Bridge fixture UUIDs already exist; no data was changed.
+
+        - name: Install deterministic bridge fixtures
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_database_name }}"
+              - --no-password
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-setup.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          changed_when: true
+          no_log: true
+
+        - name: Mark successfully installed bridge fixtures as owned by this run
+          ansible.builtin.set_fact:
+            cp_rls_bridge_fixtures_owned_by_run: true
+
+        - name: Run bridge matrix through runtime identity
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --host=127.0.0.1
+              - "--port={{ cp_pgbouncer_port }}"
+              - "--username={{ cp_db_runtime_user }}"
+              - "--dbname={{ cp_database_name }}"
+              - --no-password
+              - --no-align
+              - --tuples-only
+              - --quiet
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-bridge-compat-check.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_runtime_password }}"
+            RLS_CONTEXT_SIGNING_KEY: "{{ cp_rls_context_key }}"
+          register: cp_rls_bridge_matrix
+          changed_when: true
+          no_log: true
+
+        - name: Require signed and legacy bridge behavior
+          ansible.builtin.assert:
+            that:
+              - cp_rls_bridge_matrix.stdout_lines == ['2|2|2', '1|0', '2|2|2', '0|0|0']
+            fail_msg: The RLS compatibility bridge did not preserve N-1 and signed behavior.
+      always:
+        - name: Remove deterministic bridge fixtures
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_database_name }}"
+              - --no-password
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/rls-fixtures-cleanup.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          changed_when: false
+          no_log: true
+          when: cp_rls_bridge_fixtures_owned_by_run | bool
+
+    - name: Report RLS bridge result
+      ansible.builtin.debug:
+        msg: rls_bridge=passed

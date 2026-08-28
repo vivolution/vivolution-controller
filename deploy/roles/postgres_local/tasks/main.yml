@@ -39,6 +39,57 @@
 - name: Ensure PostgreSQL is available before provisioning roles
   ansible.builtin.meta: flush_handlers
 
+- name: Require PostgreSQL to accept local TCP connections
+  ansible.builtin.command:
+    argv:
+      - pg_isready
+      - --host=127.0.0.1
+      - "--port={{ cp_db_upstream_port }}"
+      - --dbname=postgres
+  changed_when: false
+
+- name: Test the desired owner password without changing its SCRAM verifier
+  become_user: postgres
+  ansible.builtin.command:
+    argv:
+      - psql
+      - -X
+      - --set=ON_ERROR_STOP=1
+      - --host=127.0.0.1
+      - "--port={{ cp_db_upstream_port }}"
+      - "--username={{ cp_db_owner }}"
+      - --dbname=postgres
+      - --no-password
+      - --tuples-only
+      - --command=SELECT 1
+  environment:
+    PGPASSWORD: "{{ cp_db_owner_password }}"
+  register: cp_db_owner_password_probe
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Test the desired runtime password without changing its SCRAM verifier
+  become_user: postgres
+  ansible.builtin.command:
+    argv:
+      - psql
+      - -X
+      - --set=ON_ERROR_STOP=1
+      - --host=127.0.0.1
+      - "--port={{ cp_db_upstream_port }}"
+      - "--username={{ cp_db_runtime_user }}"
+      - --dbname=postgres
+      - --no-password
+      - --tuples-only
+      - --command=SELECT 1
+  environment:
+    PGPASSWORD: "{{ cp_db_runtime_password }}"
+  register: cp_db_runtime_password_probe
+  changed_when: false
+  failed_when: false
+  no_log: true
+
 - name: Provision local database roles and database safely
   block:
     - name: Render protected database bootstrap SQL
@@ -56,9 +107,14 @@
       ansible.builtin.command:
         argv:
           - psql
+          - -X
           - --set=ON_ERROR_STOP=1
           - --file=/run/vivolution-db-bootstrap.sql
-      changed_when: false
+      register: cp_db_bootstrap_result
+      changed_when: >-
+        'VIVOLUTION_DB_CHANGED:' in
+        ((cp_db_bootstrap_result.stdout | default('')) ~
+        (cp_db_bootstrap_result.stderr | default('')))
       no_log: true
   always:
     - name: Remove protected database bootstrap SQL
@@ -67,6 +123,44 @@
         state: absent
       changed_when: false
       no_log: true
+
+- name: Prove the reconciled owner credential is accepted
+  become_user: postgres
+  ansible.builtin.command:
+    argv:
+      - psql
+      - -X
+      - --set=ON_ERROR_STOP=1
+      - --host=127.0.0.1
+      - "--port={{ cp_db_upstream_port }}"
+      - "--username={{ cp_db_owner }}"
+      - "--dbname={{ cp_database_name }}"
+      - --no-password
+      - --tuples-only
+      - --command=SELECT 1
+  environment:
+    PGPASSWORD: "{{ cp_db_owner_password }}"
+  changed_when: false
+  no_log: true
+
+- name: Prove the reconciled runtime credential is accepted
+  become_user: postgres
+  ansible.builtin.command:
+    argv:
+      - psql
+      - -X
+      - --set=ON_ERROR_STOP=1
+      - --host=127.0.0.1
+      - "--port={{ cp_db_upstream_port }}"
+      - "--username={{ cp_db_runtime_user }}"
+      - "--dbname={{ cp_database_name }}"
+      - --no-password
+      - --tuples-only
+      - --command=SELECT 1
+  environment:
+    PGPASSWORD: "{{ cp_db_runtime_password }}"
+  changed_when: false
+  no_log: true
 
 - name: Enable PostgreSQL
   ansible.builtin.systemd_service:

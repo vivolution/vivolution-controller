@@ -1,0 +1,667 @@
+\set ON_ERROR_STOP on
+
+BEGIN;
+
+-- Capture the semantic catalog state so Ansible reports the first
+-- reconciliation as changed without claiming drift on an identical rerun.
+WITH facts AS (
+    SELECT 'role|' || rolname || '|' || rolcanlogin::text || '|' ||
+           rolinherit::text || '|' || rolsuper::text || '|' ||
+           rolcreatedb::text || '|' || rolcreaterole::text || '|' ||
+           rolreplication::text || '|' || rolbypassrls::text AS fact
+    FROM pg_roles
+    WHERE rolname = '{{ cp_db_runtime_user }}'
+    UNION ALL
+    SELECT 'database-owner|' || target_database.datname || '|' || owner.rolname
+    FROM pg_database target_database
+    JOIN pg_roles owner ON owner.oid = target_database.datdba
+    WHERE target_database.datname = '{{ cp_database_name }}'
+    UNION ALL
+    SELECT 'database-acl|' || target_database.datname || '|' ||
+           grantor.rolname || '|' ||
+           CASE
+               WHEN privilege.grantee = 0 THEN 'PUBLIC'
+               ELSE grantee.rolname
+           END || '|' || privilege.privilege_type || '|' ||
+           privilege.is_grantable::text
+    FROM pg_database target_database
+    CROSS JOIN LATERAL aclexplode(
+        COALESCE(
+            target_database.datacl,
+            acldefault('d', target_database.datdba)
+        )
+    ) privilege
+    JOIN pg_roles grantor ON grantor.oid = privilege.grantor
+    LEFT JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+    WHERE target_database.datname = '{{ cp_database_name }}'
+    UNION ALL
+    SELECT 'membership|' || parent.rolname || '|' || member.rolname
+    FROM pg_auth_members membership
+    JOIN pg_roles parent ON parent.oid = membership.roleid
+    JOIN pg_roles member ON member.oid = membership.member
+    WHERE member.rolname = '{{ cp_db_runtime_user }}'
+    UNION ALL
+    SELECT 'default-acl|' || owner.rolname || '|' || namespace.nspname || '|' ||
+           default_acl.defaclobjtype::text || '|' || default_acl.defaclacl::text
+    FROM pg_default_acl default_acl
+    JOIN pg_roles owner ON owner.oid = default_acl.defaclrole
+    LEFT JOIN pg_namespace namespace ON namespace.oid = default_acl.defaclnamespace
+    WHERE owner.rolname = '{{ cp_db_owner }}'
+    UNION ALL
+    SELECT 'schema|' || namespace.nspname || '|' || owner.rolname || '|' ||
+           COALESCE(namespace.nspacl::text, '')
+    FROM pg_namespace namespace
+    JOIN pg_roles owner ON owner.oid = namespace.nspowner
+    WHERE namespace.nspname IN ('public', 'cp_security')
+    UNION ALL
+    SELECT 'relation|' || namespace.nspname || '|' || relation.relname || '|' ||
+           relation.relkind::text || '|' || owner.rolname || '|' ||
+           COALESCE(relation.relacl::text, '')
+    FROM pg_class relation
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    JOIN pg_roles owner ON owner.oid = relation.relowner
+    WHERE namespace.nspname IN ('public', 'cp_security')
+    UNION ALL
+    SELECT 'column|' || namespace.nspname || '|' || relation.relname || '|' ||
+           attribute.attname || '|' || attribute.attacl::text
+    FROM pg_attribute attribute
+    JOIN pg_class relation ON relation.oid = attribute.attrelid
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname IN ('public', 'cp_security')
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
+      AND attribute.attacl IS NOT NULL
+)
+SELECT md5(COALESCE(string_agg(fact, E'\n' ORDER BY fact), '')) AS cp_acl_before
+FROM facts
+\gset
+
+DO $vivolution$
+DECLARE
+    membership record;
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_roles
+        WHERE rolname = '{{ cp_db_runtime_user }}'
+          AND rolinherit
+    ) THEN
+        ALTER ROLE "{{ cp_db_runtime_user }}" NOINHERIT;
+    END IF;
+
+    FOR membership IN
+        SELECT parent.rolname AS parent_role
+        FROM pg_auth_members auth_membership
+        JOIN pg_roles parent ON parent.oid = auth_membership.roleid
+        JOIN pg_roles member ON member.oid = auth_membership.member
+        WHERE member.rolname = '{{ cp_db_runtime_user }}'
+    LOOP
+        EXECUTE format(
+            'REVOKE %I FROM %I',
+            membership.parent_role,
+            '{{ cp_db_runtime_user }}'
+        );
+    END LOOP;
+END
+$vivolution$;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE "{{ cp_db_owner }}" IN SCHEMA public
+    REVOKE ALL PRIVILEGES ON TABLES FROM "{{ cp_db_runtime_user }}";
+ALTER DEFAULT PRIVILEGES FOR ROLE "{{ cp_db_owner }}" IN SCHEMA public
+    REVOKE ALL PRIVILEGES ON SEQUENCES FROM "{{ cp_db_runtime_user }}";
+
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+REVOKE CREATE ON SCHEMA public FROM "{{ cp_db_runtime_user }}";
+GRANT USAGE ON SCHEMA public TO "{{ cp_db_runtime_user }}";
+REVOKE CREATE, TEMPORARY ON DATABASE "{{ cp_database_name }}" FROM PUBLIC;
+REVOKE CREATE, TEMPORARY ON DATABASE "{{ cp_database_name }}"
+    FROM "{{ cp_db_runtime_user }}";
+GRANT CONNECT ON DATABASE "{{ cp_database_name }}" TO "{{ cp_db_runtime_user }}";
+
+-- A restored or previously misconfigured database must not leave a direct ACL
+-- path to the RLS signing key.  PUBLIC's deliberate EXECUTE on the validator
+-- remains separate from table/key access.
+DO $vivolution$
+DECLARE
+    protected_relation record;
+    protected_column_list text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'cp_security') THEN
+        REVOKE ALL PRIVILEGES ON SCHEMA cp_security FROM "{{ cp_db_runtime_user }}";
+        FOR protected_relation IN
+            SELECT relation.oid, relation.relname, relation.relkind
+            FROM pg_class relation
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'cp_security'
+              AND relation.relkind IN ('r', 'p', 'S')
+        LOOP
+            IF protected_relation.relkind IN ('r', 'p') THEN
+                EXECUTE format(
+                    'REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I',
+                    'cp_security',
+                    protected_relation.relname,
+                    '{{ cp_db_runtime_user }}'
+                );
+                SELECT string_agg(
+                    format('%I', attribute.attname), ', ' ORDER BY attribute.attnum
+                )
+                INTO protected_column_list
+                FROM pg_attribute attribute
+                WHERE attribute.attrelid = protected_relation.oid
+                  AND attribute.attnum > 0
+                  AND NOT attribute.attisdropped;
+                IF protected_column_list IS NOT NULL THEN
+                    EXECUTE format(
+                        'REVOKE ALL PRIVILEGES (%s) ON TABLE %I.%I FROM %I',
+                        protected_column_list,
+                        'cp_security',
+                        protected_relation.relname,
+                        '{{ cp_db_runtime_user }}'
+                    );
+                END IF;
+            ELSE
+                EXECUTE format(
+                    'REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I',
+                    'cp_security',
+                    protected_relation.relname,
+                    '{{ cp_db_runtime_user }}'
+                );
+            END IF;
+        END LOOP;
+    END IF;
+END
+$vivolution$;
+
+-- This task is deliberately invoked after every owner-run migration.  It
+-- reconciles both existing relations and anything the just-completed migration
+-- introduced, without installing superuser-owned objects into application
+-- backups.
+DO $vivolution$
+DECLARE
+    existing_relation record;
+    column_list text;
+BEGIN
+    FOR existing_relation IN
+        SELECT relation.oid, namespace.nspname, relation.relname, relation.relkind
+        FROM pg_class relation
+        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relkind IN ('r', 'p', 'S')
+    LOOP
+        IF existing_relation.relkind IN ('r', 'p') THEN
+            EXECUTE format(
+                'REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM PUBLIC',
+                existing_relation.nspname,
+                existing_relation.relname
+            );
+            EXECUTE format(
+                'REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I',
+                existing_relation.nspname,
+                existing_relation.relname,
+                '{{ cp_db_runtime_user }}'
+            );
+            SELECT string_agg(
+                format('%I', attribute.attname), ', ' ORDER BY attribute.attnum
+            )
+            INTO column_list
+            FROM pg_attribute attribute
+            WHERE attribute.attrelid = existing_relation.oid
+              AND attribute.attnum > 0
+              AND NOT attribute.attisdropped;
+            IF column_list IS NOT NULL THEN
+                EXECUTE format(
+                    'REVOKE ALL PRIVILEGES (%s) ON TABLE %I.%I FROM PUBLIC',
+                    column_list,
+                    existing_relation.nspname,
+                    existing_relation.relname
+                );
+                EXECUTE format(
+                    'REVOKE ALL PRIVILEGES (%s) ON TABLE %I.%I FROM %I',
+                    column_list,
+                    existing_relation.nspname,
+                    existing_relation.relname,
+                    '{{ cp_db_runtime_user }}'
+                );
+            END IF;
+
+            IF left(existing_relation.relname, 5) = 'core_'
+               OR existing_relation.relname = 'django_admin_log' THEN
+                EXECUTE format(
+                    'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO %I',
+                    existing_relation.nspname,
+                    existing_relation.relname,
+                    '{{ cp_db_runtime_user }}'
+                );
+            ELSIF existing_relation.relname = 'auth_user' THEN
+                EXECUTE format(
+                    'GRANT SELECT ON TABLE %I.%I TO %I',
+                    existing_relation.nspname,
+                    existing_relation.relname,
+                    '{{ cp_db_runtime_user }}'
+                );
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_attribute
+                    WHERE attrelid = existing_relation.oid
+                      AND attname = 'last_login'
+                      AND attnum > 0
+                      AND NOT attisdropped
+                ) THEN
+                    EXECUTE format(
+                        'GRANT UPDATE (%I) ON TABLE %I.%I TO %I',
+                        'last_login',
+                        existing_relation.nspname,
+                        existing_relation.relname,
+                        '{{ cp_db_runtime_user }}'
+                    );
+                END IF;
+            ELSIF existing_relation.relname = ANY (ARRAY[
+                'auth_group',
+                'auth_permission',
+                'auth_group_permissions',
+                'auth_user_groups',
+                'auth_user_user_permissions',
+                'django_content_type',
+                'django_migrations'
+            ]) THEN
+                EXECUTE format(
+                    'GRANT SELECT ON TABLE %I.%I TO %I',
+                    existing_relation.nspname,
+                    existing_relation.relname,
+                    '{{ cp_db_runtime_user }}'
+                );
+            END IF;
+        ELSE
+            EXECUTE format(
+                'REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM PUBLIC',
+                existing_relation.nspname,
+                existing_relation.relname
+            );
+            EXECUTE format(
+                'REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I',
+                existing_relation.nspname,
+                existing_relation.relname,
+                '{{ cp_db_runtime_user }}'
+            );
+            IF left(existing_relation.relname, 5) = 'core_'
+               OR existing_relation.relname = 'django_admin_log_id_seq' THEN
+                EXECUTE format(
+                    'GRANT USAGE, SELECT ON SEQUENCE %I.%I TO %I',
+                    existing_relation.nspname,
+                    existing_relation.relname,
+                    '{{ cp_db_runtime_user }}'
+                );
+            END IF;
+        END IF;
+    END LOOP;
+END
+$vivolution$;
+
+DO $vivolution$
+DECLARE
+    relation record;
+    attribute record;
+    forbidden_table_privileges text[] := ARRAY[
+        'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN'
+    ];
+    privilege_name text;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_roles
+        WHERE rolname = '{{ cp_db_runtime_user }}'
+          AND rolcanlogin
+          AND NOT rolinherit
+          AND NOT rolsuper
+          AND NOT rolcreatedb
+          AND NOT rolcreaterole
+          AND NOT rolreplication
+          AND NOT rolbypassrls
+    ) THEN
+        RAISE EXCEPTION 'runtime role attributes are not least privilege';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_auth_members membership
+        JOIN pg_roles member ON member.oid = membership.member
+        WHERE member.rolname = '{{ cp_db_runtime_user }}'
+    ) THEN
+        RAISE EXCEPTION 'runtime role retains an unexpected role membership';
+    END IF;
+
+    IF NOT has_database_privilege(
+        '{{ cp_db_runtime_user }}', current_database(), 'CONNECT'
+    ) OR NOT has_schema_privilege(
+        '{{ cp_db_runtime_user }}', 'public', 'USAGE'
+    ) OR has_schema_privilege(
+        '{{ cp_db_runtime_user }}', 'public', 'CREATE'
+    ) OR has_database_privilege(
+        '{{ cp_db_runtime_user }}', current_database(), 'CREATE'
+    ) OR has_database_privilege(
+        '{{ cp_db_runtime_user }}', current_database(), 'TEMPORARY'
+    ) THEN
+        RAISE EXCEPTION 'runtime database or public-schema privileges are invalid';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class catalog_relation
+        JOIN pg_namespace catalog_namespace
+          ON catalog_namespace.oid = catalog_relation.relnamespace
+        WHERE catalog_relation.relowner = (
+            SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_runtime_user }}'
+        )
+          AND catalog_namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND catalog_namespace.nspname !~ '^pg_toast'
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_namespace namespace
+        WHERE namespace.nspowner = (
+            SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_runtime_user }}'
+        )
+          AND namespace.nspname NOT LIKE 'pg_temp_%'
+          AND namespace.nspname NOT LIKE 'pg_toast_temp_%'
+    ) THEN
+        RAISE EXCEPTION 'runtime role owns a persistent database object';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_default_acl default_acl
+        CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) privilege
+        WHERE default_acl.defaclrole = (
+            SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_owner }}'
+        )
+          AND privilege.grantee = (
+            SELECT oid FROM pg_roles WHERE rolname = '{{ cp_db_runtime_user }}'
+        )
+    ) THEN
+        RAISE EXCEPTION 'runtime role retains an owner default privilege';
+    END IF;
+
+    FOR relation IN
+        SELECT catalog_relation.oid, catalog_relation.relname, catalog_relation.relkind
+        FROM pg_class catalog_relation
+        JOIN pg_namespace catalog_namespace
+          ON catalog_namespace.oid = catalog_relation.relnamespace
+        WHERE catalog_namespace.nspname = 'public'
+          AND catalog_relation.relkind IN ('r', 'p')
+    LOOP
+        IF left(relation.relname, 5) = 'core_'
+           OR relation.relname = 'django_admin_log' THEN
+            IF NOT has_table_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'SELECT'
+            ) OR NOT has_table_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'INSERT'
+            ) OR NOT has_table_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'UPDATE'
+            ) OR NOT has_table_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'DELETE'
+            ) THEN
+                RAISE EXCEPTION 'required DML privilege is absent on %', relation.relname;
+            END IF;
+            FOREACH privilege_name IN ARRAY ARRAY[
+                'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN'
+            ] LOOP
+                IF has_table_privilege(
+                    '{{ cp_db_runtime_user }}', relation.oid, privilege_name
+                ) THEN
+                    RAISE EXCEPTION 'forbidden % privilege exists on %',
+                        privilege_name, relation.relname;
+                END IF;
+            END LOOP;
+        ELSIF relation.relname = 'auth_user' THEN
+            IF NOT has_table_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'SELECT'
+            ) THEN
+                RAISE EXCEPTION 'auth_user SELECT is absent';
+            END IF;
+            FOREACH privilege_name IN ARRAY forbidden_table_privileges LOOP
+                IF has_table_privilege(
+                    '{{ cp_db_runtime_user }}', relation.oid, privilege_name
+                ) THEN
+                    RAISE EXCEPTION 'forbidden table-level % exists on auth_user',
+                        privilege_name;
+                END IF;
+            END LOOP;
+            FOR attribute IN
+                SELECT attnum, attname
+                FROM pg_attribute
+                WHERE attrelid = relation.oid
+                  AND attnum > 0
+                  AND NOT attisdropped
+            LOOP
+                IF has_column_privilege(
+                    '{{ cp_db_runtime_user }}', relation.oid, attribute.attnum, 'UPDATE'
+                ) <> (attribute.attname = 'last_login') THEN
+                    RAISE EXCEPTION 'auth_user column UPDATE contract failed for %',
+                        attribute.attname;
+                END IF;
+                IF has_column_privilege(
+                    '{{ cp_db_runtime_user }}', relation.oid, attribute.attnum, 'INSERT'
+                ) OR has_column_privilege(
+                    '{{ cp_db_runtime_user }}', relation.oid, attribute.attnum, 'REFERENCES'
+                ) THEN
+                    RAISE EXCEPTION 'forbidden auth_user column privilege exists on %',
+                        attribute.attname;
+                END IF;
+            END LOOP;
+        ELSIF relation.relname = ANY (ARRAY[
+            'auth_group',
+            'auth_permission',
+            'auth_group_permissions',
+            'auth_user_groups',
+            'auth_user_user_permissions',
+            'django_content_type',
+            'django_migrations'
+        ]) THEN
+            IF NOT has_table_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'SELECT'
+            ) THEN
+                RAISE EXCEPTION 'required SELECT is absent on %', relation.relname;
+            END IF;
+            FOREACH privilege_name IN ARRAY forbidden_table_privileges LOOP
+                IF has_table_privilege(
+                    '{{ cp_db_runtime_user }}', relation.oid, privilege_name
+                ) THEN
+                    RAISE EXCEPTION 'forbidden % privilege exists on %',
+                        privilege_name, relation.relname;
+                END IF;
+            END LOOP;
+            FOR attribute IN
+                SELECT attnum, attname
+                FROM pg_attribute
+                WHERE attrelid = relation.oid
+                  AND attnum > 0
+                  AND NOT attisdropped
+            LOOP
+                FOREACH privilege_name IN ARRAY ARRAY[
+                    'INSERT', 'UPDATE', 'REFERENCES'
+                ] LOOP
+                    IF has_column_privilege(
+                        '{{ cp_db_runtime_user }}', relation.oid,
+                        attribute.attnum, privilege_name
+                    ) THEN
+                        RAISE EXCEPTION 'forbidden column % exists on %.%',
+                            privilege_name, relation.relname, attribute.attname;
+                    END IF;
+                END LOOP;
+            END LOOP;
+        ELSE
+            FOREACH privilege_name IN ARRAY ARRAY[
+                'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',
+                'REFERENCES', 'TRIGGER', 'MAINTAIN'
+            ] LOOP
+                IF has_table_privilege(
+                    '{{ cp_db_runtime_user }}', relation.oid, privilege_name
+                ) THEN
+                    RAISE EXCEPTION 'unexpected % privilege exists on %',
+                        privilege_name, relation.relname;
+                END IF;
+            END LOOP;
+            FOR attribute IN
+                SELECT attnum, attname
+                FROM pg_attribute
+                WHERE attrelid = relation.oid
+                  AND attnum > 0
+                  AND NOT attisdropped
+            LOOP
+                FOREACH privilege_name IN ARRAY ARRAY[
+                    'SELECT', 'INSERT', 'UPDATE', 'REFERENCES'
+                ] LOOP
+                    IF has_column_privilege(
+                        '{{ cp_db_runtime_user }}', relation.oid,
+                        attribute.attnum, privilege_name
+                    ) THEN
+                        RAISE EXCEPTION 'unexpected column % privilege exists on %.%',
+                            privilege_name, relation.relname, attribute.attname;
+                    END IF;
+                END LOOP;
+            END LOOP;
+        END IF;
+    END LOOP;
+
+    FOR relation IN
+        SELECT catalog_relation.oid, catalog_relation.relname
+        FROM pg_class catalog_relation
+        JOIN pg_namespace catalog_namespace
+          ON catalog_namespace.oid = catalog_relation.relnamespace
+        WHERE catalog_namespace.nspname = 'public'
+          AND catalog_relation.relkind = 'S'
+    LOOP
+        IF left(relation.relname, 5) = 'core_'
+           OR relation.relname = 'django_admin_log_id_seq' THEN
+            IF NOT has_sequence_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'USAGE'
+            ) OR NOT has_sequence_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'SELECT'
+            ) OR has_sequence_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'UPDATE'
+            ) THEN
+                RAISE EXCEPTION 'sequence privilege contract failed for %',
+                    relation.relname;
+            END IF;
+        ELSIF has_sequence_privilege(
+            '{{ cp_db_runtime_user }}', relation.oid, 'USAGE'
+        ) OR has_sequence_privilege(
+            '{{ cp_db_runtime_user }}', relation.oid, 'SELECT'
+        ) OR has_sequence_privilege(
+            '{{ cp_db_runtime_user }}', relation.oid, 'UPDATE'
+        ) THEN
+            RAISE EXCEPTION 'unexpected sequence privilege exists on %', relation.relname;
+        END IF;
+    END LOOP;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class catalog_relation
+        JOIN pg_namespace catalog_namespace
+          ON catalog_namespace.oid = catalog_relation.relnamespace
+        WHERE catalog_namespace.nspname = 'cp_security'
+          AND catalog_relation.relkind IN ('r', 'p')
+          AND (
+              has_table_privilege(
+                  '{{ cp_db_runtime_user }}', catalog_relation.oid, 'SELECT'
+              ) OR has_table_privilege(
+                  '{{ cp_db_runtime_user }}', catalog_relation.oid, 'INSERT'
+              ) OR has_table_privilege(
+                  '{{ cp_db_runtime_user }}', catalog_relation.oid, 'UPDATE'
+              ) OR has_table_privilege(
+                  '{{ cp_db_runtime_user }}', catalog_relation.oid, 'DELETE'
+              ) OR has_table_privilege(
+                  '{{ cp_db_runtime_user }}', catalog_relation.oid, 'TRUNCATE'
+              ) OR has_table_privilege(
+                  '{{ cp_db_runtime_user }}', catalog_relation.oid, 'REFERENCES'
+              ) OR has_table_privilege(
+                  '{{ cp_db_runtime_user }}', catalog_relation.oid, 'TRIGGER'
+              ) OR has_table_privilege(
+                  '{{ cp_db_runtime_user }}', catalog_relation.oid, 'MAINTAIN'
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION 'runtime role can access a protected cp_security table';
+    END IF;
+END
+$vivolution$;
+
+WITH facts AS (
+    SELECT 'role|' || rolname || '|' || rolcanlogin::text || '|' ||
+           rolinherit::text || '|' || rolsuper::text || '|' ||
+           rolcreatedb::text || '|' || rolcreaterole::text || '|' ||
+           rolreplication::text || '|' || rolbypassrls::text AS fact
+    FROM pg_roles
+    WHERE rolname = '{{ cp_db_runtime_user }}'
+    UNION ALL
+    SELECT 'database-owner|' || target_database.datname || '|' || owner.rolname
+    FROM pg_database target_database
+    JOIN pg_roles owner ON owner.oid = target_database.datdba
+    WHERE target_database.datname = '{{ cp_database_name }}'
+    UNION ALL
+    SELECT 'database-acl|' || target_database.datname || '|' ||
+           grantor.rolname || '|' ||
+           CASE
+               WHEN privilege.grantee = 0 THEN 'PUBLIC'
+               ELSE grantee.rolname
+           END || '|' || privilege.privilege_type || '|' ||
+           privilege.is_grantable::text
+    FROM pg_database target_database
+    CROSS JOIN LATERAL aclexplode(
+        COALESCE(
+            target_database.datacl,
+            acldefault('d', target_database.datdba)
+        )
+    ) privilege
+    JOIN pg_roles grantor ON grantor.oid = privilege.grantor
+    LEFT JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+    WHERE target_database.datname = '{{ cp_database_name }}'
+    UNION ALL
+    SELECT 'membership|' || parent.rolname || '|' || member.rolname
+    FROM pg_auth_members membership
+    JOIN pg_roles parent ON parent.oid = membership.roleid
+    JOIN pg_roles member ON member.oid = membership.member
+    WHERE member.rolname = '{{ cp_db_runtime_user }}'
+    UNION ALL
+    SELECT 'default-acl|' || owner.rolname || '|' || namespace.nspname || '|' ||
+           default_acl.defaclobjtype::text || '|' || default_acl.defaclacl::text
+    FROM pg_default_acl default_acl
+    JOIN pg_roles owner ON owner.oid = default_acl.defaclrole
+    LEFT JOIN pg_namespace namespace ON namespace.oid = default_acl.defaclnamespace
+    WHERE owner.rolname = '{{ cp_db_owner }}'
+    UNION ALL
+    SELECT 'schema|' || namespace.nspname || '|' || owner.rolname || '|' ||
+           COALESCE(namespace.nspacl::text, '')
+    FROM pg_namespace namespace
+    JOIN pg_roles owner ON owner.oid = namespace.nspowner
+    WHERE namespace.nspname IN ('public', 'cp_security')
+    UNION ALL
+    SELECT 'relation|' || namespace.nspname || '|' || relation.relname || '|' ||
+           relation.relkind::text || '|' || owner.rolname || '|' ||
+           COALESCE(relation.relacl::text, '')
+    FROM pg_class relation
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    JOIN pg_roles owner ON owner.oid = relation.relowner
+    WHERE namespace.nspname IN ('public', 'cp_security')
+    UNION ALL
+    SELECT 'column|' || namespace.nspname || '|' || relation.relname || '|' ||
+           attribute.attname || '|' || attribute.attacl::text
+    FROM pg_attribute attribute
+    JOIN pg_class relation ON relation.oid = attribute.attrelid
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname IN ('public', 'cp_security')
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
+      AND attribute.attacl IS NOT NULL
+)
+SELECT md5(COALESCE(string_agg(fact, E'\n' ORDER BY fact), '')) AS cp_acl_after
+FROM facts
+\gset
+
+SELECT (:'cp_acl_before' <> :'cp_acl_after') AS cp_acl_changed
+\gset
+\if :cp_acl_changed
+\echo VIVOLUTION_DB_CHANGED:runtime-privileges
+\endif
+\echo CP_RUNTIME_PRIVILEGES_OK=file-sessions-auth-readonly-core-dml
+
+COMMIT;

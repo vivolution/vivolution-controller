@@ -17,6 +17,8 @@ until the final Azure acceptance test is explicitly approved.
 
 ```bash
 bin/cpctl init
+bin/cpctl trust-init
+bin/cpctl preflight
 bin/cpctl syntax
 bin/cpctl install
 bin/cpctl upgrade
@@ -28,7 +30,11 @@ bin/cpctl outage-test
 bin/cpctl reboot-test
 bin/cpctl resource-test
 bin/cpctl secret-test
+bin/cpctl admin-test
+bin/cpctl bridge-test
+bin/cpctl vulnerability-test
 bin/cpctl qualify
+bin/cpctl verify-evidence deploy/evidence/<run-id>
 ```
 
 `outage-test` stops only the disposable lab's concrete PostgreSQL cluster. It
@@ -40,6 +46,11 @@ starts PostgreSQL even when an assertion fails.
 exact prior image and runtime environment are restored. `restore-test` restores
 a logical database dump into an isolated database and reruns the tenant-RLS
 behavioral checks.
+
+`bridge-test` is used only while promoting the signed-RLS compatibility release.
+It proves that the signed-capable N-1 image and the preceding legacy image can
+both operate against migration `0003`; the final migration then removes legacy
+database-selected authorization.
 
 `reboot-test` performs a clean guest reboot, waits for systemd and SSH, checks
 all controller services and trusted HTTPS, and then reruns the full acceptance
@@ -57,14 +68,14 @@ declared inventory bounds. It never stops services, reboots, changes the VM,
 or intentionally exhausts memory. A sanitized log and result marker are kept
 under the ignored, mode-protected `deploy/evidence/` directory.
 
-## Qualification record — 2026-08-27
+## Historical functional record — 2026-08-27 (superseded)
 
 - The first clean Debian 13.6 ARM64 rebuild exposed a PgBouncer startup-ordering
   defect. After the ordering fix, reconciliation repaired the interrupted
   deployment and the complete foundation suite passed. Evidence:
   `deploy/evidence/20260827T180455Z-19848`.
-- A final untouched clean rebuild passed the complete suite from its first
-  application install, and the second install reported `changed=0`. Evidence:
+- A final untouched clean rebuild passed the then-current suite from its first
+  application install, and Ansible reported `changed=0` on the second install. Evidence:
   `deploy/evidence/20260827T183743Z-74252`.
 - Its 120-second HTTPS soak used eight concurrent workers: 896 successful
   requests, zero failures, 0.175329 seconds maximum latency, 101.95 MiB peak
@@ -73,8 +84,11 @@ under the ignored, mode-protected `deploy/evidence/` directory.
 - The Azure CP1 VM was not changed. This is local ARM64 foundation evidence, not
   Azure AMD64, managed-PostgreSQL, public-TLS, production, or full-SBC
   acceptance.
-- No qualified vulnerability scanner is installed; a vulnerability scan was
-  not performed.
+- A later direct state comparison proved that the old `changed=0` gate hid
+  changing PostgreSQL SCRAM verifiers. The historical run also lacked a
+  vulnerability scan and committed/signed source provenance. It is functional
+  engineering evidence only and must not be cited as current security or
+  release qualification.
 
 The default inventory is the protected working lab. To qualify the separately
 guarded clean-rebuild VM after its base installation completes, select its
@@ -91,9 +105,21 @@ root, so it cannot accidentally test or overwrite the working lab's endpoints.
 OCI image metadata/layers/history, process arguments, and relevant service
 journals for the protected deployment values without printing those values. It
 also records the active/base image digests and Debian/Python component
-inventories. It does not claim a vulnerability scan: no supported scanner with
-a qualified local vulnerability database is currently installed, so a
-vulnerability scan was not performed.
+inventories. `vulnerability-test` separately pins Trivy, scans the committed
+controller source, exact running OCI image, and guest Debian package database,
+and retains signed JSON reports, CycloneDX SBOMs, input hashes, and scanner
+database provenance. Any HIGH or CRITICAL result—including an unfixed finding—
+fails the gate unless a future review adds an explicit, documented waiver.
+
+Every signed gate requires a clean Git tree and a tracked in-repository
+inventory, records a normalized inventory hash and complete source identity,
+rechecks them before PASS, and seals its file-exact checksum manifest with the
+enrolled Ed25519 identity. `verify-evidence` rejects changed, missing, extra,
+linked, or unsigned evidence files.
+
+The compatibility `bridge-qualify` command intentionally records
+`security_release_gate=transitional-not-passed`. Only the later signed-only
+release may run the complete `qualify` gate.
 
 `deploy/.state` is mode-protected and excluded from version control. Commands
 use `no_log` for secret-bearing Ansible tasks. The initial lab uses
