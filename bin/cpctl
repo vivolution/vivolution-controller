@@ -1117,7 +1117,7 @@ is_current_evidence_child() {
 
 cleanup_vulnerability_inputs() {
     if [ -n "${vulnerability_archive:-}" ] && [ -f "$vulnerability_archive" ] &&
-        is_current_evidence_child "$vulnerability_archive" controller-image.oci; then
+        is_current_evidence_child "$vulnerability_archive" controller-image.docker.tar; then
         rm -f "$vulnerability_archive"
     fi
     if [ -n "${vulnerability_source_archive:-}" ] &&
@@ -1196,7 +1196,7 @@ vulnerability_gate() {
     }
     mkdir -p "$STATE_DIR"
     chmod 0700 "$STATE_DIR"
-    vulnerability_archive="$evidence_dir/controller-image.oci"
+    vulnerability_archive="$evidence_dir/controller-image.docker.tar"
     vulnerability_rootfs="$evidence_dir/guest-rootfs"
     vulnerability_cache="$STATE_DIR/trivy-cache"
     if [ -e "$vulnerability_cache" ] &&
@@ -1289,6 +1289,8 @@ PY
         --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
         "$DEPLOY_DIR/playbooks/export-vulnerability-rootfs.yml" || vulnerability_status=1
 
+    vulnerability_coverage_python="$(select_controller_python)"
+
     if [ -d "$vulnerability_source_directory/controller" ]; then
         run_trivy_clean filesystem \
             --db-repository "$vulnerability_db_repository" \
@@ -1324,6 +1326,7 @@ PY
             --scanners vuln \
             --severity HIGH,CRITICAL \
             --ignore-unfixed=false \
+            --exit-on-eol 1 \
             --ignorefile /dev/null \
             --exit-code 1 \
             --no-progress \
@@ -1350,6 +1353,7 @@ PY
             --scanners vuln \
             --severity HIGH,CRITICAL \
             --ignore-unfixed=false \
+            --exit-on-eol 1 \
             --ignorefile /dev/null \
             --exit-code 1 \
             --no-progress \
@@ -1370,7 +1374,6 @@ PY
         vulnerability_status=1
     fi
 
-    vulnerability_coverage_python="$(select_controller_python)"
     if ! "$vulnerability_coverage_python" - \
         "$evidence_dir/source-vulnerabilities.json" \
         "$evidence_dir/image-vulnerabilities.json" \
@@ -1406,13 +1409,41 @@ if not expected_packages:
 
 
 def report_results(path):
-    report = json.loads(path.read_text(encoding="utf-8"))
+    if not path.is_file() or path.is_symlink():
+        raise SystemExit(f"Trivy report is missing or unsafe: {path.name}")
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Trivy report is unreadable: {path.name}: {exc}") from exc
     if report.get("SchemaVersion") != 2:
         raise SystemExit(f"unexpected Trivy schema in {path.name}")
     results = report.get("Results")
     if not isinstance(results, list):
         raise SystemExit(f"Trivy results are missing in {path.name}")
-    return results
+    for result in results:
+        if not isinstance(result, dict):
+            raise SystemExit(f"Trivy result is malformed in {path.name}")
+        vulnerabilities = result.get("Vulnerabilities")
+        if vulnerabilities not in (None, []):
+            raise SystemExit(f"High/Critical vulnerabilities were reported in {path.name}")
+    return report, results
+
+
+def require_current_debian(report, label):
+    metadata = report.get("Metadata")
+    if not isinstance(metadata, dict):
+        raise SystemExit(f"{label} scan omitted metadata")
+    operating_system = metadata.get("OS")
+    if not isinstance(operating_system, dict):
+        raise SystemExit(f"{label} scan omitted operating-system identity")
+    if operating_system.get("Family") != "debian":
+        raise SystemExit(f"{label} scan did not detect Debian")
+    version = operating_system.get("Name")
+    if not isinstance(version, str) or not re.match(r"^13(?:\.|$)", version):
+        raise SystemExit(f"{label} scan did not detect Debian 13")
+    end_of_support = operating_system.get("EOSL", False)
+    if not isinstance(end_of_support, bool) or end_of_support:
+        raise SystemExit(f"{label} scan did not prove a supported Debian release")
 
 
 def package_set(result):
@@ -1428,7 +1459,7 @@ def package_set(result):
     }
 
 
-source_results = report_results(source_report_path)
+_, source_results = report_results(source_report_path)
 source_pip = [
     result
     for result in source_results
@@ -1439,7 +1470,8 @@ source_pip = [
 if len(source_pip) != 1 or package_set(source_pip[0]) != expected_packages:
     raise SystemExit("source vulnerability scan did not cover the exact Python lock")
 
-image_results = report_results(image_report_path)
+image_report, image_results = report_results(image_report_path)
+require_current_debian(image_report, "controller image")
 image_os_packages = set()
 image_python_packages = set()
 for result in image_results:
@@ -1452,7 +1484,8 @@ if not image_os_packages:
 if not expected_packages.issubset(image_python_packages):
     raise SystemExit("controller image scan did not cover the exact locked Python packages")
 
-guest_results = report_results(guest_report_path)
+guest_report, guest_results = report_results(guest_report_path)
+require_current_debian(guest_report, "guest rootfs")
 guest_os_packages = set()
 for result in guest_results:
     if result.get("Class") == "os-pkgs" and result.get("Type") == "debian":
@@ -1485,6 +1518,10 @@ PY
         if [ -f "$vulnerability_rootfs/etc/os-release" ]; then
             printf 'guest_os_release_sha256=%s\n' \
                 "$(hash_file "$vulnerability_rootfs/etc/os-release")"
+        fi
+        if [ -f "$vulnerability_rootfs/etc/debian_version" ]; then
+            printf 'guest_debian_version_sha256=%s\n' \
+                "$(hash_file "$vulnerability_rootfs/etc/debian_version")"
         fi
         if [ -f "$vulnerability_rootfs/var/lib/dpkg/status" ]; then
             printf 'guest_dpkg_status_sha256=%s\n' \
