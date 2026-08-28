@@ -1,6 +1,11 @@
 # Vivolution SBC Proof-of-Concept Blueprint
 
-Status: Local Debian 13.6 ARM64 CP1 foundation qualification complete. Azure resources, DNS, Microsoft 365 configuration, public certificates, and live calls remain unstarted and require Jay's separate approval.
+Status: Local Debian 13.6 ARM64 CP1 is operational. The broader historical
+foundation qualification claim was withdrawn on August 28 after an independent
+audit found security and evidence gaps; replacement qualification is in
+progress. Azure resources, DNS, Microsoft 365 configuration, public
+certificates, and live calls remain unstarted and require Jay's separate
+approval.
 
 ## POC question
 
@@ -10,12 +15,20 @@ The POC is successful only if it proves **isolation and operability**, not just 
 
 ## Current local foundation evidence
 
-The controller host/database/HTTPS/Django foundation has completed two local qualification runs in a disposable Debian 13.6 ARM64 UTM environment:
+The controller host/database/HTTPS/Django foundation completed two historical
+local functional runs in a disposable Debian 13.6 ARM64 UTM environment:
 
 - `deploy/evidence/20260827T180455Z-19848` passed after the first clean deployment exposed and the automation repaired a PgBouncer first-boot ordering defect.
-- `deploy/evidence/20260827T183743Z-74252` passed as an untouched clean first-pass regression and proved that the second installation completed with `changed=0`.
+- `deploy/evidence/20260827T183743Z-74252` passed as an untouched clean first-pass regression and recorded an Ansible second-run recap of `changed=0`.
 
-This evidence qualifies the local CP1 foundation and rebuild procedure only. Azure was untouched, and no vulnerability scan was performed. A clean Azure AMD64 deployment with PostgreSQL Flexible Server and public TLS remains an acceptance gate. Enrollment/PKI and the SIP/media data plane also remain unimplemented or unqualified and must pass their own POC stages before CP1 can be described as a working SBC product.
+The August 28 audit proved that the `changed=0` recap hid PostgreSQL SCRAM
+changes and withdrew the qualification conclusion. These folders remain
+bounded functional evidence only. Azure was untouched, and those historical
+runs did not include a vulnerability scan. A replacement local qualification
+and a clean Azure AMD64 deployment with PostgreSQL Flexible Server and public
+TLS remain acceptance gates. Enrollment/PKI and the SIP/media data plane also
+remain unimplemented or unqualified and must pass their own POC stages before
+CP1 can be described as a working SBC product.
 
 ## In scope
 

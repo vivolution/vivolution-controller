@@ -38,15 +38,19 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
   found material RLS, Caddy-admin, mutable-image, credential, evidence, and
   coverage gaps. Those historical runs remain credible bounded functional
   evidence, not current security/release acceptance.
-- Remediation is being promoted through a one-release signed-RLS compatibility
-  bridge, then a signed-only/least-privilege release and a new guarded clean
-  rebuild. Do not treat the bridge itself as the final isolation boundary.
+- Remediation was promoted through a one-release signed-RLS compatibility
+  bridge to the signed-only/least-privilege Lab release. Replacement security
+  qualification and a new guarded clean rebuild remain in progress; the bridge
+  itself is not the final isolation boundary.
 - This is a management-plane foundation POC, not a working SBC product. Edge
   enrollment/PKI, signed configuration, telemetry, SIP signaling, RTP/media,
   Teams onboarding, and carrier interworking are not implemented yet.
-- Trivy is now pinned for the replacement qualification, but no release passes
-  the new security gate until its committed source, exact running OCI image,
-  and guest package database all pass the signed HIGH/CRITICAL scan.
+- Trivy is pinned for the replacement qualification. The signed gate blocks
+  every fixable HIGH/CRITICAL finding in the committed source, exact running
+  OCI image, and guest package database. It also retains the complete unfixed
+  HIGH/CRITICAL inventory as signed evidence; findings for which Trivy reports
+  no fixed version remain explicit residual risk rather than being hidden or
+  mislabeled as remediated.
 - The existing Azure CP1 VM remains outside this automation and has not been
   changed by the local qualification work. Azure Database for PostgreSQL has
   not been provisioned by this kit.

@@ -401,6 +401,20 @@
 - name: Build and capture an unregistered controller image
   when: not cp_controller_registered_image_stat.stat.exists
   block:
+    - name: Inspect Podman build capabilities
+      ansible.builtin.command:
+        argv: [podman, build, --help]
+      register: cp_controller_podman_build_help
+      changed_when: false
+
+    - name: Require all-layer image squashing support
+      ansible.builtin.assert:
+        that:
+          - "'--squash-all' in cp_controller_podman_build_help.stdout"
+        fail_msg: >-
+          This controller host does not support Podman's required --squash-all build
+          capability.
+
     - name: Allocate private image-ID capture file
       ansible.builtin.tempfile:
         state: file
@@ -416,6 +430,7 @@
           - build
           - --network=host
           - --pull=missing
+          - --squash-all
           - "--iidfile={{ cp_controller_build_iidfile.path }}"
           - "--label=org.vivolution.release.id={{ cp_controller_release_id }}"
           - "--label=org.vivolution.release.manifest-sha256={{ cp_controller_source_manifest_sha256 }}"

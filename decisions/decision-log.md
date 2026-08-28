@@ -123,7 +123,15 @@
 ## D-018 — Local CP1 foundation qualification is complete
 
 - Date: 2026-08-27
-- Status: Satisfied for the Debian 13.6 ARM64 foundation slice
+- Status: Withdrawn and superseded by D-019
 - Decision: Accept the local CP1 host/database/HTTPS/Django foundation as reproducibly qualified and retain its Ansible/UTM rebuild procedure as the baseline for final Azure acceptance.
 - Evidence: `deploy/evidence/20260827T180455Z-19848` passed after the clean build exposed and the deployment repaired PgBouncer's first-boot configuration ordering. `deploy/evidence/20260827T183743Z-74252` then passed as an untouched clean first-pass regression, including a second installation with `changed=0`.
 - Boundary: This is not Azure or full SBC product acceptance. Azure AMD64, PostgreSQL Flexible Server and public TLS acceptance remain pending, as do enrollment/PKI and the SIP/media data plane. Azure was untouched during local qualification, and no vulnerability scan was performed.
+
+## D-019 — Requalify CP1 after the independent security/evidence audit
+
+- Date: 2026-08-28
+- Status: Accepted; replacement qualification in progress
+- Decision: Withdraw D-018's reproducible-qualification conclusion while retaining its folders as bounded historical functional evidence. Promote the repaired controller through the compatibility bridge and signed-only release, then require true bounded-state idempotency, exact-image rollback, signed tenant context, least-privilege database grants, Caddy isolation, committed/signed evidence, and a fail-closed Trivy dependency/OS package gate before restoring a local qualification claim.
+- Reason: The audit proved that the old Ansible `changed=0` recap hid PostgreSQL SCRAM changes and found material tenant-boundary, release, credential, evidence, and coverage gaps. Trivy also reports current High/Critical package findings without fixed versions; these remain explicit signed residual risk while every fixable High/Critical finding blocks acceptance.
+- Boundary: The repaired local management-plane foundation still does not establish Azure AMD64/Flexible Server/public TLS acceptance, application-level vulnerability completeness, enrollment/PKI, or a working SIP/media SBC product.

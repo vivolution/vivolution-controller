@@ -1,6 +1,8 @@
 # Risk Register
 
-Status: Discovery baseline with a qualified local CP1 foundation. Scores remain qualitative until the voice and Azure POC stages produce evidence.
+Status: Discovery baseline with an operational local CP1 and replacement
+qualification in progress. Scores remain qualitative until the replacement
+local, voice, and Azure POC stages produce evidence.
 
 ## R1 — Microsoft support boundary
 
@@ -112,5 +114,5 @@ Status: Discovery baseline with a qualified local CP1 foundation. Scores remain 
 - **Risk:** Passing the Debian 13.6 ARM64 controller-foundation suite is mistaken for Azure production acceptance or a working SBC product.
 - **Impact:** High.
 - **Control:** Preserve architecture- and scope-labelled evidence, require a clean Azure AMD64/Flexible Server/public TLS acceptance run, qualify enrollment/PKI separately, and retain independent SIP/media and tenant-isolation gates. Run and record a vulnerability scan before any production-readiness claim.
-- **Current evidence:** `deploy/evidence/20260827T180455Z-19848` passed after repairing the PgBouncer first-boot ordering defect. `deploy/evidence/20260827T183743Z-74252` passed as an untouched clean first-pass regression and proved a second installation with `changed=0`.
-- **Open exposure:** Azure remained untouched, no vulnerability scan was performed, and Azure AMD64/Flexible Server/public TLS, enrollment/PKI, and the SIP/media data plane remain unaccepted.
+- **Current evidence:** Historical folders `deploy/evidence/20260827T180455Z-19848` and `deploy/evidence/20260827T183743Z-74252` retain bounded functional results. The August 28 audit withdrew their broader qualification conclusion because the reported `changed=0` recap hid PostgreSQL SCRAM changes and other security/evidence gaps.
+- **Open exposure:** Replacement local qualification remains in progress. Azure remained untouched, and Azure AMD64/Flexible Server/public TLS, enrollment/PKI, and the SIP/media data plane remain unaccepted.

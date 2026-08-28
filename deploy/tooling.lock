@@ -5,4 +5,5 @@ controller-python==3.14.7
 ruff==0.16.5
 shellcheck==0.11.0
 trivy==0.74.0
+trivy-sha256-darwin-arm64==5fd45afccbd5efd7a88e6da92a7b3a52c2e3ffd30d5b954f324123d6d1d24469
 trivy-db-repository==public.ecr.aws/aquasecurity/trivy-db:2

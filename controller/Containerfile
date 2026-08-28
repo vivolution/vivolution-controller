@@ -9,6 +9,45 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
+# The pinned upstream image predates Debian's OpenSSL 3.5.7 security build.
+# Fetch the exact signed-repository binaries by version and verify their
+# architecture-specific SHA-256 values so future builds cannot silently drift.
+ARG OPENSSL_DEBIAN_VERSION=3.5.7-1~deb13u2
+RUN set -eux; \
+    architecture="$(dpkg --print-architecture)"; \
+    case "$architecture" in \
+        arm64) \
+            libssl_sha256=ec131326aa9fa9ec934eca386bc7991f328fe383eaefd3e43bd8901a9199c5ae; \
+            openssl_sha256=ff38f9e4fdbfef72d9cb31088e5e42f58c83c2fb1d1bbb4e4b4c9adc53c17100; \
+            legacy_sha256=7628954796eb651fc499ad98d4e51435691c2ccce0b5fbae6b198cbece742db4 \
+            ;; \
+        amd64) \
+            libssl_sha256=916f7f40b34a06e6ebfaefcdab331bff458328411da672598f126a760472467d; \
+            openssl_sha256=4ff006f431d8c2e69fa736885a3b6e779f2448535f69dbde821d9f0ff87ad8ea; \
+            legacy_sha256=f155c8191ae6d41da73d792f4182680aeafeb85c3dd223934ee9fdd115c4f1fa \
+            ;; \
+        *) echo "Unsupported controller image architecture: $architecture" >&2; exit 1 ;; \
+    esac; \
+    package_root=https://security.debian.org/debian-security/pool/updates/main/o/openssl; \
+    libssl_package="libssl3t64_${OPENSSL_DEBIAN_VERSION}_${architecture}.deb"; \
+    openssl_package="openssl_${OPENSSL_DEBIAN_VERSION}_${architecture}.deb"; \
+    legacy_package="openssl-provider-legacy_${OPENSSL_DEBIAN_VERSION}_${architecture}.deb"; \
+    for package in "$libssl_package" "$openssl_package" "$legacy_package"; do \
+        python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \
+            "$package_root/$package" "/tmp/$package"; \
+    done; \
+    printf '%s  %s\n%s  %s\n%s  %s\n' \
+        "$libssl_sha256" "/tmp/$libssl_package" \
+        "$openssl_sha256" "/tmp/$openssl_package" \
+        "$legacy_sha256" "/tmp/$legacy_package" \
+        > /tmp/openssl.sha256; \
+    sha256sum --check --strict /tmp/openssl.sha256; \
+    dpkg --install "/tmp/$libssl_package" "/tmp/$openssl_package" "/tmp/$legacy_package"; \
+    test "$(dpkg-query --show --showformat='${Version}' libssl3t64)" = "$OPENSSL_DEBIAN_VERSION"; \
+    test "$(dpkg-query --show --showformat='${Version}' openssl)" = "$OPENSSL_DEBIAN_VERSION"; \
+    test "$(dpkg-query --show --showformat='${Version}' openssl-provider-legacy)" = "$OPENSSL_DEBIAN_VERSION"; \
+    rm -f /tmp/*.deb /tmp/openssl.sha256
+
 RUN groupadd --gid "${APP_GID}" cp1 \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" \
         --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin cp1
@@ -16,9 +55,23 @@ RUN groupadd --gid "${APP_GID}" cp1 \
 WORKDIR /app
 
 COPY requirements.lock constraints.txt ./
+# pip is a build-time installer only. Removing it, its vendored libraries and
+# ensurepip's bundled wheels prevents vulnerable installer code from entering
+# the flattened runtime image.
 RUN python -m pip install --no-deps --require-hashes --resume-retries 20 --timeout 60 \
         --constraint constraints.txt --requirement requirements.lock \
-    && python -m pip check
+    && python -m pip check \
+    && rm -rf \
+        /usr/local/lib/python3.13/site-packages/pip \
+        /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
+        /usr/local/lib/python3.13/ensurepip \
+        /usr/local/bin/pip \
+        /usr/local/bin/pip3 \
+        /usr/local/bin/pip3.13 \
+    && test ! -e /usr/local/lib/python3.13/site-packages/pip \
+    && test ! -e /usr/local/lib/python3.13/ensurepip \
+    && test -z "$(find /usr/local/lib/python3.13/site-packages \
+        -maxdepth 1 -name 'pip-*.dist-info' -print -quit)"
 
 COPY . .
 RUN chmod 0555 /app/entrypoint.sh /app/manage.py \

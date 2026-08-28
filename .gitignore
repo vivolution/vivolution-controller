@@ -15,6 +15,7 @@ controller/.pytest_cache/
 controller/**/__pycache__/
 controller/staticfiles/
 controller/*.sqlite3
+deploy/tests/__pycache__/
 
 # Local controller test environment.
 controller/.test-venv/

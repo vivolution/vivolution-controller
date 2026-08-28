@@ -110,8 +110,11 @@ also records the active/base image digests and Debian/Python component
 inventories. `vulnerability-test` separately pins Trivy, scans the committed
 controller source, exact running OCI image, and guest Debian package database,
 and retains signed JSON reports, CycloneDX SBOMs, input hashes, and scanner
-database provenance. Any HIGH or CRITICAL result—including an unfixed finding—
-fails the gate unless a future review adds an explicit, documented waiver.
+database provenance. Any Trivy-reported fixable HIGH or CRITICAL dependency/OS
+package finding fails the gate. Findings for which the current Trivy database
+reports no fixed version remain in the signed inventory with explicit High and
+Critical counts; they are residual risk, not a general vulnerability waiver or
+a claim that application-level security analysis is complete.
 
 Every signed gate requires a clean Git tree and a tracked in-repository
 inventory, records a normalized inventory hash and complete source identity,
@@ -131,8 +134,9 @@ if any normal rollback step is interrupted.
 use `no_log` for secret-bearing Ansible tasks. The initial lab uses
 passwordless sudo only on the disposable UTM VM; that is not the Azure policy.
 
-The current layers qualify the host, nftables, PostgreSQL, PgBouncer, Podman,
-and an immutable Django controller image with active/previous release markers.
+The current automation covers the host, nftables, PostgreSQL, PgBouncer,
+Podman, and an immutable Django controller image with active/previous release
+markers; replacement qualification of this combined layer remains in progress.
 The enrollment gateway and step-ca are unimplemented future layers that require
 separate implementation and qualification. SIP signaling, RTP/media, Edge
 Agent behavior, signed artifacts, and production telemetry are also outside

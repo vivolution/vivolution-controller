@@ -19,14 +19,28 @@ vulnerability_archive=""
 vulnerability_source_archive=""
 vulnerability_source_directory=""
 vulnerability_rootfs=""
+vulnerability_cache=""
+vulnerability_cache_lock=""
+vulnerability_cache_lock_owned=false
 rollback_qualification_active=false
 rollback_qualification_final_release=""
 rollback_qualification_n1_release=""
 rollback_qualification_recovery_outcome=not-required
 
 hash_file() {
-    hash_output="$(shasum -a 256 "$1")"
-    printf '%s\n' "${hash_output%% *}"
+    hash_output="$(shasum -a 256 "$1")" || return 1
+    hash_value="${hash_output%% *}"
+    require_sha256_value 'File hash' "$hash_value" || return 1
+    printf '%s\n' "$hash_value" || return 1
+}
+
+require_sha256_value() {
+    sha256_label="$1"
+    sha256_value="$2"
+    printf '%s\n' "$sha256_value" | grep -Eq '^[0-9a-f]{64}$' || {
+        printf '%s did not produce a canonical SHA-256 value.\n' "$sha256_label" >&2
+        return 1
+    }
 }
 
 tooling_version() {
@@ -54,16 +68,16 @@ select_controller_python() {
 }
 
 controller_source_manifest() {
-    require_command shasum
+    require_command shasum || return 1
     (
-        cd "$ROOT_DIR/controller"
+        cd "$ROOT_DIR/controller" || exit 1
         [ -d core ] && [ -d cp1 ] || {
             printf 'Controller source directories core/ and cp1/ are required.\n' >&2
             exit 1
         }
-        source_list="$(mktemp)"
-        sorted_source_list="$(mktemp)"
-        symlink_list="$(mktemp)"
+        source_list="$(mktemp)" || exit 1
+        sorted_source_list="$(mktemp)" || exit 1
+        symlink_list="$(mktemp)" || exit 1
         trap 'rm -f "$source_list" "$sorted_source_list" "$symlink_list"' \
             EXIT HUP INT TERM
         for required_source_file in \
@@ -73,7 +87,7 @@ controller_source_manifest() {
                 exit 1
             }
         done
-        find core cp1 -type l -print > "$symlink_list"
+        find core cp1 -type l -print > "$symlink_list" || exit 1
         if [ -s "$symlink_list" ]; then
             printf 'Controller code trees must not contain symbolic links.\n' >&2
             exit 1
@@ -85,45 +99,46 @@ controller_source_manifest() {
             constraints.txt \
             entrypoint.sh \
             manage.py \
-            requirements.lock > "$source_list"
+            requirements.lock > "$source_list" || exit 1
         find core cp1 -type f \
             ! -path '*/__pycache__/*' \
             ! -name '*.pyc' \
             ! -name '*.pyo' \
             ! -name '.DS_Store' \
             ! -path '*/.*' \
-            -print >> "$source_list"
-        LC_ALL=C sort -u "$source_list" > "$sorted_source_list"
+            -print >> "$source_list" || exit 1
+        LC_ALL=C sort -u "$source_list" > "$sorted_source_list" || exit 1
         while IFS= read -r source_file; do
             [ -f "$source_file" ] && [ ! -L "$source_file" ] || {
                 printf 'Unsafe or missing controller source: %s\n' "$source_file" >&2
                 exit 1
             }
-            source_hash="$(hash_file "$source_file")"
-            printf '%s  %s\n' "$source_hash" "$source_file"
+            source_hash="$(hash_file "$source_file")" || exit 1
+            printf '%s  %s\n' "$source_hash" "$source_file" || exit 1
         done < "$sorted_source_list"
     )
 }
 
 controller_release_id() {
     (
-        manifest_file="$(mktemp)"
+        manifest_file="$(mktemp)" || exit 1
         trap 'rm -f "$manifest_file"' EXIT HUP INT TERM
-        controller_source_manifest > "$manifest_file"
-        printf 'cp1-%s\n' "$(hash_file "$manifest_file")"
+        controller_source_manifest > "$manifest_file" || exit 1
+        manifest_hash="$(hash_file "$manifest_file")" || exit 1
+        printf 'cp1-%s\n' "$manifest_hash" || exit 1
     )
 }
 
 project_source_digest() {
-    require_command git
-    require_command shasum
+    require_command git || return 1
+    require_command shasum || return 1
     (
-        project_index="$(mktemp)"
-        sorted_project_index="$(mktemp)"
+        project_index="$(mktemp)" || exit 1
+        sorted_project_index="$(mktemp)" || exit 1
         trap 'rm -f "$project_index" "$sorted_project_index"' EXIT HUP INT TERM
-        git -C "$ROOT_DIR" ls-files -s > "$project_index"
-        LC_ALL=C sort "$project_index" > "$sorted_project_index"
-        hash_file "$sorted_project_index"
+        git -C "$ROOT_DIR" ls-files -s > "$project_index" || exit 1
+        LC_ALL=C sort "$project_index" > "$sorted_project_index" || exit 1
+        hash_file "$sorted_project_index" || exit 1
     )
 }
 
@@ -155,7 +170,7 @@ usage() {
         '  bridge-test Prove signed and N-1 RLS bridge compatibility' \
         '  bridge-qualify Deploy and seal the one-release RLS bridge' \
         '  rollback-qualify Seal a final to N-1 to final recovery cycle' \
-        '  vulnerability-test Scan source dependencies and the exact live image' \
+        '  vulnerability-test Scan source, exact live image, and guest package DB' \
         '  verify     Run the CP1 acceptance checks' \
         '  qualify    Run the complete CP1 foundation qualification suite'
 }
@@ -260,7 +275,7 @@ validate_lab_secret_contents() {
 }
 
 validate_lab_secrets() {
-    require_owned_regular_file "$LAB_SECRETS" 600
+    require_owned_regular_file "$LAB_SECRETS" 600 || return 1
     validate_lab_secret_contents "$LAB_SECRETS" || {
         printf 'Lab secrets do not match the exact protected CP1 schema.\n' >&2
         return 1
@@ -521,11 +536,10 @@ validated_local_evidence_signer_fingerprint() (
 )
 
 ensure_secrets() {
-    if [ ! -e "$LAB_SECRETS" ] && [ ! -L "$LAB_SECRETS" ]; then
-        init_secrets
-    else
-        validate_lab_secrets
-    fi
+    # Run credential creation/validation in a fresh shell. This preserves that
+    # command's `set -e` semantics even when a caller is collecting status from
+    # a logged conditional transaction.
+    "$ROOT_DIR/bin/cpctl" init >/dev/null || return 1
 }
 
 run_ansible_clean() {
@@ -541,43 +555,43 @@ run_ansible_clean() {
 }
 
 playbook() {
-    require_command ansible-playbook
-    require_inventory
-    ensure_secrets
-    release_id="$(controller_release_id)"
+    require_command ansible-playbook || return 1
+    require_inventory || return 1
+    ensure_secrets || return 1
+    release_id="$("$ROOT_DIR/bin/cpctl" release-id)" || return 1
     run_ansible_clean ansible-playbook \
         --inventory "$LAB_INVENTORY" \
         --extra-vars "@$LAB_SECRETS" \
         --extra-vars "cp_controller_release_id=$release_id" \
-        "$@"
+        "$@" || return 1
 }
 
 rollback_playbook() {
-    require_command ansible-playbook
-    require_inventory
-    ensure_secrets
+    require_command ansible-playbook || return 1
+    require_inventory || return 1
+    ensure_secrets || return 1
     run_ansible_clean ansible-playbook \
         --inventory "$LAB_INVENTORY" \
         --extra-vars "@$LAB_SECRETS" \
-        "$DEPLOY_DIR/playbooks/rollback.yml"
+        "$DEPLOY_DIR/playbooks/rollback.yml" || return 1
 }
 
 protected_playbook() {
-    require_command ansible-playbook
-    require_inventory
-    ensure_secrets
+    require_command ansible-playbook || return 1
+    require_inventory || return 1
+    ensure_secrets || return 1
     run_ansible_clean ansible-playbook \
         --inventory "$LAB_INVENTORY" \
         --extra-vars "@$LAB_SECRETS" \
-        "$@"
+        "$@" || return 1
 }
 
 plain_playbook() {
-    require_command ansible-playbook
-    require_inventory
+    require_command ansible-playbook || return 1
+    require_inventory || return 1
     run_ansible_clean ansible-playbook \
         --inventory "$LAB_INVENTORY" \
-        "$@"
+        "$@" || return 1
 }
 
 require_clean_project() {
@@ -780,22 +794,39 @@ PY
 }
 
 syntax_checks() {
-    release_id="$(controller_release_id)"
-    find "$DEPLOY_DIR/playbooks" -maxdepth 1 -type f -name '*.yml' -print |
-        LC_ALL=C sort | while IFS= read -r playbook_file; do
-            protected_playbook \
+    release_id="$(controller_release_id)" || return 1
+    syntax_unsorted_list="$(mktemp)" || return 1
+    syntax_sorted_list="$(mktemp)" || {
+        rm -f "$syntax_unsorted_list" || true
+        return 1
+    }
+    syntax_status=0
+    if ! find "$DEPLOY_DIR/playbooks" -maxdepth 1 -type f -name '*.yml' -print \
+        > "$syntax_unsorted_list" ||
+        ! LC_ALL=C sort "$syntax_unsorted_list" > "$syntax_sorted_list"; then
+        syntax_status=1
+    else
+        while IFS= read -r playbook_file; do
+            if ! protected_playbook \
                 --extra-vars "cp_controller_release_id=$release_id" \
-                --syntax-check "$playbook_file"
-        done
+                --syntax-check "$playbook_file"; then
+                syntax_status=1
+                break
+            fi
+        done < "$syntax_sorted_list"
+    fi
+    rm -f "$syntax_unsorted_list" || syntax_status=1
+    rm -f "$syntax_sorted_list" || syntax_status=1
+    [ "$syntax_status" -eq 0 ] || return 1
 }
 
 require_tool_versions() {
-    require_command ansible
-    require_command ansible-community
-    require_command ansible-playbook
-    pinned_ansible_core="$(tooling_version ansible-core)"
-    pinned_ansible_package="$(tooling_version ansible-package)"
-    ansible_version_output="$(ansible --version)"
+    require_command ansible || return 1
+    require_command ansible-community || return 1
+    require_command ansible-playbook || return 1
+    pinned_ansible_core="$(tooling_version ansible-core)" || return 1
+    pinned_ansible_package="$(tooling_version ansible-package)" || return 1
+    ansible_version_output="$(ansible --version)" || return 1
     case "$ansible_version_output" in
         "ansible [core $pinned_ansible_core]"*) ;;
         *)
@@ -803,15 +834,17 @@ require_tool_versions() {
             return 1
             ;;
     esac
-    ansible_community_version="$(ansible-community --version)"
+    ansible_community_version="$(ansible-community --version)" || return 1
     [ "$ansible_community_version" = "Ansible community version $pinned_ansible_package" ] || {
         printf 'Ansible community package %s is required.\n' "$pinned_ansible_package" >&2
         return 1
     }
-    require_command shellcheck
-    pinned_shellcheck_version="$(tooling_version shellcheck)"
-    shellcheck_version="$(shellcheck --version |
-        awk -F': ' '$1 == "version" { print $2; found = 1 } END { if (!found) exit 1 }')"
+    require_command shellcheck || return 1
+    pinned_shellcheck_version="$(tooling_version shellcheck)" || return 1
+    shellcheck_output="$(shellcheck --version)" || return 1
+    shellcheck_version="$(printf '%s\n' "$shellcheck_output" |
+        awk -F': ' '$1 == "version" { print $2; found = 1 } END { if (!found) exit 1 }')" ||
+        return 1
     [ "$shellcheck_version" = "$pinned_shellcheck_version" ] || {
         printf 'ShellCheck %s is required.\n' "$pinned_shellcheck_version" >&2
         return 1
@@ -819,20 +852,21 @@ require_tool_versions() {
 }
 
 ensure_controller_test_venv() {
-    require_command shasum
-    ensure_private_directory "$STATE_DIR"
+    require_command shasum || return 1
+    ensure_private_directory "$STATE_DIR" || return 1
     if [ -e "$CONTROLLER_TEST_VENV" ] || [ -L "$CONTROLLER_TEST_VENV" ]; then
-        ensure_private_directory "$CONTROLLER_TEST_VENV"
+        ensure_private_directory "$CONTROLLER_TEST_VENV" || return 1
     fi
-    controller_python="$(select_controller_python)"
-    pinned_python_version="$(tooling_version controller-python)"
-    requirements_hash="$(hash_file "$ROOT_DIR/controller/requirements.lock")"
-    tooling_requirements_hash="$(hash_file "$DEPLOY_DIR/tooling-requirements.lock")"
+    controller_python="$(select_controller_python)" || return 1
+    pinned_python_version="$(tooling_version controller-python)" || return 1
+    requirements_hash="$(hash_file "$ROOT_DIR/controller/requirements.lock")" || return 1
+    tooling_requirements_hash="$(hash_file "$DEPLOY_DIR/tooling-requirements.lock")" ||
+        return 1
     environment_marker="$CONTROLLER_TEST_VENV/.vivolution-tooling-state"
     expected_environment_state="python=$pinned_python_version requirements=$requirements_hash tooling=$tooling_requirements_hash"
 
     if [ -e "$environment_marker" ] || [ -L "$environment_marker" ]; then
-        require_owned_regular_file "$environment_marker" 600
+        require_owned_regular_file "$environment_marker" 600 || return 1
     fi
 
     existing_python_version=""
@@ -843,30 +877,30 @@ ensure_controller_test_venv() {
     if [ -d "$CONTROLLER_TEST_VENV" ] && \
         [ "$existing_python_version" != "$pinned_python_version" ]; then
         mv "$CONTROLLER_TEST_VENV" \
-            "$CONTROLLER_TEST_VENV.obsolete.$(date -u +%Y%m%dT%H%M%SZ).$$"
+            "$CONTROLLER_TEST_VENV.obsolete.$(date -u +%Y%m%dT%H%M%SZ).$$" || return 1
     fi
     if [ ! -x "$CONTROLLER_TEST_VENV/bin/python" ]; then
-        "$controller_python" -m venv "$CONTROLLER_TEST_VENV"
+        "$controller_python" -m venv "$CONTROLLER_TEST_VENV" || return 1
     fi
-    ensure_private_directory "$CONTROLLER_TEST_VENV"
+    ensure_private_directory "$CONTROLLER_TEST_VENV" || return 1
     installed_environment_state="$(sed -n '1p' "$environment_marker" 2>/dev/null || true)"
     if [ "$installed_environment_state" != "$expected_environment_state" ]; then
         "$CONTROLLER_TEST_VENV/bin/python" -m pip install \
             --disable-pip-version-check \
             --require-hashes \
-            --requirement "$ROOT_DIR/controller/requirements.lock"
+            --requirement "$ROOT_DIR/controller/requirements.lock" || return 1
         "$CONTROLLER_TEST_VENV/bin/python" -m pip install \
             --disable-pip-version-check \
             --require-hashes \
-            --requirement "$DEPLOY_DIR/tooling-requirements.lock"
-        printf '%s\n' "$expected_environment_state" > "$environment_marker"
-        chmod 0600 "$environment_marker"
+            --requirement "$DEPLOY_DIR/tooling-requirements.lock" || return 1
+        printf '%s\n' "$expected_environment_state" > "$environment_marker" || return 1
+        chmod 0600 "$environment_marker" || return 1
     fi
     actual_venv_python="$("$CONTROLLER_TEST_VENV/bin/python" -c \
-        'import platform; print(platform.python_version())')"
-    [ "$actual_venv_python" = "$pinned_python_version" ]
-    ruff_version="$(tooling_version ruff)"
-    ruff_output="$("$CONTROLLER_TEST_VENV/bin/python" -m ruff --version)"
+        'import platform; print(platform.python_version())')" || return 1
+    [ "$actual_venv_python" = "$pinned_python_version" ] || return 1
+    ruff_version="$(tooling_version ruff)" || return 1
+    ruff_output="$("$CONTROLLER_TEST_VENV/bin/python" -m ruff --version)" || return 1
     [ "$ruff_output" = "ruff $ruff_version" ] || {
         printf 'Ruff %s is required.\n' "$ruff_version" >&2
         return 1
@@ -874,29 +908,41 @@ ensure_controller_test_venv() {
 }
 
 static_checks() {
-    require_tool_versions
-    ensure_controller_test_venv
-    git -C "$ROOT_DIR" diff --check
+    require_tool_versions || return 1
+    ensure_controller_test_venv || return 1
+    git -C "$ROOT_DIR" diff --check || return 1
 
-    shell_source_list="$(mktemp)"
-    find "$ROOT_DIR/bin" "$ROOT_DIR/controller" "$ROOT_DIR/deploy/tests" "$ROOT_DIR/lab" \
-        -type f \( -name '*.sh' -o -name cpctl \) -print |
-        LC_ALL=C sort > "$shell_source_list"
+    shell_source_unsorted_list="$(mktemp)" || return 1
+    shell_source_list="$(mktemp)" || {
+        rm -f "$shell_source_unsorted_list" || true
+        return 1
+    }
+    if ! find "$ROOT_DIR/bin" "$ROOT_DIR/controller" "$ROOT_DIR/deploy/tests" \
+        "$ROOT_DIR/lab" -type f \( -name '*.sh' -o -name cpctl \) -print \
+        > "$shell_source_unsorted_list" ||
+        ! LC_ALL=C sort "$shell_source_unsorted_list" > "$shell_source_list"; then
+        rm -f "$shell_source_unsorted_list" "$shell_source_list" || true
+        return 1
+    fi
     while IFS= read -r shell_file; do
-        sh -n "$shell_file"
+        if ! sh -n "$shell_file"; then
+            rm -f "$shell_source_unsorted_list" "$shell_source_list" || true
+            return 1
+        fi
         if ! shellcheck --severity=warning "$shell_file"; then
-            rm -f "$shell_source_list"
+            rm -f "$shell_source_unsorted_list" "$shell_source_list" || true
             return 1
         fi
     done < "$shell_source_list"
-    rm -f "$shell_source_list"
+    rm -f "$shell_source_unsorted_list" "$shell_source_list" || return 1
 
-    ansible_python="$(sed -n '1s/^#!//p' "$(command -v ansible-playbook)")"
+    ansible_playbook_path="$(command -v ansible-playbook)" || return 1
+    ansible_python="$(sed -n '1s/^#!//p' "$ansible_playbook_path")" || return 1
     [ -x "$ansible_python" ] || {
         printf 'Unable to resolve the pinned Ansible Python interpreter.\n' >&2
         return 1
     }
-    "$ansible_python" - "$DEPLOY_DIR" <<'PY'
+    "$ansible_python" - "$DEPLOY_DIR" <<'PY' || return 1
 import pathlib
 import sys
 
@@ -910,21 +956,25 @@ for yaml_path in sorted(deploy_root.rglob("*.yml")):
         list(yaml.safe_load_all(yaml_stream))
 PY
 
-    syntax_checks
+    syntax_checks || return 1
+
+    PYTHONDONTWRITEBYTECODE=1 "$CONTROLLER_TEST_VENV/bin/python" -m unittest discover \
+        -s "$DEPLOY_DIR/tests" -p 'test_*.py' || return 1
 
     (
-        cd "$ROOT_DIR/controller"
-        "$CONTROLLER_TEST_VENV/bin/python" -m pip check
-        "$CONTROLLER_TEST_VENV/bin/python" -m ruff check . "$DEPLOY_DIR/tests"
-        "$CONTROLLER_TEST_VENV/bin/python" manage.py check --settings=cp1.settings_test
+        cd "$ROOT_DIR/controller" || exit 1
+        "$CONTROLLER_TEST_VENV/bin/python" -m pip check || exit 1
+        "$CONTROLLER_TEST_VENV/bin/python" -m ruff check . "$DEPLOY_DIR/tests" || exit 1
+        "$CONTROLLER_TEST_VENV/bin/python" manage.py check \
+            --settings=cp1.settings_test || exit 1
         "$CONTROLLER_TEST_VENV/bin/python" manage.py makemigrations \
-            --check --dry-run --settings=cp1.settings_test
+            --check --dry-run --settings=cp1.settings_test || exit 1
         "$CONTROLLER_TEST_VENV/bin/python" manage.py test \
-            --settings=cp1.settings_test --verbosity=1
-    )
+            --settings=cp1.settings_test --verbosity=1 || exit 1
+    ) || return 1
 
     if command -v osacompile >/dev/null 2>&1; then
-        applescript_output="$(mktemp -d)"
+        applescript_output="$(mktemp -d)" || return 1
         applescript_status=0
         for applescript_file in "$ROOT_DIR"/lab/utm/*.applescript; do
             if ! osacompile -o "$applescript_output/$(basename "$applescript_file").scpt" \
@@ -933,10 +983,11 @@ PY
                 break
             fi
         done
-        find "$applescript_output" -type f -delete
-        rmdir "$applescript_output"
+        find "$applescript_output" -type f -delete || applescript_status=1
+        rmdir "$applescript_output" || applescript_status=1
         [ "$applescript_status" -eq 0 ] || return 1
     fi
+    return 0
 }
 
 begin_evidence() {
@@ -1115,15 +1166,38 @@ is_current_evidence_child() {
     esac
 }
 
+release_vulnerability_cache_lock() {
+    if [ "${vulnerability_cache_lock_owned:-false}" != true ]; then
+        return 0
+    fi
+    [ -n "${vulnerability_cache_lock:-}" ] &&
+        [ "$vulnerability_cache_lock" = "$STATE_DIR/trivy-cache.lock" ] &&
+        [ -f "$vulnerability_cache_lock" ] &&
+        [ ! -L "$vulnerability_cache_lock" ] || {
+        printf 'Trivy cache lock path became unsafe.\n' >&2
+        return 1
+    }
+    vulnerability_lock_pid="$(sed -n '1p' "$vulnerability_cache_lock")"
+    [ "$vulnerability_lock_pid" = "$$" ] || {
+        printf 'Trivy cache lock ownership changed unexpectedly.\n' >&2
+        return 1
+    }
+    rm -f "$vulnerability_cache_lock" || return 1
+    vulnerability_cache_lock_owned=false
+}
+
 cleanup_vulnerability_inputs() {
+    vulnerability_cleanup_status=0
     if [ -n "${vulnerability_archive:-}" ] && [ -f "$vulnerability_archive" ] &&
         is_current_evidence_child "$vulnerability_archive" controller-image.docker.tar; then
-        rm -f "$vulnerability_archive"
+        rm -f "$vulnerability_archive" || vulnerability_cleanup_status=1
     fi
     if [ -n "${vulnerability_source_archive:-}" ] &&
         [ -f "$vulnerability_source_archive" ]; then
         case "$vulnerability_source_archive" in
-            "$STATE_DIR"/vulnerability-source.*) rm -f "$vulnerability_source_archive" ;;
+            "$STATE_DIR"/vulnerability-source.*)
+                rm -f "$vulnerability_source_archive" || vulnerability_cleanup_status=1
+                ;;
         esac
     fi
     if [ -n "${vulnerability_source_directory:-}" ] &&
@@ -1131,19 +1205,22 @@ cleanup_vulnerability_inputs() {
         [ ! -L "$vulnerability_source_directory" ]; then
         case "$vulnerability_source_directory" in
             "$STATE_DIR"/vulnerability-source-dir.*)
-                find "$vulnerability_source_directory" -depth -delete || true
+                find "$vulnerability_source_directory" -depth -delete || \
+                    vulnerability_cleanup_status=1
                 ;;
         esac
     fi
     if [ -n "${vulnerability_rootfs:-}" ] && [ -d "$vulnerability_rootfs" ] &&
         [ ! -L "$vulnerability_rootfs" ] &&
         is_current_evidence_child "$vulnerability_rootfs" guest-rootfs; then
-        find "$vulnerability_rootfs" -depth -delete || true
+        find "$vulnerability_rootfs" -depth -delete || vulnerability_cleanup_status=1
     fi
     vulnerability_archive=""
     vulnerability_source_archive=""
     vulnerability_source_directory=""
     vulnerability_rootfs=""
+    release_vulnerability_cache_lock || vulnerability_cleanup_status=1
+    return "$vulnerability_cleanup_status"
 }
 
 validate_trivy_cache_tree() {
@@ -1151,18 +1228,26 @@ validate_trivy_cache_tree() {
         printf 'Trivy cache must be a real directory.\n' >&2
         return 1
     }
-    trivy_cache_metadata="$(stat -f '%u:%Lp' "$vulnerability_cache")"
+    trivy_cache_metadata="$(stat -f '%u:%Lp' "$vulnerability_cache")" || return 1
     [ "$trivy_cache_metadata" = "$(id -u):700" ] || {
         printf 'Trivy cache has unsafe ownership or mode.\n' >&2
         return 1
     }
-    unsafe_cache_entries="$(find "$vulnerability_cache" -mindepth 1 \
-        ! -type d ! -type f -print)"
+    if ! unsafe_cache_entries="$(find "$vulnerability_cache" -mindepth 1 \
+        ! -type d ! -type f -print)"; then
+        printf 'Trivy cache entry validation failed.\n' >&2
+        return 1
+    fi
     [ -z "$unsafe_cache_entries" ] || {
         printf 'Trivy cache contains an unsupported filesystem entry.\n' >&2
         return 1
     }
-    linked_cache_entries="$(find "$vulnerability_cache" -type f -links +1 -print)"
+    if ! linked_cache_entries="$(
+        find "$vulnerability_cache" -type f -links +1 -print
+    )"; then
+        printf 'Trivy cache link validation failed.\n' >&2
+        return 1
+    fi
     [ -z "$linked_cache_entries" ] || {
         printf 'Trivy cache contains a multiply-linked file.\n' >&2
         return 1
@@ -1170,19 +1255,36 @@ validate_trivy_cache_tree() {
 }
 
 vulnerability_gate() {
-    require_command trivy
-    require_command git
-    require_command tar
-    vulnerability_trivy_binary="$(command -v trivy)"
-    pinned_trivy_version="$(tooling_version trivy)"
-    vulnerability_db_repository="$(tooling_version trivy-db-repository)"
+    require_command trivy || return 1
+    require_command git || return 1
+    require_command tar || return 1
+    require_command shasum || return 1
+    require_command shlock || return 1
+    vulnerability_trivy_binary="$(command -v trivy)" || return 1
+    if ! vulnerability_trivy_sha256_before="$(hash_file "$vulnerability_trivy_binary")"; then
+        printf 'Unable to hash the pinned Trivy binary.\n' >&2
+        return 1
+    fi
+    require_sha256_value 'Trivy binary' "$vulnerability_trivy_sha256_before" || return 1
+    expected_trivy_sha256="$(tooling_version trivy-sha256-darwin-arm64)" || return 1
+    require_sha256_value 'Pinned Trivy binary' "$expected_trivy_sha256" || return 1
+    [ "$(uname -s):$(uname -m)" = 'Darwin:arm64' ] || {
+        printf 'This CP1 qualification pins the Darwin ARM64 Trivy binary.\n' >&2
+        return 1
+    }
+    [ "$vulnerability_trivy_sha256_before" = "$expected_trivy_sha256" ] || {
+        printf 'Trivy binary does not match the committed SHA-256.\n' >&2
+        return 1
+    }
+    pinned_trivy_version="$(tooling_version trivy)" || return 1
+    vulnerability_db_repository="$(tooling_version trivy-db-repository)" || return 1
     [ "$vulnerability_db_repository" = 'public.ecr.aws/aquasecurity/trivy-db:2' ] || {
         printf 'Unexpected Trivy DB repository in deploy/tooling.lock.\n' >&2
         return 1
     }
     trivy_version_output="$(env -i PATH="$PATH" "$vulnerability_trivy_binary" \
-        --config /dev/null --version)"
-    trivy_first_line="$(printf '%s\n' "$trivy_version_output" | sed -n '1p')"
+        --config /dev/null --version)" || return 1
+    trivy_first_line="$(printf '%s\n' "$trivy_version_output" | sed -n '1p')" || return 1
     [ "$trivy_first_line" = "Version: $pinned_trivy_version" ] || {
         printf 'Trivy %s is required by deploy/tooling.lock.\n' \
             "$pinned_trivy_version" >&2
@@ -1194,8 +1296,8 @@ vulnerability_gate() {
         printf 'CP1 state directory must not be a symbolic link.\n' >&2
         return 1
     }
-    mkdir -p "$STATE_DIR"
-    chmod 0700 "$STATE_DIR"
+    mkdir -p "$STATE_DIR" || return 1
+    chmod 0700 "$STATE_DIR" || return 1
     vulnerability_archive="$evidence_dir/controller-image.docker.tar"
     vulnerability_rootfs="$evidence_dir/guest-rootfs"
     vulnerability_cache="$STATE_DIR/trivy-cache"
@@ -1204,12 +1306,35 @@ vulnerability_gate() {
         printf 'Trivy cache must be a real directory.\n' >&2
         return 1
     fi
-    mkdir -p "$vulnerability_cache"
-    chmod 0700 "$vulnerability_cache"
-    validate_trivy_cache_tree
-    vulnerability_source_archive="$(mktemp "$STATE_DIR/vulnerability-source.XXXXXX")"
-    vulnerability_source_directory="$(mktemp -d "$STATE_DIR/vulnerability-source-dir.XXXXXX")"
+    mkdir -p "$vulnerability_cache" || return 1
+    chmod 0700 "$vulnerability_cache" || return 1
+    vulnerability_cache_lock="$STATE_DIR/trivy-cache.lock"
+    [ ! -L "$vulnerability_cache_lock" ] || {
+        printf 'Trivy cache lock must not be a symbolic link.\n' >&2
+        return 1
+    }
+    if ! shlock -f "$vulnerability_cache_lock" -p "$$"; then
+        printf 'Another CP1 vulnerability scan owns the Trivy cache.\n' >&2
+        return 1
+    fi
+    vulnerability_cache_lock_owned=true
+    validate_trivy_cache_tree || {
+        release_vulnerability_cache_lock || true
+        return 1
+    }
     vulnerability_status=0
+    if ! vulnerability_source_archive="$(
+        mktemp "$STATE_DIR/vulnerability-source.XXXXXX"
+    )"; then
+        release_vulnerability_cache_lock || true
+        return 1
+    fi
+    if ! vulnerability_source_directory="$(
+        mktemp -d "$STATE_DIR/vulnerability-source-dir.XXXXXX"
+    )"; then
+        cleanup_vulnerability_inputs || true
+        return 1
+    fi
 
     run_trivy_clean() {
         env -i PATH="$PATH" "$vulnerability_trivy_binary" \
@@ -1222,8 +1347,9 @@ vulnerability_gate() {
         vulnerability_status=1
     fi
     vulnerability_db_metadata="$vulnerability_cache/db/metadata.json"
+    vulnerability_db_file="$vulnerability_cache/db/trivy.db"
     if [ -f "$vulnerability_db_metadata" ] && [ ! -L "$vulnerability_db_metadata" ]; then
-        controller_python="$(select_controller_python)"
+        controller_python="$(select_controller_python)" || vulnerability_status=1
         if ! "$controller_python" - "$vulnerability_db_metadata" <<'PY'
 import datetime as dt
 import json
@@ -1251,9 +1377,24 @@ PY
         then
             vulnerability_status=1
         fi
-        cp "$vulnerability_db_metadata" "$evidence_dir/TRIVY-DB-METADATA.json"
+        cp "$vulnerability_db_metadata" "$evidence_dir/TRIVY-DB-METADATA.json" || \
+            vulnerability_status=1
     else
         printf 'Trivy vulnerability DB metadata is unavailable.\n' >&2
+        vulnerability_status=1
+    fi
+    if [ -f "$vulnerability_db_file" ] && [ ! -L "$vulnerability_db_file" ]; then
+        if vulnerability_db_sha256_before="$(hash_file "$vulnerability_db_file")"; then
+            require_sha256_value 'Trivy vulnerability database' \
+                "$vulnerability_db_sha256_before" || vulnerability_status=1
+        else
+            printf 'Unable to hash the Trivy vulnerability database.\n' >&2
+            vulnerability_db_sha256_before=""
+            vulnerability_status=1
+        fi
+    else
+        printf 'Trivy vulnerability database is unavailable or unsafe.\n' >&2
+        vulnerability_db_sha256_before=""
         vulnerability_status=1
     fi
 
@@ -1273,8 +1414,11 @@ PY
         [ ! -L "$vulnerability_committed_requirements" ] &&
         [ ! -e "$vulnerability_scanner_requirements" ] &&
         [ ! -L "$vulnerability_scanner_requirements" ]; then
-        cp "$vulnerability_committed_requirements" "$vulnerability_scanner_requirements"
-        chmod 0600 "$vulnerability_scanner_requirements"
+        if ! cp "$vulnerability_committed_requirements" \
+            "$vulnerability_scanner_requirements" ||
+            ! chmod 0600 "$vulnerability_scanner_requirements"; then
+            vulnerability_status=1
+        fi
     else
         printf 'Committed Python lock could not be materialized for Trivy coverage.\n' >&2
         vulnerability_status=1
@@ -1289,23 +1433,40 @@ PY
         --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
         "$DEPLOY_DIR/playbooks/export-vulnerability-rootfs.yml" || vulnerability_status=1
 
-    vulnerability_coverage_python="$(select_controller_python)"
+    if ! vulnerability_coverage_python="$(select_controller_python)"; then
+        vulnerability_coverage_python=""
+        vulnerability_status=1
+    fi
 
     if [ -d "$vulnerability_source_directory/controller" ]; then
         run_trivy_clean filesystem \
             --db-repository "$vulnerability_db_repository" \
+            --skip-db-update \
             --timeout 15m \
             --scanners vuln \
             --severity HIGH,CRITICAL \
             --ignore-unfixed=false \
             --ignorefile /dev/null \
-            --exit-code 1 \
             --no-progress \
             --format json \
             --output "$evidence_dir/source-vulnerabilities.json" \
             "$vulnerability_source_directory/controller" || vulnerability_status=1
         run_trivy_clean filesystem \
             --db-repository "$vulnerability_db_repository" \
+            --skip-db-update \
+            --timeout 15m \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile /dev/null \
+            --exit-code 1 \
+            --no-progress \
+            --format json \
+            --output "$evidence_dir/source-fixable-vulnerabilities.json" \
+            "$vulnerability_source_directory/controller" || vulnerability_status=1
+        run_trivy_clean filesystem \
+            --db-repository "$vulnerability_db_repository" \
+            --skip-db-update \
             --timeout 15m \
             --scanners vuln \
             --ignore-unfixed=false \
@@ -1321,6 +1482,7 @@ PY
     if [ -f "$vulnerability_archive" ] && [ ! -L "$vulnerability_archive" ]; then
         run_trivy_clean image \
             --db-repository "$vulnerability_db_repository" \
+            --skip-db-update \
             --timeout 15m \
             --input "$vulnerability_archive" \
             --scanners vuln \
@@ -1328,12 +1490,26 @@ PY
             --ignore-unfixed=false \
             --exit-on-eol 1 \
             --ignorefile /dev/null \
-            --exit-code 1 \
             --no-progress \
             --format json \
             --output "$evidence_dir/image-vulnerabilities.json" || vulnerability_status=1
         run_trivy_clean image \
             --db-repository "$vulnerability_db_repository" \
+            --skip-db-update \
+            --timeout 15m \
+            --input "$vulnerability_archive" \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-on-eol 1 \
+            --ignorefile /dev/null \
+            --exit-code 1 \
+            --no-progress \
+            --format json \
+            --output "$evidence_dir/image-fixable-vulnerabilities.json" || vulnerability_status=1
+        run_trivy_clean image \
+            --db-repository "$vulnerability_db_repository" \
+            --skip-db-update \
             --timeout 15m \
             --input "$vulnerability_archive" \
             --scanners vuln \
@@ -1349,19 +1525,34 @@ PY
     if [ -d "$vulnerability_rootfs" ] && [ ! -L "$vulnerability_rootfs" ]; then
         run_trivy_clean rootfs \
             --db-repository "$vulnerability_db_repository" \
+            --skip-db-update \
             --timeout 15m \
             --scanners vuln \
             --severity HIGH,CRITICAL \
             --ignore-unfixed=false \
             --exit-on-eol 1 \
             --ignorefile /dev/null \
-            --exit-code 1 \
             --no-progress \
             --format json \
             --output "$evidence_dir/guest-os-vulnerabilities.json" \
             "$vulnerability_rootfs" || vulnerability_status=1
         run_trivy_clean rootfs \
             --db-repository "$vulnerability_db_repository" \
+            --skip-db-update \
+            --timeout 15m \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-on-eol 1 \
+            --ignorefile /dev/null \
+            --exit-code 1 \
+            --no-progress \
+            --format json \
+            --output "$evidence_dir/guest-os-fixable-vulnerabilities.json" \
+            "$vulnerability_rootfs" || vulnerability_status=1
+        run_trivy_clean rootfs \
+            --db-repository "$vulnerability_db_repository" \
+            --skip-db-update \
             --timeout 15m \
             --scanners vuln \
             --ignore-unfixed=false \
@@ -1374,178 +1565,124 @@ PY
         vulnerability_status=1
     fi
 
-    if ! "$vulnerability_coverage_python" - \
-        "$evidence_dir/source-vulnerabilities.json" \
-        "$evidence_dir/image-vulnerabilities.json" \
-        "$evidence_dir/guest-os-vulnerabilities.json" \
-        "$vulnerability_scanner_requirements" \
-        "$evidence_dir/VULNERABILITY-COVERAGE" <<'PY'
-import json
-import pathlib
-import re
-import sys
-
-source_report_path = pathlib.Path(sys.argv[1])
-image_report_path = pathlib.Path(sys.argv[2])
-guest_report_path = pathlib.Path(sys.argv[3])
-requirements_path = pathlib.Path(sys.argv[4])
-coverage_path = pathlib.Path(sys.argv[5])
-
-
-def normalized_name(value):
-    return re.sub(r"[-_.]+", "-", value).lower()
-
-
-expected_packages = set()
-for line in requirements_path.read_text(encoding="utf-8").splitlines():
-    match = re.match(
-        r"^([A-Za-z0-9_.-]+)(?:\[[^]]+\])?==([A-Za-z0-9_.+!-]+)\s*\\?$",
-        line,
-    )
-    if match:
-        expected_packages.add((normalized_name(match.group(1)), match.group(2)))
-if not expected_packages:
-    raise SystemExit("no pinned Python packages were parsed for vulnerability coverage")
-
-
-def report_results(path):
-    if not path.is_file() or path.is_symlink():
-        raise SystemExit(f"Trivy report is missing or unsafe: {path.name}")
-    try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"Trivy report is unreadable: {path.name}: {exc}") from exc
-    if report.get("SchemaVersion") != 2:
-        raise SystemExit(f"unexpected Trivy schema in {path.name}")
-    results = report.get("Results")
-    if not isinstance(results, list):
-        raise SystemExit(f"Trivy results are missing in {path.name}")
-    for result in results:
-        if not isinstance(result, dict):
-            raise SystemExit(f"Trivy result is malformed in {path.name}")
-        vulnerabilities = result.get("Vulnerabilities")
-        if vulnerabilities not in (None, []):
-            raise SystemExit(f"High/Critical vulnerabilities were reported in {path.name}")
-    return report, results
-
-
-def require_current_debian(report, label):
-    metadata = report.get("Metadata")
-    if not isinstance(metadata, dict):
-        raise SystemExit(f"{label} scan omitted metadata")
-    operating_system = metadata.get("OS")
-    if not isinstance(operating_system, dict):
-        raise SystemExit(f"{label} scan omitted operating-system identity")
-    if operating_system.get("Family") != "debian":
-        raise SystemExit(f"{label} scan did not detect Debian")
-    version = operating_system.get("Name")
-    if not isinstance(version, str) or not re.match(r"^13(?:\.|$)", version):
-        raise SystemExit(f"{label} scan did not detect Debian 13")
-    end_of_support = operating_system.get("EOSL", False)
-    if not isinstance(end_of_support, bool) or end_of_support:
-        raise SystemExit(f"{label} scan did not prove a supported Debian release")
-
-
-def package_set(result):
-    packages = result.get("Packages")
-    if not isinstance(packages, list):
-        raise SystemExit("Trivy result omitted package coverage")
-    return {
-        (normalized_name(package["Name"]), package["Version"])
-        for package in packages
-        if isinstance(package, dict)
-        and isinstance(package.get("Name"), str)
-        and isinstance(package.get("Version"), str)
-    }
-
-
-_, source_results = report_results(source_report_path)
-source_pip = [
-    result
-    for result in source_results
-    if result.get("Class") == "lang-pkgs"
-    and result.get("Type") == "pip"
-    and pathlib.PurePosixPath(result.get("Target", "")).name == "requirements.txt"
-]
-if len(source_pip) != 1 or package_set(source_pip[0]) != expected_packages:
-    raise SystemExit("source vulnerability scan did not cover the exact Python lock")
-
-image_report, image_results = report_results(image_report_path)
-require_current_debian(image_report, "controller image")
-image_os_packages = set()
-image_python_packages = set()
-for result in image_results:
-    if result.get("Class") == "os-pkgs" and result.get("Type") == "debian":
-        image_os_packages.update(package_set(result))
-    if result.get("Class") == "lang-pkgs" and result.get("Type") in {"pip", "python-pkg"}:
-        image_python_packages.update(package_set(result))
-if not image_os_packages:
-    raise SystemExit("controller image scan did not cover Debian packages")
-if not expected_packages.issubset(image_python_packages):
-    raise SystemExit("controller image scan did not cover the exact locked Python packages")
-
-guest_report, guest_results = report_results(guest_report_path)
-require_current_debian(guest_report, "guest rootfs")
-guest_os_packages = set()
-for result in guest_results:
-    if result.get("Class") == "os-pkgs" and result.get("Type") == "debian":
-        guest_os_packages.update(package_set(result))
-if not guest_os_packages:
-    raise SystemExit("guest rootfs scan did not cover the Debian package database")
-
-coverage_path.write_text(
-    "coverage=passed\n"
-    f"source_python_packages={len(expected_packages)}\n"
-    f"image_python_packages={len(image_python_packages)}\n"
-    f"image_os_packages={len(image_os_packages)}\n"
-    f"guest_os_packages={len(guest_os_packages)}\n",
-    encoding="utf-8",
-)
-PY
-    then
+    if vulnerability_trivy_sha256_after="$(hash_file "$vulnerability_trivy_binary")"; then
+        require_sha256_value 'Trivy binary after scanning' \
+            "$vulnerability_trivy_sha256_after" || vulnerability_status=1
+        [ "$vulnerability_trivy_sha256_before" = "$vulnerability_trivy_sha256_after" ] || {
+            printf 'Trivy binary changed during vulnerability scanning.\n' >&2
+            vulnerability_status=1
+        }
+    else
+        printf 'Unable to re-hash the Trivy binary after scanning.\n' >&2
+        vulnerability_trivy_sha256_after=""
+        vulnerability_status=1
+    fi
+    if vulnerability_db_sha256_after="$(hash_file "$vulnerability_db_file")"; then
+        require_sha256_value 'Trivy vulnerability database after scanning' \
+            "$vulnerability_db_sha256_after" || vulnerability_status=1
+        [ -n "$vulnerability_db_sha256_before" ] &&
+            [ "$vulnerability_db_sha256_before" = "$vulnerability_db_sha256_after" ] || {
+            printf 'Trivy vulnerability database changed during scanning.\n' >&2
+            vulnerability_status=1
+        }
+    else
+        printf 'Unable to re-hash the Trivy vulnerability database after scanning.\n' >&2
+        vulnerability_db_sha256_after=""
         vulnerability_status=1
     fi
 
-    {
-        printf 'source_archive_sha256=%s\n' \
-            "$(hash_file "$vulnerability_source_archive" 2>/dev/null || printf unavailable)"
-        if [ -f "$vulnerability_archive" ]; then
-            printf 'controller_image_archive_sha256=%s\n' \
-                "$(hash_file "$vulnerability_archive")"
+    if ! "$vulnerability_coverage_python" \
+        "$DEPLOY_DIR/tests/validate_vulnerability_reports.py" \
+        "$evidence_dir/source-vulnerabilities.json" \
+        "$evidence_dir/source-fixable-vulnerabilities.json" \
+        "$evidence_dir/image-vulnerabilities.json" \
+        "$evidence_dir/image-fixable-vulnerabilities.json" \
+        "$evidence_dir/guest-os-vulnerabilities.json" \
+        "$evidence_dir/guest-os-fixable-vulnerabilities.json" \
+        "$vulnerability_scanner_requirements" \
+        "$evidence_dir/CONTROLLER-IMAGE-ID" \
+        "$evidence_dir/CONTROLLER-IMAGE-DPKG-STATUS" \
+        "$vulnerability_archive" \
+        "$vulnerability_rootfs/var/lib/dpkg/status" \
+        "$vulnerability_rootfs/etc/os-release" \
+        "$vulnerability_rootfs/etc/debian_version" \
+        "$vulnerability_rootfs" \
+        "$evidence_dir/VULNERABILITY-COVERAGE"; then
+        vulnerability_status=1
+    fi
+
+    vulnerability_inputs_file="$evidence_dir/VULNERABILITY-INPUTS"
+    : > "$vulnerability_inputs_file" || vulnerability_status=1
+    for vulnerability_input_record in \
+        "source_archive_sha256|$vulnerability_source_archive" \
+        "controller_image_archive_sha256|$vulnerability_archive" \
+        "controller_image_id_sha256|$evidence_dir/CONTROLLER-IMAGE-ID" \
+        "controller_image_dpkg_status_sha256|$evidence_dir/CONTROLLER-IMAGE-DPKG-STATUS" \
+        "guest_os_release_sha256|$vulnerability_rootfs/etc/os-release" \
+        "guest_debian_version_sha256|$vulnerability_rootfs/etc/debian_version" \
+        "guest_dpkg_status_sha256|$vulnerability_rootfs/var/lib/dpkg/status" \
+        "source_scanner_requirements_sha256|$vulnerability_scanner_requirements"; do
+        vulnerability_input_name="${vulnerability_input_record%%|*}"
+        vulnerability_input_path="${vulnerability_input_record#*|}"
+        if [ -f "$vulnerability_input_path" ] && [ ! -L "$vulnerability_input_path" ] &&
+            vulnerability_input_hash="$(hash_file "$vulnerability_input_path")" &&
+            require_sha256_value "$vulnerability_input_name" "$vulnerability_input_hash"; then
+            printf '%s=%s\n' "$vulnerability_input_name" "$vulnerability_input_hash" \
+                >> "$vulnerability_inputs_file" || vulnerability_status=1
         else
-            printf 'controller_image_archive_sha256=unavailable\n'
+            printf '%s=unavailable\n' "$vulnerability_input_name" \
+                >> "$vulnerability_inputs_file" || true
+            vulnerability_status=1
         fi
-        if [ -f "$vulnerability_rootfs/etc/os-release" ]; then
-            printf 'guest_os_release_sha256=%s\n' \
-                "$(hash_file "$vulnerability_rootfs/etc/os-release")"
-        fi
-        if [ -f "$vulnerability_rootfs/etc/debian_version" ]; then
-            printf 'guest_debian_version_sha256=%s\n' \
-                "$(hash_file "$vulnerability_rootfs/etc/debian_version")"
-        fi
-        if [ -f "$vulnerability_rootfs/var/lib/dpkg/status" ]; then
-            printf 'guest_dpkg_status_sha256=%s\n' \
-                "$(hash_file "$vulnerability_rootfs/var/lib/dpkg/status")"
-        fi
-        if [ -f "$vulnerability_scanner_requirements" ]; then
-            printf 'source_scanner_requirements_sha256=%s\n' \
-                "$(hash_file "$vulnerability_scanner_requirements")"
-        fi
-    } > "$evidence_dir/VULNERABILITY-INPUTS"
-    printf 'database_repository=%s\n' "$vulnerability_db_repository" \
-        >> "$evidence_dir/VULNERABILITY-INPUTS"
-    run_trivy_clean --version > "$evidence_dir/TRIVY-VERSION"
+    done
+    {
+        printf 'database_repository=%s\n' "$vulnerability_db_repository"
+        printf 'trivy_binary_sha256=%s\n' "$vulnerability_trivy_sha256_before"
+        printf 'trivy_database_sha256=%s\n' "$vulnerability_db_sha256_before"
+    } >> "$vulnerability_inputs_file" || vulnerability_status=1
+    run_trivy_clean --version > "$evidence_dir/TRIVY-VERSION" || vulnerability_status=1
 
     validate_trivy_cache_tree || vulnerability_status=1
-    database_file_list="$(mktemp)"
-    find "$vulnerability_cache" -type f -print | LC_ALL=C sort > "$database_file_list"
-    while IFS= read -r database_file; do
-        database_relative="${database_file#"$vulnerability_cache"/}"
-        printf '%s  %s\n' "$(hash_file "$database_file")" "$database_relative"
-    done < "$database_file_list" > "$evidence_dir/TRIVY-CACHE-MANIFEST.sha256"
-    rm -f "$database_file_list"
+    database_unsorted_file_list=""
+    database_file_list=""
+    if database_unsorted_file_list="$(
+        mktemp "$STATE_DIR/trivy-cache-files-unsorted.XXXXXX"
+    )" && database_file_list="$(
+        mktemp "$STATE_DIR/trivy-cache-files-sorted.XXXXXX"
+    )"; then
+        if find "$vulnerability_cache" -type f -print \
+            > "$database_unsorted_file_list" &&
+            LC_ALL=C sort "$database_unsorted_file_list" \
+                > "$database_file_list"; then
+            while IFS= read -r database_file; do
+                database_relative="${database_file#"$vulnerability_cache"/}"
+                if database_file_hash="$(hash_file "$database_file")" &&
+                    require_sha256_value "Trivy cache file $database_relative" \
+                        "$database_file_hash"; then
+                    printf '%s  %s\n' "$database_file_hash" "$database_relative" || \
+                        vulnerability_status=1
+                else
+                    vulnerability_status=1
+                fi
+            done < "$database_file_list" \
+                > "$evidence_dir/TRIVY-CACHE-MANIFEST.sha256" || vulnerability_status=1
+        else
+            vulnerability_status=1
+        fi
+        rm -f "$database_unsorted_file_list" || vulnerability_status=1
+        rm -f "$database_file_list" || vulnerability_status=1
+    else
+        vulnerability_status=1
+        if [ -n "$database_unsorted_file_list" ]; then
+            rm -f "$database_unsorted_file_list" || vulnerability_status=1
+        fi
+        if [ -n "$database_file_list" ]; then
+            rm -f "$database_file_list" || vulnerability_status=1
+        fi
+    fi
 
-    cleanup_vulnerability_inputs
+    release_vulnerability_cache_lock || vulnerability_status=1
+    cleanup_vulnerability_inputs || vulnerability_status=1
     return "$vulnerability_status"
 }
 
@@ -1566,6 +1703,33 @@ run_logged() {
         sed -n '1,$p' "$log_file" >&2
         return "$command_status"
     fi
+}
+
+load_vulnerability_coverage_summary() {
+    vulnerability_coverage_file="$evidence_dir/VULNERABILITY-COVERAGE"
+    [ -f "$vulnerability_coverage_file" ] && [ ! -L "$vulnerability_coverage_file" ] || {
+        printf 'Validated vulnerability coverage evidence is unavailable.\n' >&2
+        return 1
+    }
+    vulnerability_without_fixed_high="$(awk -F= \
+        '$1 == "total_without_fixed_version_high" {
+            if (found++) exit 1
+            value = $2
+        }
+        END { if (found != 1) exit 1; print value }' \
+        "$vulnerability_coverage_file")" || return 1
+    vulnerability_without_fixed_critical="$(awk -F= \
+        '$1 == "total_without_fixed_version_critical" {
+            if (found++) exit 1
+            value = $2
+        }
+        END { if (found != 1) exit 1; print value }' \
+        "$vulnerability_coverage_file")" || return 1
+    printf '%s\n' "$vulnerability_without_fixed_high" | grep -Eq '^[0-9]+$' &&
+        printf '%s\n' "$vulnerability_without_fixed_critical" | grep -Eq '^[0-9]+$' || {
+        printf 'Validated vulnerability residual counts are malformed.\n' >&2
+        return 1
+    }
 }
 
 state_fingerprint_from_log() {
@@ -1674,7 +1838,7 @@ seal_failed_qualification() {
             rollback_qualification_recovery_outcome=failed
         fi
     fi
-    cleanup_vulnerability_inputs
+    cleanup_vulnerability_inputs || true
     if [ "${evidence_sealed:-false}" != true ] && [ -n "${evidence_dir:-}" ] &&
         [ -d "$evidence_dir" ]; then
         {
@@ -1791,7 +1955,7 @@ case "$command_name" in
         arm_qualification_traps
         begin_evidence
         bridge_install_log="$evidence_dir/bridge-install.log"
-        run_logged "$evidence_dir/static-preflight.log" static_checks
+        run_logged "$evidence_dir/static-preflight.log" "$ROOT_DIR/bin/cpctl" preflight
         bridge_transaction_status=0
         run_logged "$bridge_install_log" playbook "$DEPLOY_DIR/playbooks/install.yml" || \
             bridge_transaction_status=$?
@@ -1824,7 +1988,7 @@ case "$command_name" in
         umask 077
         arm_qualification_traps
         begin_evidence
-        run_logged "$evidence_dir/static-preflight.log" static_checks
+        run_logged "$evidence_dir/static-preflight.log" "$ROOT_DIR/bin/cpctl" preflight
         run_logged "$evidence_dir/final-before-cycle.log" protected_playbook \
             --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
             "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
@@ -2017,15 +2181,23 @@ case "$command_name" in
             --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
             "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
         verify_source_snapshot
+        load_vulnerability_coverage_summary
         {
             printf 'result=passed\n'
             printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            printf 'qualification=high-critical-vulnerability-scan\n'
+            printf 'qualification=trivy-fixable-high-critical-package-scan\n'
+            printf 'scope=dependency-and-os-package-findings\n'
+            printf 'trivy_fixable_high_critical=none\n'
+            printf 'trivy_without_fixed_version_high=%s\n' \
+                "$vulnerability_without_fixed_high"
+            printf 'trivy_without_fixed_version_critical=%s\n' \
+                "$vulnerability_without_fixed_critical"
             printf 'scanner=trivy-%s\n' "$(tooling_version trivy)"
         } >"$evidence_dir/RESULT"
         finalize_evidence
         disarm_qualification_traps
-        printf 'CP1 vulnerability qualification passed. Evidence: %s\n' "$evidence_dir"
+        printf '%s\n' \
+            "CP1 Trivy package gate passed with zero fixable High/Critical findings; recorded $vulnerability_without_fixed_high High and $vulnerability_without_fixed_critical Critical findings without a Trivy fixed version. Evidence: $evidence_dir"
         ;;
     verify)
         playbook "$DEPLOY_DIR/playbooks/verify.yml"
@@ -2036,7 +2208,7 @@ case "$command_name" in
         begin_evidence
         first_log="$evidence_dir/install-first.log"
         second_log="$evidence_dir/install-second.log"
-        run_logged "$evidence_dir/static-preflight.log" static_checks
+        run_logged "$evidence_dir/static-preflight.log" "$ROOT_DIR/bin/cpctl" preflight
         run_logged "$first_log" playbook "$DEPLOY_DIR/playbooks/install.yml"
         require_successful_install_recap "$first_log" false
         run_logged "$evidence_dir/state-before-second.log" protected_playbook \
@@ -2075,6 +2247,7 @@ case "$command_name" in
             --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
             "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
         verify_source_snapshot
+        load_vulnerability_coverage_summary
         {
             printf 'result=passed\n'
             printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -2087,14 +2260,18 @@ case "$command_name" in
             printf 'runtime_least_privilege=passed\n'
             printf 'n1_rollback_cycle=pending-separate-required-gate\n'
             printf 'admin_https_login=passed\n'
-            printf 'high_critical_vulnerabilities=none\n'
+            printf 'trivy_package_fixable_high_critical=none\n'
+            printf 'trivy_without_fixed_version_high=%s\n' \
+                "$vulnerability_without_fixed_high"
+            printf 'trivy_without_fixed_version_critical=%s\n' \
+                "$vulnerability_without_fixed_critical"
             printf 'ansible=%s\n' "$(ansible --version | sed -n '1p')"
             printf 'trivy=%s\n' "$(trivy --version | sed -n '1p')"
         } >"$evidence_dir/RESULT"
         finalize_evidence
         disarm_qualification_traps
         printf '%s\n' \
-            "CP1 local qualification suite passed; the separate N-1 rollback gate is still required. Evidence: $evidence_dir"
+            "CP1 local suite passed with zero Trivy-fixable High/Critical package findings; recorded $vulnerability_without_fixed_high High and $vulnerability_without_fixed_critical Critical findings without a Trivy fixed version. The separate N-1 rollback gate remains required. Evidence: $evidence_dir"
         ;;
     -h|--help|help|'')
         usage
