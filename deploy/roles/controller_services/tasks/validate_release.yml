@@ -32,8 +32,7 @@
                     digest = substr($0, 1, 64)
                     separator = substr($0, 65, 2)
                     path = substr($0, 67)
-                    if (length(digest) != 64 || digest !~ /^[0-9a-f]+$/ ||
-                        separator != "  " || path !~ /^[A-Za-z0-9._\/-]+$/) {
+                    if (length(digest) != 64 || digest !~ /^[0-9a-f]+$/ || separator != "  " || path !~ /^[A-Za-z0-9._\/-]+$/) {
                         exit 1
                     }
                     if (path ~ /(^|\/)\.\.($|\/)/ || path ~ /^\//) {
@@ -59,8 +58,7 @@
                         count = split($0, component, "/")
                         directory = ""
                         for (part_index = 1; part_index < count; part_index++) {
-                            directory = (directory == "" ? component[part_index] :
-                                directory "/" component[part_index])
+                            directory = (directory == "" ? component[part_index] : directory "/" component[part_index])
                             print directory
                         }
                     }
