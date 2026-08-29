@@ -132,6 +132,12 @@
       - cp_firewall_ssh_source_ipv4_cidrs == (cp_firewall_ssh_source_ipv4_cidrs | sort)
       - cp_firewall_dhcp_server_ipv4 is defined
       - cp_firewall_dhcp_server_ipv4 == '168.63.129.16'
+      - cp_resolved_expected_dns_server_ipv4 is defined
+      - cp_resolved_expected_dns_server_ipv4 == '168.63.129.16'
+      - cp_resolved_unicast_probe_name is defined
+      - cp_resolved_unicast_probe_name == 'one.one.one.one'
+      - cp_resolved_unicast_probe_ipv4 is defined
+      - cp_resolved_unicast_probe_ipv4 == '1.1.1.1'
       - cp_ingress_guest_ca_path is defined
       - cp_ingress_guest_ca_path == '/etc/ssl/certs/ca-certificates.crt'
       - cp_ingress_guest_connect_address is defined
@@ -163,7 +169,8 @@
       - cp_min_root_disk_gb | int >= 50
     fail_msg: >-
       azure-single requires local PostgreSQL, public trusted HTTPS, explicit
-      HSTS, source-restricted SSH, and the declared AMD64 host capacity.
+      HSTS, source-restricted SSH, preserved Azure unicast DNS, and the
+      declared AMD64 host capacity.
   vars:
     cp_public_fqdn_pattern: '^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
   when: cp_profile == 'azure-single'

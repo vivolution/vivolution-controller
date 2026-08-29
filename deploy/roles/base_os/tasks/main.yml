@@ -50,6 +50,168 @@
       - postgresql-17
       - postgresql-contrib-17
 
+- name: Inspect systemd-resolved state without enabling it
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - systemd-resolved.service
+      - --property=LoadState
+      - --property=ActiveState
+  register: cp_systemd_resolved_state
+  changed_when: false
+  failed_when: false
+
+- name: Remember whether systemd-resolved is already active
+  ansible.builtin.set_fact:
+    cp_systemd_resolved_active: >-
+      {{ cp_systemd_resolved_state.rc == 0 and
+         'LoadState=loaded' in cp_systemd_resolved_state.stdout_lines and
+         'ActiveState=active' in cp_systemd_resolved_state.stdout_lines }}
+
+- name: Require the existing Azure resolver service
+  ansible.builtin.assert:
+    that: cp_systemd_resolved_active | bool
+    fail_msg: azure-single requires its existing systemd-resolved service to remain active.
+  when: cp_profile == 'azure-single'
+
+- name: Create systemd-resolved hardening directory
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Disable link-local multicast name resolution
+  ansible.builtin.template:
+    src: 99-vivolution-hardening.conf.j2
+    dest: /etc/systemd/resolved.conf.d/99-vivolution-hardening.conf
+    owner: root
+    group: root
+    mode: '0644'
+  register: cp_systemd_resolved_hardening
+
+- name: Inspect merged resolver configuration
+  ansible.builtin.command:
+    argv: [systemd-analyze, cat-config, systemd/resolved.conf]
+  register: cp_systemd_resolved_merged_config
+  changed_when: false
+
+- name: Select effective LLMNR resolver assignments
+  ansible.builtin.set_fact:
+    cp_systemd_resolved_llmnr_assignments: >-
+      {{ cp_systemd_resolved_merged_config.stdout |
+         regex_findall('(?m)^\\s*LLMNR\\s*=\\s*([^#;\\s]+)\\s*$') }}
+
+- name: Require the managed policy to be the effective LLMNR assignment
+  ansible.builtin.assert:
+    that:
+      - cp_systemd_resolved_llmnr_assignments | length > 0
+      - >-
+        ((cp_systemd_resolved_llmnr_assignments | last | default('')) | lower) == 'no'
+    fail_msg: A missing or later resolver assignment overrides the managed LLMNR=no policy.
+
+- name: Inspect resolver protocols before reconciliation
+  ansible.builtin.command:
+    argv: [resolvectl, --no-pager, status]
+  register: cp_systemd_resolved_protocols_before
+  changed_when: false
+  when: cp_systemd_resolved_active | bool
+
+- name: Inspect LLMNR listeners before reconciliation
+  ansible.builtin.command:
+    argv: [ss, -H, -lntu, sport, '=', ':5355']
+  register: cp_llmnr_listeners_before
+  changed_when: false
+
+- name: Restart active systemd-resolved when policy or runtime drift requires it
+  ansible.builtin.systemd_service:
+    name: systemd-resolved.service
+    state: restarted
+  when:
+    - cp_systemd_resolved_active | bool
+    - >-
+      cp_systemd_resolved_hardening.changed or
+      '+LLMNR' in (cp_systemd_resolved_protocols_before.stdout | default('')) or
+      (cp_llmnr_listeners_before.stdout | trim | length > 0)
+
+- name: Inspect effective resolver protocols after hardening
+  ansible.builtin.command:
+    argv: [resolvectl, --no-pager, status]
+  register: cp_systemd_resolved_protocols
+  changed_when: false
+  when: cp_systemd_resolved_active | bool
+
+- name: Inspect forbidden LLMNR listeners after hardening
+  ansible.builtin.command:
+    argv: [ss, -H, -lntu, sport, '=', ':5355']
+  register: cp_llmnr_listeners
+  changed_when: false
+
+- name: Resolve the active resolver configuration link
+  ansible.builtin.command:
+    argv: [readlink, --canonicalize, /etc/resolv.conf]
+  register: cp_resolv_conf_target
+  changed_when: false
+
+- name: Require an active service for a systemd-resolved configuration link
+  ansible.builtin.assert:
+    that:
+      - >-
+        (not cp_resolv_conf_target.stdout.startswith('/run/systemd/resolve/')) or
+        (cp_systemd_resolved_active | bool)
+    fail_msg: /etc/resolv.conf points to systemd-resolved while its service is inactive.
+
+- name: Inspect the Azure DNS stub listener
+  ansible.builtin.command:
+    argv: [ss, -H, -lntu, sport, '=', ':53']
+  register: cp_azure_dns_stub_listeners
+  changed_when: false
+  when: cp_profile == 'azure-single'
+
+- name: Exercise deterministic Azure unicast DNS resolution
+  ansible.builtin.command:
+    argv:
+      - resolvectl
+      - --no-pager
+      - query
+      - --cache=no
+      - --type=A
+      - "{{ cp_resolved_unicast_probe_name }}"
+  register: cp_azure_unicast_dns_probe
+  changed_when: false
+  when: cp_profile == 'azure-single'
+
+- name: Require preserved Azure unicast DNS and stub behavior
+  ansible.builtin.assert:
+    that:
+      - cp_resolv_conf_target.stdout == '/run/systemd/resolve/stub-resolv.conf'
+      - cp_resolved_expected_dns_server_ipv4 in cp_systemd_resolved_protocols.stdout
+      - "'127.0.0.53' in cp_azure_dns_stub_listeners.stdout"
+      - "'0.0.0.0:53' not in cp_azure_dns_stub_listeners.stdout"
+      - "'[::]:53' not in cp_azure_dns_stub_listeners.stdout"
+      - cp_resolved_unicast_probe_ipv4 in cp_azure_unicast_dns_probe.stdout
+      - "'Data from: network' in cp_azure_unicast_dns_probe.stdout"
+    fail_msg: Azure unicast DNS or the protected local resolver stub regressed.
+  when: cp_profile == 'azure-single'
+
+- name: Require effective LLMNR disablement
+  ansible.builtin.assert:
+    that:
+      - >-
+        (not cp_systemd_resolved_active | bool) or
+        ('+LLMNR' not in cp_systemd_resolved_protocols.stdout and
+         '-LLMNR' in cp_systemd_resolved_protocols.stdout)
+      - cp_llmnr_listeners.stdout | trim | length == 0
+    fail_msg: LLMNR remains enabled or TCP/UDP port 5355 is still listening.
+
+- name: Report sanitized resolver hardening result
+  ansible.builtin.debug:
+    msg: >-
+      llmnr=disabled
+      unicast_dns={{ 'passed' if cp_profile == 'azure-single' else 'host-managed' }}
+
 - name: Create Vivolution configuration directory
   ansible.builtin.file:
     path: /etc/vivolution

@@ -109,6 +109,163 @@
           - "':2019' not in cp_listeners.stdout"
         fail_msg: The declared listeners are missing or the disabled Caddy admin API is listening.
 
+    - name: Inspect the managed systemd-resolved hardening policy
+      ansible.builtin.stat:
+        path: /etc/systemd/resolved.conf.d/99-vivolution-hardening.conf
+        follow: false
+      register: cp_verify_resolved_hardening_file
+
+    - name: Require a protected regular resolver hardening policy
+      ansible.builtin.assert:
+        that:
+          - cp_verify_resolved_hardening_file.stat.exists | default(false)
+          - cp_verify_resolved_hardening_file.stat.isreg | default(false)
+          - not (cp_verify_resolved_hardening_file.stat.islnk | default(true))
+          - cp_verify_resolved_hardening_file.stat.uid | default(-1) == 0
+          - cp_verify_resolved_hardening_file.stat.gid | default(-1) == 0
+          - cp_verify_resolved_hardening_file.stat.mode | default('') == '0644'
+          - cp_verify_resolved_hardening_file.stat.nlink | default(0) == 1
+        fail_msg: The managed resolver hardening policy is missing or unsafe.
+
+    - name: Read the managed resolver hardening policy
+      ansible.builtin.slurp:
+        src: /etc/systemd/resolved.conf.d/99-vivolution-hardening.conf
+      register: cp_verify_resolved_hardening_content
+
+    - name: Require the exact resolver hardening policy
+      ansible.builtin.assert:
+        that:
+          - >-
+            (cp_verify_resolved_hardening_content.content | b64decode) ==
+            cp_verify_expected_resolved_hardening_content
+        fail_msg: The managed resolver hardening policy content has drifted.
+      vars:
+        cp_verify_expected_resolved_hardening_content: |
+          [Resolve]
+          LLMNR=no
+
+    - name: Inspect systemd-resolved state without enabling it
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - systemd-resolved.service
+          - --property=LoadState
+          - --property=ActiveState
+      register: cp_verify_systemd_resolved_state
+      changed_when: false
+      failed_when: false
+
+    - name: Remember whether systemd-resolved is active
+      ansible.builtin.set_fact:
+        cp_verify_systemd_resolved_active: >-
+          {{ cp_verify_systemd_resolved_state.rc == 0 and
+             'LoadState=loaded' in cp_verify_systemd_resolved_state.stdout_lines and
+             'ActiveState=active' in cp_verify_systemd_resolved_state.stdout_lines }}
+
+    - name: Require the existing Azure resolver service
+      ansible.builtin.assert:
+        that: cp_verify_systemd_resolved_active | bool
+        fail_msg: azure-single requires its existing systemd-resolved service to remain active.
+      when: cp_profile == 'azure-single'
+
+    - name: Inspect merged resolver configuration
+      ansible.builtin.command:
+        argv: [systemd-analyze, cat-config, systemd/resolved.conf]
+      register: cp_verify_systemd_resolved_merged_config
+      changed_when: false
+
+    - name: Select effective LLMNR resolver assignments
+      ansible.builtin.set_fact:
+        cp_verify_systemd_resolved_llmnr_assignments: >-
+          {{ cp_verify_systemd_resolved_merged_config.stdout |
+             regex_findall('(?m)^\\s*LLMNR\\s*=\\s*([^#;\\s]+)\\s*$') }}
+
+    - name: Require the managed policy to be the effective LLMNR assignment
+      ansible.builtin.assert:
+        that:
+          - cp_verify_systemd_resolved_llmnr_assignments | length > 0
+          - >-
+            ((cp_verify_systemd_resolved_llmnr_assignments | last | default('')) |
+             lower) == 'no'
+        fail_msg: A missing or later resolver assignment overrides the managed LLMNR=no policy.
+
+    - name: Inspect effective resolver protocols
+      ansible.builtin.command:
+        argv: [resolvectl, --no-pager, status]
+      register: cp_verify_systemd_resolved_protocols
+      changed_when: false
+      when: cp_verify_systemd_resolved_active | bool
+
+    - name: Inspect forbidden LLMNR listeners
+      ansible.builtin.command:
+        argv: [ss, -H, -lntu, sport, '=', ':5355']
+      register: cp_verify_llmnr_listeners
+      changed_when: false
+
+    - name: Resolve the active resolver configuration link
+      ansible.builtin.command:
+        argv: [readlink, --canonicalize, /etc/resolv.conf]
+      register: cp_verify_resolv_conf_target
+      changed_when: false
+
+    - name: Require an active service for a systemd-resolved configuration link
+      ansible.builtin.assert:
+        that:
+          - >-
+            (not cp_verify_resolv_conf_target.stdout.startswith('/run/systemd/resolve/')) or
+            (cp_verify_systemd_resolved_active | bool)
+        fail_msg: /etc/resolv.conf points to systemd-resolved while its service is inactive.
+
+    - name: Inspect the Azure DNS stub listener
+      ansible.builtin.command:
+        argv: [ss, -H, -lntu, sport, '=', ':53']
+      register: cp_verify_azure_dns_stub_listeners
+      changed_when: false
+      when: cp_profile == 'azure-single'
+
+    - name: Exercise deterministic Azure unicast DNS resolution
+      ansible.builtin.command:
+        argv:
+          - resolvectl
+          - --no-pager
+          - query
+          - --cache=no
+          - --type=A
+          - "{{ cp_resolved_unicast_probe_name }}"
+      register: cp_verify_azure_unicast_dns_probe
+      changed_when: false
+      when: cp_profile == 'azure-single'
+
+    - name: Require preserved Azure unicast DNS and stub behavior
+      ansible.builtin.assert:
+        that:
+          - cp_verify_resolv_conf_target.stdout == '/run/systemd/resolve/stub-resolv.conf'
+          - cp_resolved_expected_dns_server_ipv4 in cp_verify_systemd_resolved_protocols.stdout
+          - "'127.0.0.53' in cp_verify_azure_dns_stub_listeners.stdout"
+          - "'0.0.0.0:53' not in cp_verify_azure_dns_stub_listeners.stdout"
+          - "'[::]:53' not in cp_verify_azure_dns_stub_listeners.stdout"
+          - cp_resolved_unicast_probe_ipv4 in cp_verify_azure_unicast_dns_probe.stdout
+          - "'Data from: network' in cp_verify_azure_unicast_dns_probe.stdout"
+        fail_msg: Azure unicast DNS or the protected local resolver stub regressed.
+      when: cp_profile == 'azure-single'
+
+    - name: Require effective LLMNR disablement
+      ansible.builtin.assert:
+        that:
+          - >-
+            (not cp_verify_systemd_resolved_active | bool) or
+            ('+LLMNR' not in cp_verify_systemd_resolved_protocols.stdout and
+             '-LLMNR' in cp_verify_systemd_resolved_protocols.stdout)
+          - cp_verify_llmnr_listeners.stdout | trim | length == 0
+        fail_msg: LLMNR remains enabled or TCP/UDP port 5355 is still listening.
+
+    - name: Report sanitized resolver hardening result
+      ansible.builtin.debug:
+        msg: >-
+          llmnr=disabled
+          unicast_dns={{ 'passed' if cp_profile == 'azure-single' else 'host-managed' }}
+
     - name: Prove Caddy admin API is unreachable
       ansible.builtin.uri:
         url: http://127.0.0.1:2019/config/

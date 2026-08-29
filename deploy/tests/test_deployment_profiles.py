@@ -70,6 +70,11 @@ class DeploymentProfileTests(unittest.TestCase):
             ["83.110.90.136/32", "83.110.90.142/32"],
         )
         self.assertEqual(profile["cp_firewall_dhcp_server_ipv4"], "168.63.129.16")
+        self.assertEqual(
+            profile["cp_resolved_expected_dns_server_ipv4"], "168.63.129.16"
+        )
+        self.assertEqual(profile["cp_resolved_unicast_probe_name"], "one.one.one.one")
+        self.assertEqual(profile["cp_resolved_unicast_probe_ipv4"], "1.1.1.1")
         self.assertEqual(profile["cp_ingress_server_name"], "controller.voice.vivolution.ae")
         self.assertEqual(profile["cp_ingress_https_port"], 443)
         self.assertEqual(profile["cp_ingress_guest_connect_address"], "127.0.0.1")
@@ -119,6 +124,37 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("azure-infrastructure-before.log", cpctl)
         self.assertIn("azure-infrastructure-after.log", cpctl)
         self.assertIn("azure_infrastructure=passed", cpctl)
+
+    def test_host_disables_llmnr_without_installing_resolved(self) -> None:
+        policy = (
+            PROJECT_ROOT
+            / "deploy"
+            / "roles"
+            / "base_os"
+            / "templates"
+            / "99-vivolution-hardening.conf.j2"
+        ).read_text(encoding="utf-8")
+        base_tasks = (
+            PROJECT_ROOT / "deploy" / "roles" / "base_os" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        verify = (PROJECT_ROOT / "deploy" / "playbooks" / "verify.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(policy, "[Resolve]\nLLMNR=no\n")
+        self.assertNotIn("      - systemd-resolved\n", base_tasks)
+        self.assertIn("cp_systemd_resolved_active", base_tasks)
+        self.assertIn("cp_systemd_resolved_hardening.changed", base_tasks)
+        self.assertIn("cp_systemd_resolved_protocols_before", base_tasks)
+        self.assertIn("systemd-analyze, cat-config", base_tasks)
+        self.assertIn("Data from: network", base_tasks)
+        self.assertIn("':5355'", base_tasks)
+        self.assertIn("cp_verify_expected_resolved_hardening_content", verify)
+        self.assertIn("cp_verify_systemd_resolved_merged_config", verify)
+        self.assertIn("'+LLMNR' not in", verify)
+        self.assertIn("'-LLMNR' in", verify)
+        self.assertIn("Data from: network", verify)
+        self.assertIn("':5355'", verify)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,9 @@ cp_firewall_ssh_source_ipv4_cidrs:
   - 83.110.90.136/32
   - 83.110.90.142/32
 cp_firewall_dhcp_server_ipv4: 168.63.129.16
+cp_resolved_expected_dns_server_ipv4: 168.63.129.16
+cp_resolved_unicast_probe_name: one.one.one.one
+cp_resolved_unicast_probe_ipv4: 1.1.1.1
 
 cp_min_vcpus: 2
 cp_min_memory_mb: 7000

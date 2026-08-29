@@ -14,6 +14,12 @@ Azure acceptance VM, and a future managed-database Azure layout.
   it is reserved for the future managed-database topology.
 - Every profile places PgBouncer on `127.0.0.1:6432`, so the application
   connection contract does not change between environments.
+- Every managed host receives an `LLMNR=no` systemd-resolved policy and
+  verification rejects any TCP or UDP listener on port 5355. The deployment
+  neither installs nor starts systemd-resolved solely for this policy, and
+  unicast DNS remains under the host or cloud network configuration. The
+  `azure-single` gate also proves the Azure DNS server, local stub, and a real
+  network-backed DNS lookup before and after reboot.
 
 The tracked `azure-single` inventory is specific to the approved UAE North
 acceptance VM. Its SSH host identity and credentials are protected local state
