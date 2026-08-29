@@ -3,21 +3,92 @@
   hosts: controllers
   become: true
   gather_facts: false
+  vars:
+    cp_outage_guest_ca_path: >-
+      {{ cp_ingress_guest_ca_path |
+         default('/usr/local/share/ca-certificates/vivolution-lab-caddy.crt') }}
+    cp_outage_guest_connect_address: >-
+      {{ cp_ingress_guest_connect_address | default('127.0.0.1') }}
   tasks:
-    - name: Restrict database-outage qualification to the local profile
+    - name: Restrict database-outage qualification to an authorized local database
       ansible.builtin.assert:
         that:
-          - cp_profile == 'lab'
           - cp_install_local_postgres | bool
-        fail_msg: The destructive database-outage probe is only supported by the disposable local lab.
+          - cp_db_upstream_host in ['127.0.0.1', 'localhost']
+          - cp_qualification_allow_database_outage | default(false) | bool
+          - >-
+            cp_profile == 'lab' or
+            (cp_ingress_guest_ca_path is defined and
+             cp_ingress_guest_connect_address is defined)
+          - cp_outage_guest_ca_path is string
+          - cp_outage_guest_ca_path is match('^/.+')
+          - cp_outage_guest_connect_address is string
+          - cp_outage_guest_connect_address is match('^[0-9A-Fa-f:.]{2,45}$')
+        fail_msg: >-
+          The bounded database-outage probe requires an explicitly authorized
+          local PostgreSQL cluster and pinned guest HTTPS path.
+
+    - name: Validate and normalize the guest HTTPS connect address
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |-
+            import ipaddress
+            import sys
+
+            try:
+                address = ipaddress.ip_address(sys.argv[1])
+            except ValueError:
+                raise SystemExit(1) from None
+            if address.is_unspecified or address.is_multicast:
+                raise SystemExit(1)
+            print(f"[{address.compressed}]" if address.version == 6 else address.compressed)
+          - "{{ cp_outage_guest_connect_address }}"
+      register: cp_outage_curl_connect_address
+      changed_when: false
+
+    - name: Inspect guest HTTPS trust anchor before outage injection
+      ansible.builtin.stat:
+        path: "{{ cp_outage_guest_ca_path }}"
+        follow: false
+      register: cp_outage_guest_ca
+
+    - name: Require a safe guest HTTPS trust anchor
+      ansible.builtin.assert:
+        that:
+          - cp_outage_guest_ca.stat.exists
+          - cp_outage_guest_ca.stat.isreg | default(false)
+          - not (cp_outage_guest_ca.stat.islnk | default(false))
+          - cp_outage_guest_ca.stat.uid | int == 0
+          - cp_outage_guest_ca.stat.gid | int == 0
+          - cp_outage_guest_ca.stat.mode == '0644'
+        fail_msg: The trusted guest HTTPS CA is unavailable or unsafe.
 
     - name: Require healthy HTTPS readiness before outage injection
-      ansible.builtin.uri:
-        url: "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/ready"
-        method: GET
-        status_code: 200
-        return_content: true
-        validate_certs: true
+      ansible.builtin.command:
+        argv:
+          - curl
+          - --silent
+          - --show-error
+          - --fail
+          - --proto
+          - =https
+          - --tlsv1.2
+          - --noproxy
+          - '*'
+          - --cacert
+          - "{{ cp_outage_guest_ca_path }}"
+          - --resolve
+          - "{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}:{{ cp_outage_curl_connect_address.stdout }}"
+          - --connect-timeout
+          - '2'
+          - --max-time
+          - '5'
+          - --output
+          - /dev/null
+          - "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/ready"
+      changed_when: false
 
     - name: Exercise a bounded local PostgreSQL outage
       block:
@@ -27,28 +98,67 @@
             state: stopped
 
         - name: Require HTTPS liveness to remain healthy
-          ansible.builtin.uri:
-            url: "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/live"
-            method: GET
-            status_code: 200
-            return_content: true
-            validate_certs: true
+          ansible.builtin.command:
+            argv:
+              - curl
+              - --silent
+              - --show-error
+              - --fail
+              - --proto
+              - =https
+              - --tlsv1.2
+              - --noproxy
+              - '*'
+              - --cacert
+              - "{{ cp_outage_guest_ca_path }}"
+              - --resolve
+              - "{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}:{{ cp_outage_curl_connect_address.stdout }}"
+              - --connect-timeout
+              - '2'
+              - --max-time
+              - '5'
+              - --output
+              - /dev/null
+              - "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/live"
           register: cp_outage_liveness
+          changed_when: false
+          failed_when: false
           retries: 5
           delay: 1
-          until: cp_outage_liveness.status == 200
+          until: cp_outage_liveness.rc == 0
 
         - name: Require HTTPS readiness to report database unavailability
-          ansible.builtin.uri:
-            url: "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/ready"
-            method: GET
-            status_code: 503
-            return_content: true
-            validate_certs: true
+          ansible.builtin.command:
+            argv:
+              - curl
+              - --silent
+              - --show-error
+              - --proto
+              - =https
+              - --tlsv1.2
+              - --noproxy
+              - '*'
+              - --cacert
+              - "{{ cp_outage_guest_ca_path }}"
+              - --resolve
+              - "{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}:{{ cp_outage_curl_connect_address.stdout }}"
+              - --connect-timeout
+              - '2'
+              - --max-time
+              - '5'
+              - --output
+              - /dev/null
+              - --write-out
+              - '%{http_code}'
+              - "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/ready"
           register: cp_outage_readiness
+          changed_when: false
+          failed_when: false
           retries: 10
           delay: 1
-          until: cp_outage_readiness.status == 503
+          until:
+            - cp_outage_readiness.rc == 0
+            - cp_outage_readiness.stdout | trim == '503'
       always:
         - name: Restore the local PostgreSQL cluster
           ansible.builtin.systemd_service:
@@ -56,16 +166,34 @@
             state: started
 
         - name: Require automatic HTTPS readiness recovery
-          ansible.builtin.uri:
-            url: "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/ready"
-            method: GET
-            status_code: 200
-            return_content: true
-            validate_certs: true
+          ansible.builtin.command:
+            argv:
+              - curl
+              - --silent
+              - --show-error
+              - --fail
+              - --proto
+              - =https
+              - --tlsv1.2
+              - --noproxy
+              - '*'
+              - --cacert
+              - "{{ cp_outage_guest_ca_path }}"
+              - --resolve
+              - "{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}:{{ cp_outage_curl_connect_address.stdout }}"
+              - --connect-timeout
+              - '2'
+              - --max-time
+              - '5'
+              - --output
+              - /dev/null
+              - "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/ready"
           register: cp_outage_recovery
+          changed_when: false
+          failed_when: false
           retries: 20
           delay: 1
-          until: cp_outage_recovery.status == 200
+          until: cp_outage_recovery.rc == 0
 
     - name: Require no failed units after database recovery
       ansible.builtin.command:

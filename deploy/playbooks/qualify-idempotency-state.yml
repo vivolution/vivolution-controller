@@ -3,6 +3,10 @@
   hosts: controllers
   become: true
   gather_facts: false
+  vars:
+    cp_state_guest_ca_path: >-
+      {{ cp_ingress_guest_ca_path |
+         default('/usr/local/share/ca-certificates/vivolution-lab-caddy.crt') }}
   tasks:
     - name: Require the local PostgreSQL qualification profile
       ansible.builtin.assert:
@@ -11,7 +15,9 @@
           - cp_database_name is match('^(?!pg_)[a-z_][a-z0-9_]{0,62}$')
           - cp_db_owner is match('^(?!pg_)[a-z_][a-z0-9_]{0,62}$')
           - cp_db_runtime_user is match('^(?!pg_)[a-z_][a-z0-9_]{0,62}$')
-        fail_msg: The current state fingerprint requires the local PostgreSQL lab profile.
+          - cp_state_guest_ca_path is string
+          - cp_state_guest_ca_path is match('^/.+')
+        fail_msg: The current state fingerprint requires local PostgreSQL and guest TLS trust.
       no_log: true
       run_once: true
 
@@ -161,8 +167,7 @@
               emit_file controller-quadlet \
                   /etc/containers/systemd/vivolution-cp-web.container
               emit_file caddy-config /etc/caddy/Caddyfile
-              emit_file caddy-local-trust \
-                  /usr/local/share/ca-certificates/vivolution-lab-caddy.crt
+              emit_file ingress-guest-trust "$CP_INGRESS_GUEST_CA_PATH"
               emit_file pgbouncer-config /etc/pgbouncer/pgbouncer.ini
               emit_file pgbouncer-auth /etc/pgbouncer/userlist.txt
               emit_file nftables-config /etc/nftables.conf
@@ -366,6 +371,8 @@
           }
 
           collect_state | sha256sum | awk '{print $1}'
+      environment:
+        CP_INGRESS_GUEST_CA_PATH: "{{ cp_state_guest_ca_path }}"
       register: cp_state_fingerprint_raw
       changed_when: false
       no_log: true

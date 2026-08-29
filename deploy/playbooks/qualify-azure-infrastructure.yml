@@ -1,0 +1,877 @@
+---
+- name: Qualify the read-only Azure single-node infrastructure contract
+  hosts: controllers
+  become: false
+  gather_facts: false
+  tasks:
+    - name: End infrastructure qualification outside the Azure single-node profile
+      ansible.builtin.meta: end_host
+      when: cp_profile | default('') != 'azure-single'
+
+    - name: Audit the Azure single-node control plane without mutation
+      delegate_to: localhost
+      run_once: true
+      block:
+        - name: Require explicit Azure infrastructure inventory variables
+          ansible.builtin.assert:
+            that:
+              - cp_azure_subscription_id is defined
+              - cp_azure_tenant_id is defined
+              - cp_azure_resource_group is defined
+              - cp_azure_location is defined
+              - cp_azure_vm_name is defined
+              - cp_azure_vm_size is defined
+              - cp_azure_vm_image_publisher is defined
+              - cp_azure_vm_image_offer is defined
+              - cp_azure_vm_image_sku is defined
+              - cp_azure_vm_image_version is defined
+              - cp_azure_os_disk_name is defined
+              - cp_azure_os_disk_size_gb is defined
+              - cp_azure_os_disk_sku is defined
+              - cp_azure_public_ip_name is defined
+              - cp_azure_public_ip is defined
+              - cp_azure_public_ip_dns_label is defined
+              - cp_azure_nsg_name is defined
+              - cp_azure_nic_name is defined
+              - cp_azure_nic_ip_configuration_name is defined
+              - cp_azure_private_ip is defined
+              - cp_azure_private_ip_allocation_method is defined
+              - cp_azure_vnet_name is defined
+              - cp_azure_vnet_address_prefix is defined
+              - cp_azure_subnet_name is defined
+              - cp_azure_subnet_address_prefix is defined
+              - cp_azure_ssh_source_prefixes is defined
+              - cp_firewall_ssh_source_ipv4_cidrs is defined
+              - cp_azure_dns_zone_name is defined
+              - cp_azure_dns_zone_resource_group is defined
+              - cp_azure_dns_record_name is defined
+              - cp_ingress_server_name is defined
+              - cp_ingress_external_connect_address is defined
+              - cp_qualification_https_connect_address is defined
+            fail_msg: >-
+              Azure infrastructure qualification requires every subscription,
+              resource, image, network, and DNS identity to be explicit in the
+              protected inventory.
+
+        - name: Validate the immutable Azure infrastructure contract
+          ansible.builtin.assert:
+            that:
+              - cp_azure_subscription_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+              - cp_azure_tenant_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+              - cp_azure_resource_group is match('^[A-Za-z0-9._()/-]{1,90}$')
+              - cp_azure_location == 'uaenorth'
+              - cp_azure_vm_name is match('^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$')
+              - cp_azure_vm_size == 'Standard_D2as_v5'
+              - cp_azure_vm_image_publisher == 'Debian'
+              - cp_azure_vm_image_offer == 'debian-13'
+              - cp_azure_vm_image_sku == '13-gen2'
+              - cp_azure_vm_image_version != 'latest'
+              - cp_azure_vm_image_version is match('^[0-9][0-9A-Za-z._-]+$')
+              - cp_azure_os_disk_name is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$')
+              - cp_azure_os_disk_size_gb | int == 64
+              - cp_azure_os_disk_sku == 'Premium_LRS'
+              - cp_azure_public_ip_name is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$')
+              - cp_azure_public_ip is match(cp_azure_ipv4_pattern)
+              - cp_azure_public_ip_dns_label is none
+              - cp_azure_nsg_name is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$')
+              - cp_azure_nic_name is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$')
+              - cp_azure_nic_ip_configuration_name == 'ipconfig1'
+              - cp_azure_private_ip == '10.20.1.4'
+              - cp_azure_private_ip is match(cp_azure_ipv4_pattern)
+              - cp_azure_private_ip_allocation_method == 'Static'
+              - cp_azure_vnet_name is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+              - cp_azure_vnet_address_prefix == '10.20.0.0/16'
+              - cp_azure_subnet_name is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$')
+              - cp_azure_subnet_address_prefix == '10.20.1.0/24'
+              - cp_azure_ssh_source_prefixes is sequence
+              - cp_azure_ssh_source_prefixes is not string
+              - cp_azure_ssh_source_prefixes | length >= 1
+              - cp_azure_ssh_source_prefixes | length <= 4
+              - >-
+                cp_azure_ssh_source_prefixes | unique | length ==
+                cp_azure_ssh_source_prefixes | length
+              - cp_azure_dns_zone_name is match('^[a-z0-9.-]+$')
+              - cp_azure_dns_zone_resource_group is match('^[A-Za-z0-9._()/-]{1,90}$')
+              - cp_azure_dns_record_name is match('^[a-z0-9-]{1,63}$')
+              - >-
+                cp_ingress_server_name ==
+                cp_azure_dns_record_name ~ '.' ~ cp_azure_dns_zone_name
+              - cp_azure_public_ip == cp_ingress_external_connect_address
+              - cp_azure_public_ip == cp_qualification_https_connect_address
+              - >-
+                cp_azure_ssh_source_prefixes | sort ==
+                cp_firewall_ssh_source_ipv4_cidrs | sort
+            fail_msg: >-
+              Azure inventory values do not declare the approved UAE North,
+              D2as_v5, pinned Debian 13 Gen2, 64 GiB Premium SSD contract.
+          vars:
+            cp_azure_ipv4_pattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})$'
+
+        - name: Validate every approved SSH source as one IPv4 host
+          ansible.builtin.assert:
+            that:
+              - item is match(cp_azure_ipv4_host_cidr_pattern)
+            fail_msg: Every approved Azure SSH source must be one explicit IPv4 /32.
+          loop: "{{ cp_azure_ssh_source_prefixes }}"
+          loop_control:
+            label: approved-ipv4-host
+          vars:
+            cp_azure_ipv4_host_cidr_pattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})/32$'
+
+        - name: Read the official Azure CLI version
+          ansible.builtin.command:
+            argv:
+              - az
+              - version
+              - --output
+              - json
+          environment: &azure_cli_environment
+            AZURE_CORE_COLLECT_TELEMETRY: 'false'
+            AZURE_CORE_ONLY_SHOW_ERRORS: 'true'
+            AZURE_EXTENSION_USE_DYNAMIC_INSTALL: 'no'
+          register: cp_azure_cli_version_raw
+          changed_when: false
+          check_mode: false
+
+        - name: Parse the sanitized Azure CLI version
+          ansible.builtin.set_fact:
+            cp_azure_cli_version: >-
+              {{ (cp_azure_cli_version_raw.stdout | from_json)['azure-cli'] }}
+
+        - name: Read the selected Azure subscription identity
+          ansible.builtin.command:
+            argv:
+              - az
+              - account
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --query
+              - '{id:id,state:state,tenantId:tenantId}'
+              - --output
+              - json
+          environment: *azure_cli_environment
+          register: cp_azure_account_raw
+          changed_when: false
+          check_mode: false
+
+        - name: Parse the sanitized Azure subscription identity
+          ansible.builtin.set_fact:
+            cp_azure_account: "{{ cp_azure_account_raw.stdout | from_json }}"
+
+        - name: Require the exact enabled Azure subscription
+          ansible.builtin.assert:
+            that:
+              - cp_azure_account.id == cp_azure_subscription_id
+              - cp_azure_account.state == 'Enabled'
+              - cp_azure_account.tenantId == cp_azure_tenant_id
+            fail_msg: The Azure CLI is not authenticated to the approved enabled subscription.
+
+        - name: Read the exact Azure resource group
+          ansible.builtin.command:
+            argv:
+              - az
+              - group
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --name
+              - "{{ cp_azure_resource_group }}"
+              - --query
+              - '{name:name,location:location,provisioningState:properties.provisioningState}'
+              - --output
+              - json
+          environment: *azure_cli_environment
+          register: cp_azure_resource_group_raw
+          changed_when: false
+          check_mode: false
+
+        - name: Parse the sanitized Azure resource group
+          ansible.builtin.set_fact:
+            cp_azure_resource_group_state: >-
+              {{ cp_azure_resource_group_raw.stdout | from_json }}
+
+        - name: Require the exact UAE North resource group
+          ansible.builtin.assert:
+            that:
+              - cp_azure_resource_group_state.name | lower == cp_azure_resource_group | lower
+              - cp_azure_resource_group_state.location | lower == 'uaenorth'
+              - cp_azure_resource_group_state.provisioningState == 'Succeeded'
+            fail_msg: The approved Azure resource group is missing or not healthy in UAE North.
+
+        - name: Read the complete top-level resource set
+          ansible.builtin.command:
+            argv:
+              - az
+              - resource
+              - list
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --query
+              - 'sort_by([],&name)[].{name:name,type:type,location:location}'
+              - --output
+              - json
+          environment: *azure_cli_environment
+          register: cp_azure_resources_raw
+          changed_when: false
+          check_mode: false
+
+        - name: Parse the sanitized Azure resource set
+          ansible.builtin.set_fact:
+            cp_azure_resources: "{{ cp_azure_resources_raw.stdout | from_json }}"
+            cp_azure_expected_resources:
+              - name: "{{ cp_azure_vm_name }}"
+                type: Microsoft.Compute/virtualMachines
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_os_disk_name }}"
+                type: Microsoft.Compute/disks
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_nic_name }}"
+                type: Microsoft.Network/networkInterfaces
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_nsg_name }}"
+                type: Microsoft.Network/networkSecurityGroups
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_public_ip_name }}"
+                type: Microsoft.Network/publicIPAddresses
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_vnet_name }}"
+                type: Microsoft.Network/virtualNetworks
+                location: "{{ cp_azure_location }}"
+
+        - name: Require exactly the six-resource base and no managed runtime service
+          ansible.builtin.assert:
+            that:
+              - cp_azure_resources | length == 6
+              - >-
+                cp_azure_resources ==
+                (cp_azure_expected_resources | sort(attribute='name'))
+            fail_msg: >-
+              The Azure resource group is not the exact VM, disk, NIC, NSG,
+              public IP, and VNet base set; an unexpected or managed runtime
+              service is present.
+
+        - name: Read the exact Azure virtual machine security and storage profile
+          ansible.builtin.command:
+            argv:
+              - az
+              - vm
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ cp_azure_vm_name }}"
+              - --query
+              - >-
+                {id:id,name:name,location:location,vmSize:hardwareProfile.vmSize,
+                securityType:securityProfile.securityType,
+                secureBootEnabled:securityProfile.uefiSettings.secureBootEnabled,
+                vTpmEnabled:securityProfile.uefiSettings.vTpmEnabled,
+                imagePublisher:storageProfile.imageReference.publisher,
+                imageOffer:storageProfile.imageReference.offer,
+                imageSku:storageProfile.imageReference.sku,
+                imageVersion:storageProfile.imageReference.version,
+                imageExactVersion:storageProfile.imageReference.exactVersion,
+                osDiskName:storageProfile.osDisk.name,
+                osDiskType:storageProfile.osDisk.osType,
+                osDiskSizeGiB:storageProfile.osDisk.diskSizeGB,
+                osDiskSku:storageProfile.osDisk.managedDisk.storageAccountType,
+                osDiskCaching:storageProfile.osDisk.caching,
+                osDiskDeleteOption:storageProfile.osDisk.deleteOption,
+                dataDisks:storageProfile.dataDisks,
+                networkInterfaces:networkProfile.networkInterfaces[].{id:id,
+                primary:primary,deleteOption:deleteOption},
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          register: cp_azure_vm_raw
+          changed_when: false
+          check_mode: false
+
+        - name: Parse the sanitized Azure virtual machine profile
+          ansible.builtin.set_fact:
+            cp_azure_vm: "{{ cp_azure_vm_raw.stdout | from_json }}"
+            cp_azure_expected_vm_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Compute/virtualMachines/{{ cp_azure_vm_name }}
+            cp_azure_expected_nic_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Network/networkInterfaces/{{ cp_azure_nic_name }}
+
+        - name: Require the exact trusted Debian 13 Azure virtual machine
+          ansible.builtin.assert:
+            that:
+              - cp_azure_vm.id | lower == cp_azure_expected_vm_id | lower
+              - cp_azure_vm.name == cp_azure_vm_name
+              - cp_azure_vm.location | lower == 'uaenorth'
+              - cp_azure_vm.vmSize == 'Standard_D2as_v5'
+              - cp_azure_vm.securityType == 'TrustedLaunch'
+              - cp_azure_vm.secureBootEnabled | bool
+              - cp_azure_vm.vTpmEnabled | bool
+              - cp_azure_vm.imagePublisher == 'Debian'
+              - cp_azure_vm.imageOffer == 'debian-13'
+              - cp_azure_vm.imageSku == '13-gen2'
+              - cp_azure_vm.imageVersion == cp_azure_vm_image_version
+              - cp_azure_vm.imageExactVersion == cp_azure_vm_image_version
+              - cp_azure_vm.osDiskName == cp_azure_os_disk_name
+              - cp_azure_vm.osDiskType == 'Linux'
+              - cp_azure_vm.osDiskSizeGiB | int == 64
+              - cp_azure_vm.osDiskSku == 'Premium_LRS'
+              - cp_azure_vm.osDiskCaching == 'ReadWrite'
+              - cp_azure_vm.osDiskDeleteOption == 'Detach'
+              - cp_azure_vm.dataDisks | length == 0
+              - cp_azure_vm.networkInterfaces | length == 1
+              - cp_azure_vm.networkInterfaces[0].id | lower == cp_azure_expected_nic_id | lower
+              - cp_azure_vm.networkInterfaces[0].primary | bool
+              - cp_azure_vm.networkInterfaces[0].deleteOption == 'Detach'
+              - cp_azure_vm.provisioningState == 'Succeeded'
+            fail_msg: >-
+              The Azure VM does not match the exact pinned Debian 13 Gen2,
+              D2as_v5, Trusted Launch, Secure Boot, vTPM, or OS-disk contract.
+
+        - name: Read the Azure virtual machine instance state
+          ansible.builtin.command:
+            argv:
+              - az
+              - vm
+              - get-instance-view
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ cp_azure_vm_name }}"
+              - --query
+              - instanceView.statuses[].code
+              - --output
+              - json
+          environment: *azure_cli_environment
+          register: cp_azure_vm_instance_state_raw
+          changed_when: false
+          check_mode: false
+
+        - name: Parse the sanitized Azure virtual machine instance state
+          ansible.builtin.set_fact:
+            cp_azure_vm_instance_states: >-
+              {{ cp_azure_vm_instance_state_raw.stdout | from_json }}
+
+        - name: Require the Azure virtual machine to be running and healthy
+          ansible.builtin.assert:
+            that:
+              - "'ProvisioningState/succeeded' in cp_azure_vm_instance_states"
+              - "'PowerState/running' in cp_azure_vm_instance_states"
+            fail_msg: The exact Azure controller VM is not running and provisioned.
+
+        - name: Read the exact managed OS disk
+          ansible.builtin.command:
+            argv:
+              - az
+              - disk
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ cp_azure_os_disk_name }}"
+              - --query
+              - >-
+                {name:name,location:location,diskSizeGiB:diskSizeGB,sku:sku.name,
+                managedBy:managedBy,securityType:securityProfile.securityType,
+                encryptionType:encryption.type,publicNetworkAccess:publicNetworkAccess,
+                networkAccessPolicy:networkAccessPolicy,provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          register: cp_azure_disk_raw
+          changed_when: false
+          check_mode: false
+
+        - name: Parse the sanitized managed OS disk
+          ansible.builtin.set_fact:
+            cp_azure_disk: "{{ cp_azure_disk_raw.stdout | from_json }}"
+
+        - name: Require the exact private encrypted Premium OS disk
+          ansible.builtin.assert:
+            that:
+              - cp_azure_disk.name == cp_azure_os_disk_name
+              - cp_azure_disk.location | lower == 'uaenorth'
+              - cp_azure_disk.diskSizeGiB | int == 64
+              - cp_azure_disk.sku == 'Premium_LRS'
+              - cp_azure_disk.managedBy | lower == cp_azure_expected_vm_id | lower
+              - cp_azure_disk.securityType == 'TrustedLaunch'
+              - cp_azure_disk.encryptionType == 'EncryptionAtRestWithPlatformKey'
+              - cp_azure_disk.publicNetworkAccess == 'Disabled'
+              - cp_azure_disk.networkAccessPolicy == 'DenyAll'
+              - cp_azure_disk.provisioningState == 'Succeeded'
+            fail_msg: The Azure OS disk is not the exact private encrypted 64 GiB Premium disk.
+
+        - name: Read the exact static public IP
+          ansible.builtin.command:
+            argv:
+              - az
+              - network
+              - public-ip
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ cp_azure_public_ip_name }}"
+              - --query
+              - >-
+                {id:id,name:name,location:location,ipAddress:ipAddress,
+                allocationMethod:publicIPAllocationMethod,ipVersion:publicIPAddressVersion,
+                sku:sku.name,skuTier:sku.tier,
+                dnsLabel:dnsSettings.domainNameLabel,dnsFqdn:dnsSettings.fqdn,
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          register: cp_azure_public_ip_raw
+          changed_when: false
+          check_mode: false
+
+        - name: Parse the sanitized static public IP
+          ansible.builtin.set_fact:
+            cp_azure_public_ip_state: "{{ cp_azure_public_ip_raw.stdout | from_json }}"
+            cp_azure_expected_public_ip_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Network/publicIPAddresses/{{ cp_azure_public_ip_name }}
+
+        - name: Require the exact static Standard IPv4 address
+          ansible.builtin.assert:
+            that:
+              - cp_azure_public_ip_state.id | lower == cp_azure_expected_public_ip_id | lower
+              - cp_azure_public_ip_state.name == cp_azure_public_ip_name
+              - cp_azure_public_ip_state.location | lower == 'uaenorth'
+              - cp_azure_public_ip_state.ipAddress == cp_azure_public_ip
+              - cp_azure_public_ip_state.allocationMethod == 'Static'
+              - cp_azure_public_ip_state.ipVersion == 'IPv4'
+              - cp_azure_public_ip_state.sku == 'Standard'
+              - cp_azure_public_ip_state.skuTier == 'Regional'
+              - cp_azure_public_ip_state.dnsLabel == cp_azure_public_ip_dns_label
+              - cp_azure_public_ip_state.dnsLabel is none
+              - cp_azure_public_ip_state.dnsFqdn is none
+              - cp_azure_public_ip_state.provisioningState == 'Succeeded'
+            fail_msg: The controller public IP is not the declared static Standard IPv4 address.
+
+        - name: Read the exact controller network interface
+          ansible.builtin.command:
+            argv:
+              - az
+              - network
+              - nic
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ cp_azure_nic_name }}"
+              - --query
+              - >-
+                {id:id,name:name,location:location,
+                acceleratedNetworking:enableAcceleratedNetworking,
+                ipForwarding:enableIPForwarding,
+                nsgId:networkSecurityGroup.id,
+                vmId:virtualMachine.id,
+                ipConfigurations:ipConfigurations[].{id:id,name:name,primary:primary,
+                privateIp:privateIPAddress,privateIpVersion:privateIPAddressVersion,
+                privateIpAllocationMethod:privateIPAllocationMethod,
+                publicIpId:publicIPAddress.id,subnetId:subnet.id,
+                provisioningState:provisioningState},
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          register: cp_azure_nic_raw
+          changed_when: false
+          check_mode: false
+
+        - name: Parse the sanitized controller network interface
+          ansible.builtin.set_fact:
+            cp_azure_nic: "{{ cp_azure_nic_raw.stdout | from_json }}"
+            cp_azure_expected_nsg_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Network/networkSecurityGroups/{{ cp_azure_nsg_name }}
+            cp_azure_expected_subnet_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Network/virtualNetworks/{{ cp_azure_vnet_name
+              }}/subnets/{{ cp_azure_subnet_name }}
+            cp_azure_expected_ip_configuration_id: >-
+              {{ cp_azure_expected_nic_id }}/ipConfigurations/{{
+              cp_azure_nic_ip_configuration_name }}
+
+        - name: Require the exact accelerated non-forwarding controller NIC
+          ansible.builtin.assert:
+            that:
+              - cp_azure_nic.id | lower == cp_azure_expected_nic_id | lower
+              - cp_azure_nic.name == cp_azure_nic_name
+              - cp_azure_nic.location | lower == 'uaenorth'
+              - cp_azure_nic.acceleratedNetworking | bool
+              - cp_azure_nic.ipForwarding == false
+              - cp_azure_nic.nsgId | lower == cp_azure_expected_nsg_id | lower
+              - cp_azure_nic.vmId | lower == cp_azure_expected_vm_id | lower
+              - cp_azure_nic.ipConfigurations | length == 1
+              - >-
+                cp_azure_nic.ipConfigurations[0].id | lower ==
+                cp_azure_expected_ip_configuration_id | lower
+              - >-
+                cp_azure_nic.ipConfigurations[0].name ==
+                cp_azure_nic_ip_configuration_name
+              - cp_azure_nic.ipConfigurations[0].primary | bool
+              - cp_azure_nic.ipConfigurations[0].privateIp == cp_azure_private_ip
+              - cp_azure_nic.ipConfigurations[0].privateIpVersion == 'IPv4'
+              - >-
+                cp_azure_nic.ipConfigurations[0].privateIpAllocationMethod ==
+                cp_azure_private_ip_allocation_method
+              - >-
+                cp_azure_nic.ipConfigurations[0].publicIpId | lower ==
+                cp_azure_expected_public_ip_id | lower
+              - >-
+                cp_azure_nic.ipConfigurations[0].subnetId | lower ==
+                cp_azure_expected_subnet_id | lower
+              - cp_azure_nic.ipConfigurations[0].provisioningState == 'Succeeded'
+              - cp_azure_nic.provisioningState == 'Succeeded'
+            fail_msg: The controller NIC is not bound to the exact NSG, public IP, and subnet.
+
+        - name: Read the exact Azure virtual network and subnet topology
+          ansible.builtin.command:
+            argv:
+              - az
+              - network
+              - vnet
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ cp_azure_vnet_name }}"
+              - --query
+              - >-
+                {id:id,name:name,location:location,
+                addressPrefixes:addressSpace.addressPrefixes,
+                dnsServers:dhcpOptions.dnsServers,
+                ddosProtection:enableDdosProtection,
+                peerings:virtualNetworkPeerings[].id,
+                subnets:subnets[].{id:id,name:name,addressPrefix:addressPrefix,
+                addressPrefixes:addressPrefixes,
+                defaultOutboundAccess:defaultOutboundAccess,
+                delegations:delegations[].id,
+                ipConfigurationIds:ipConfigurations[].id,
+                networkSecurityGroupId:networkSecurityGroup.id,
+                natGatewayId:natGateway.id,routeTableId:routeTable.id,
+                privateEndpointNetworkPolicies:privateEndpointNetworkPolicies,
+                privateLinkServiceNetworkPolicies:privateLinkServiceNetworkPolicies,
+                privateEndpointIds:privateEndpoints[].id,
+                serviceEndpoints:serviceEndpoints[].service,
+                serviceEndpointPolicyIds:serviceEndpointPolicies[].id,
+                provisioningState:provisioningState},
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          register: cp_azure_vnet_raw
+          changed_when: false
+          check_mode: false
+
+        - name: Parse the sanitized Azure virtual network topology
+          ansible.builtin.set_fact:
+            cp_azure_vnet: "{{ cp_azure_vnet_raw.stdout | from_json }}"
+            cp_azure_expected_vnet_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Network/virtualNetworks/{{ cp_azure_vnet_name }}
+
+        - name: Select the sole declared Azure subnet
+          ansible.builtin.set_fact:
+            cp_azure_subnet: "{{ cp_azure_vnet.subnets[0] }}"
+
+        - name: Require the exact isolated Azure virtual network and subnet
+          ansible.builtin.assert:
+            that:
+              - cp_azure_vnet.id | lower == cp_azure_expected_vnet_id | lower
+              - cp_azure_vnet.name == cp_azure_vnet_name
+              - cp_azure_vnet.location | lower == 'uaenorth'
+              - cp_azure_vnet.addressPrefixes == [cp_azure_vnet_address_prefix]
+              - cp_azure_vnet.dnsServers | default([], true) | length == 0
+              - cp_azure_vnet.ddosProtection == false
+              - cp_azure_vnet.peerings | length == 0
+              - cp_azure_vnet.subnets | length == 1
+              - cp_azure_vnet.provisioningState == 'Succeeded'
+              - cp_azure_subnet.id | lower == cp_azure_expected_subnet_id | lower
+              - cp_azure_subnet.name == cp_azure_subnet_name
+              - cp_azure_subnet.addressPrefix == cp_azure_subnet_address_prefix
+              - cp_azure_subnet.addressPrefixes is none
+              - cp_azure_subnet.defaultOutboundAccess == false
+              - cp_azure_subnet.delegations | length == 0
+              - cp_azure_subnet.ipConfigurationIds | length == 1
+              - >-
+                cp_azure_subnet.ipConfigurationIds[0] | lower ==
+                cp_azure_expected_ip_configuration_id | lower
+              - cp_azure_subnet.networkSecurityGroupId is none
+              - cp_azure_subnet.natGatewayId is none
+              - cp_azure_subnet.routeTableId is none
+              - cp_azure_subnet.privateEndpointNetworkPolicies == 'Disabled'
+              - cp_azure_subnet.privateLinkServiceNetworkPolicies == 'Enabled'
+              - cp_azure_subnet.privateEndpointIds | default([], true) | length == 0
+              - cp_azure_subnet.serviceEndpoints | default([], true) | length == 0
+              - >-
+                cp_azure_subnet.serviceEndpointPolicyIds |
+                default([], true) | length == 0
+              - cp_azure_subnet.provisioningState == 'Succeeded'
+            fail_msg: >-
+              The Azure VNet or subnet differs from the exact isolated
+              single-node address-space and policy contract.
+
+        - name: Read the complete custom NSG rule set
+          ansible.builtin.command:
+            argv:
+              - az
+              - network
+              - nsg
+              - rule
+              - list
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --nsg-name
+              - "{{ cp_azure_nsg_name }}"
+              - --query
+              - >-
+                sort_by([],&priority)[].{name:name,priority:priority,protocol:protocol,
+                access:access,direction:direction,sourcePrefix:sourceAddressPrefix,
+                sourcePrefixes:sourceAddressPrefixes,sourcePortRange:sourcePortRange,
+                sourcePortRanges:sourcePortRanges,destinationPrefix:destinationAddressPrefix,
+                destinationPrefixes:destinationAddressPrefixes,
+                destinationPortRange:destinationPortRange,
+                destinationPortRanges:destinationPortRanges,
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          register: cp_azure_nsg_rules_raw
+          changed_when: false
+          check_mode: false
+
+        - name: Parse the sanitized custom NSG rule set
+          ansible.builtin.set_fact:
+            cp_azure_nsg_rules: "{{ cp_azure_nsg_rules_raw.stdout | from_json }}"
+
+        - name: Require exactly the four approved custom NSG rules
+          ansible.builtin.assert:
+            that:
+              - cp_azure_nsg_rules | length == 4
+              - >-
+                cp_azure_nsg_rules | map(attribute='name') | list ==
+                ['Allow-SSH-Approved-IP', 'Allow-HTTP-Internet',
+                 'Allow-HTTPS-Internet', 'Deny-All-Other-Inbound']
+            fail_msg: The custom NSG rule names, priorities, or count differ from policy.
+
+        - name: Select the four approved custom NSG rules
+          ansible.builtin.set_fact:
+            cp_azure_nsg_ssh: "{{ cp_azure_nsg_rules[0] }}"
+            cp_azure_nsg_http: "{{ cp_azure_nsg_rules[1] }}"
+            cp_azure_nsg_https: "{{ cp_azure_nsg_rules[2] }}"
+            cp_azure_nsg_deny: "{{ cp_azure_nsg_rules[3] }}"
+
+        - name: Require the exact approved-IP SSH rule
+          ansible.builtin.assert:
+            that:
+              - cp_azure_nsg_ssh.priority | int == 100
+              - cp_azure_nsg_ssh.protocol == 'Tcp'
+              - cp_azure_nsg_ssh.access == 'Allow'
+              - cp_azure_nsg_ssh.direction == 'Inbound'
+              - cp_azure_nsg_ssh.sourcePrefix is none
+              - >-
+                cp_azure_nsg_ssh.sourcePrefixes | sort ==
+                cp_azure_ssh_source_prefixes | sort
+              - cp_azure_nsg_ssh.sourcePortRange == '*'
+              - cp_azure_nsg_ssh.sourcePortRanges | length == 0
+              - cp_azure_nsg_ssh.destinationPrefix == '*'
+              - cp_azure_nsg_ssh.destinationPrefixes | length == 0
+              - cp_azure_nsg_ssh.destinationPortRange == '22'
+              - cp_azure_nsg_ssh.destinationPortRanges | length == 0
+              - cp_azure_nsg_ssh.provisioningState == 'Succeeded'
+            fail_msg: The Azure SSH NSG rule is broader or different than inventory policy.
+
+        - name: Require the exact public HTTP rule
+          ansible.builtin.assert:
+            that:
+              - cp_azure_nsg_http.priority | int == 110
+              - cp_azure_nsg_http.protocol == 'Tcp'
+              - cp_azure_nsg_http.access == 'Allow'
+              - cp_azure_nsg_http.direction == 'Inbound'
+              - cp_azure_nsg_http.sourcePrefix == 'Internet'
+              - cp_azure_nsg_http.sourcePrefixes | length == 0
+              - cp_azure_nsg_http.sourcePortRange == '*'
+              - cp_azure_nsg_http.sourcePortRanges | length == 0
+              - cp_azure_nsg_http.destinationPrefix == '*'
+              - cp_azure_nsg_http.destinationPrefixes | length == 0
+              - cp_azure_nsg_http.destinationPortRange == '80'
+              - cp_azure_nsg_http.destinationPortRanges | length == 0
+              - cp_azure_nsg_http.provisioningState == 'Succeeded'
+            fail_msg: The Azure HTTP NSG rule is broader or different than policy.
+
+        - name: Require the exact public HTTPS rule
+          ansible.builtin.assert:
+            that:
+              - cp_azure_nsg_https.priority | int == 120
+              - cp_azure_nsg_https.protocol == 'Tcp'
+              - cp_azure_nsg_https.access == 'Allow'
+              - cp_azure_nsg_https.direction == 'Inbound'
+              - cp_azure_nsg_https.sourcePrefix == 'Internet'
+              - cp_azure_nsg_https.sourcePrefixes | length == 0
+              - cp_azure_nsg_https.sourcePortRange == '*'
+              - cp_azure_nsg_https.sourcePortRanges | length == 0
+              - cp_azure_nsg_https.destinationPrefix == '*'
+              - cp_azure_nsg_https.destinationPrefixes | length == 0
+              - cp_azure_nsg_https.destinationPortRange == '443'
+              - cp_azure_nsg_https.destinationPortRanges | length == 0
+              - cp_azure_nsg_https.provisioningState == 'Succeeded'
+            fail_msg: The Azure HTTPS NSG rule is broader or different than policy.
+
+        - name: Require the exact deny-all remainder rule
+          ansible.builtin.assert:
+            that:
+              - cp_azure_nsg_deny.priority | int == 4096
+              - cp_azure_nsg_deny.protocol == '*'
+              - cp_azure_nsg_deny.access == 'Deny'
+              - cp_azure_nsg_deny.direction == 'Inbound'
+              - cp_azure_nsg_deny.sourcePrefix == '*'
+              - cp_azure_nsg_deny.sourcePrefixes | length == 0
+              - cp_azure_nsg_deny.sourcePortRange == '*'
+              - cp_azure_nsg_deny.sourcePortRanges | length == 0
+              - cp_azure_nsg_deny.destinationPrefix == '*'
+              - cp_azure_nsg_deny.destinationPrefixes | length == 0
+              - cp_azure_nsg_deny.destinationPortRange == '*'
+              - cp_azure_nsg_deny.destinationPortRanges | length == 0
+              - cp_azure_nsg_deny.provisioningState == 'Succeeded'
+            fail_msg: Azure does not deny every undeclared inbound flow after the approved rules.
+
+        - name: Read the public DNS A record without mutation
+          ansible.builtin.command:
+            argv:
+              - az
+              - network
+              - dns
+              - record-set
+              - a
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_dns_zone_resource_group }}"
+              - --zone-name
+              - "{{ cp_azure_dns_zone_name }}"
+              - --name
+              - "{{ cp_azure_dns_record_name }}"
+              - --query
+              - >-
+                {fqdn:fqdn,ttl:TTL,addresses:sort(ARecords[].ipv4Address),
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          register: cp_azure_dns_raw
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: Require the declared public DNS A record to exist
+          ansible.builtin.assert:
+            that:
+              - cp_azure_dns_raw.rc == 0
+              - cp_azure_dns_raw.stdout is defined
+              - cp_azure_dns_raw.stdout.startswith('{')
+            fail_msg: The declared controller DNS A record is absent or unreadable.
+
+        - name: Parse the sanitized public DNS A record
+          ansible.builtin.set_fact:
+            cp_azure_dns: "{{ cp_azure_dns_raw.stdout | from_json }}"
+
+        - name: Require DNS to resolve only to the exact static public IP
+          ansible.builtin.assert:
+            that:
+              - >-
+                cp_azure_dns.fqdn | lower ==
+                (cp_ingress_server_name | lower) ~ '.'
+              - cp_azure_dns.addresses | length == 1
+              - cp_azure_dns.addresses[0] == cp_azure_public_ip_state.ipAddress
+              - cp_azure_dns.addresses[0] == cp_azure_public_ip
+              - cp_azure_dns.ttl | int >= 60
+              - cp_azure_dns.ttl | int <= 3600
+              - cp_azure_dns.provisioningState == 'Succeeded'
+            fail_msg: The controller DNS A record does not bind only to the static public IP.
+
+        - name: Resolve the controller hostname through the runner resolver
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - -c
+              - >-
+                import json, socket, sys;
+                print(json.dumps(sorted({answer[4][0] for answer in
+                socket.getaddrinfo(sys.argv[1], None, family=socket.AF_INET,
+                type=socket.SOCK_STREAM)})))
+              - "{{ cp_ingress_server_name }}"
+          register: cp_azure_runner_dns_raw
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: Require successful public DNS resolution from the runner
+          ansible.builtin.assert:
+            that:
+              - cp_azure_runner_dns_raw.rc == 0
+              - cp_azure_runner_dns_raw.stdout is defined
+              - cp_azure_runner_dns_raw.stdout.startswith('[')
+            fail_msg: The runner cannot resolve the declared controller hostname.
+
+        - name: Parse the sanitized runner DNS result
+          ansible.builtin.set_fact:
+            cp_azure_runner_dns_addresses: >-
+              {{ cp_azure_runner_dns_raw.stdout | from_json }}
+
+        - name: Require public DNS to resolve solely to the static public IP
+          ansible.builtin.assert:
+            that:
+              - cp_azure_runner_dns_addresses == [cp_azure_public_ip]
+            fail_msg: >-
+              Public DNS resolution from the runner differs from the exact
+              static Azure public IP contract.
+
+        - name: Report sanitized Azure infrastructure qualification evidence
+          ansible.builtin.debug:
+            msg:
+              - azure_infrastructure=passed
+              - "azure_cli={{ cp_azure_cli_version }}"
+              - "subscription_id={{ cp_azure_account.id }}"
+              - "resource_group={{ cp_azure_resource_group_state.name }}"
+              - "location={{ cp_azure_vm.location }}"
+              - "vm={{ cp_azure_vm.name }}"
+              - "vm_size={{ cp_azure_vm.vmSize }}"
+              - security=TrustedLaunch,SecureBoot,vTPM
+              - >-
+                image={{ cp_azure_vm.imagePublisher }}:{{ cp_azure_vm.imageOffer }}:
+                {{ cp_azure_vm.imageSku }}:{{ cp_azure_vm.imageExactVersion }}
+              - >-
+                os_disk={{ cp_azure_disk.name }},{{ cp_azure_disk.diskSizeGiB }}GiB,
+                {{ cp_azure_disk.sku }}
+              - "public_ip={{ cp_azure_public_ip_state.ipAddress }},Static,Standard"
+              - resource_set=vm,disk,nic,nsg,public-ip,vnet
+              - >-
+                network=vnet-{{ cp_azure_vnet_address_prefix }},
+                subnet-{{ cp_azure_subnet_address_prefix }},
+                private-{{ cp_azure_private_ip }}
+              - nsg_custom_rules=ssh-approved-ip,http-public,https-public,deny-remainder
+              - "dns={{ cp_ingress_server_name }}->{{ cp_azure_dns.addresses[0] }}"
+              - "runner_dns={{ cp_ingress_server_name }}->{{ cp_azure_runner_dns_addresses[0] }}"

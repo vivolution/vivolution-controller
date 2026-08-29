@@ -1,0 +1,2 @@
+---
+cp_ssh_allowed_user: "{{ ansible_user }}"

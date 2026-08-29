@@ -1,0 +1,130 @@
+---
+- name: Validate the sole SSH administration identity
+  ansible.builtin.assert:
+    that:
+      - cp_ssh_allowed_user is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - cp_ssh_allowed_user == ansible_user
+    fail_msg: OpenSSH must be bound to the declared Ansible administration user.
+
+- name: Resolve the SSH administration account
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ cp_ssh_allowed_user }}"]
+  register: cp_ssh_passwd_entry
+  changed_when: false
+
+- name: Require a unique regular administration account
+  ansible.builtin.assert:
+    that:
+      - cp_ssh_passwd_entry.stdout_lines | length == 1
+      - cp_ssh_passwd_entry.stdout.split(':') | length == 7
+      - cp_ssh_passwd_entry.stdout.split(':')[5] is match('^/home/[a-z_][a-z0-9_-]{0,31}$')
+      - cp_ssh_passwd_entry.stdout.split(':')[6] in ['/bin/bash', '/bin/sh', '/bin/zsh']
+    fail_msg: The SSH administration account has an unsafe or unexpected passwd entry.
+
+- name: Remember the SSH administration account metadata
+  ansible.builtin.set_fact:
+    cp_ssh_allowed_uid: "{{ cp_ssh_passwd_entry.stdout.split(':')[2] | int }}"
+    cp_ssh_allowed_gid: "{{ cp_ssh_passwd_entry.stdout.split(':')[3] | int }}"
+    cp_ssh_allowed_home: "{{ cp_ssh_passwd_entry.stdout.split(':')[5] }}"
+
+- name: Inspect the protected SSH directory
+  ansible.builtin.stat:
+    path: "{{ cp_ssh_allowed_home }}/.ssh"
+    follow: false
+  register: cp_ssh_directory
+
+- name: Inspect the authorized SSH key file
+  ansible.builtin.stat:
+    path: "{{ cp_ssh_allowed_home }}/.ssh/authorized_keys"
+    follow: false
+  register: cp_ssh_authorized_keys
+
+- name: Require protected SSH key ownership and modes
+  ansible.builtin.assert:
+    that:
+      - cp_ssh_directory.stat.exists
+      - cp_ssh_directory.stat.isdir | default(false)
+      - not (cp_ssh_directory.stat.islnk | default(false))
+      - cp_ssh_directory.stat.uid | int == cp_ssh_allowed_uid | int
+      - cp_ssh_directory.stat.gid | int == cp_ssh_allowed_gid | int
+      - cp_ssh_directory.stat.mode == '0700'
+      - cp_ssh_authorized_keys.stat.exists
+      - cp_ssh_authorized_keys.stat.isreg | default(false)
+      - not (cp_ssh_authorized_keys.stat.islnk | default(false))
+      - cp_ssh_authorized_keys.stat.uid | int == cp_ssh_allowed_uid | int
+      - cp_ssh_authorized_keys.stat.gid | int == cp_ssh_allowed_gid | int
+      - cp_ssh_authorized_keys.stat.mode == '0600'
+    fail_msg: The SSH administration key or its parent directory is not safely protected.
+
+- name: Inspect the authorized SSH key surface
+  ansible.builtin.command:
+    argv:
+      - awk
+      - >-
+        NF && $1 !~ /^#/ { count++; if ($1 != "ssh-ed25519") invalid=1 }
+        END { print count "|" (invalid + 0) }
+      - "{{ cp_ssh_allowed_home }}/.ssh/authorized_keys"
+  register: cp_ssh_authorized_key_surface
+  changed_when: false
+
+- name: Require one option-free Ed25519 administration key
+  ansible.builtin.assert:
+    that:
+      - cp_ssh_authorized_key_surface.stdout | trim == '1|0'
+    fail_msg: OpenSSH must expose exactly one option-free Ed25519 administration key.
+
+- name: Install the OpenSSH hardening policy
+  ansible.builtin.template:
+    src: 10-vivolution-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/10-vivolution-hardening.conf
+    owner: root
+    group: root
+    mode: '0644'
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Reload OpenSSH
+
+- name: Validate the complete OpenSSH configuration
+  ansible.builtin.command:
+    argv: [/usr/sbin/sshd, -t]
+  changed_when: false
+
+- name: Inspect the effective OpenSSH administration policy
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/sshd
+      - -T
+      - -C
+      - "user={{ cp_ssh_allowed_user }},host={{ cp_expected_hostname }},addr=127.0.0.1"
+  register: cp_ssh_effective_policy
+  changed_when: false
+
+- name: Require the effective key-only OpenSSH policy
+  ansible.builtin.assert:
+    that:
+      - "'permitrootlogin no' in cp_ssh_effective_policy.stdout_lines"
+      - "'passwordauthentication no' in cp_ssh_effective_policy.stdout_lines"
+      - "'kbdinteractiveauthentication no' in cp_ssh_effective_policy.stdout_lines"
+      - "'pubkeyauthentication yes' in cp_ssh_effective_policy.stdout_lines"
+      - "'authenticationmethods publickey' in cp_ssh_effective_policy.stdout_lines"
+      - "'permitemptypasswords no' in cp_ssh_effective_policy.stdout_lines"
+      - "'permituserenvironment no' in cp_ssh_effective_policy.stdout_lines"
+      - "'x11forwarding no' in cp_ssh_effective_policy.stdout_lines"
+      - "'allowagentforwarding no' in cp_ssh_effective_policy.stdout_lines"
+      - "'allowtcpforwarding no' in cp_ssh_effective_policy.stdout_lines"
+      - "'gatewayports no' in cp_ssh_effective_policy.stdout_lines"
+      - "'permittunnel no' in cp_ssh_effective_policy.stdout_lines"
+      - "'maxauthtries 3' in cp_ssh_effective_policy.stdout_lines"
+      - >-
+        (cp_profile not in ['azure', 'azure-single']) or
+        ((cp_ssh_effective_policy.stdout_lines |
+          select('match', '^allowusers ') | list) ==
+         ['allowusers ' ~ cp_ssh_allowed_user])
+    fail_msg: The effective OpenSSH daemon policy is not the declared key-only contract.
+
+- name: Apply the validated OpenSSH policy
+  ansible.builtin.meta: flush_handlers
+
+- name: Require OpenSSH to remain active after hardening
+  ansible.builtin.command:
+    argv: [systemctl, is-active, ssh.service]
+  changed_when: false

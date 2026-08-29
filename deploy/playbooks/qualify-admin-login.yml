@@ -5,10 +5,19 @@
   gather_facts: false
   vars:
     cp_admin_host_helper_source: "{{ playbook_dir }}/../tests/admin-host-session-check.py"
-    cp_admin_guest_ca_path: /usr/local/share/ca-certificates/vivolution-lab-caddy.crt
-    cp_admin_host_ca_path: >-
-      {{ cp_ingress_ca_export_path |
-         default(playbook_dir + '/../../lab/utm/generated/caddy-root.crt') }}
+    cp_admin_guest_ca_path: >-
+      {{ cp_ingress_guest_ca_path |
+         default('/usr/local/share/ca-certificates/vivolution-lab-caddy.crt') }}
+    cp_admin_runner_ca_path: >-
+      {{ cp_ingress_runner_ca_path |
+         default(cp_ingress_ca_export_path |
+         default(playbook_dir + '/../../lab/utm/generated/caddy-root.crt')) }}
+    cp_admin_guest_connect_address: >-
+      {{ cp_ingress_guest_connect_address | default('127.0.0.1') }}
+    cp_admin_external_connect_address: >-
+      {{ cp_ingress_external_connect_address | default('127.0.0.1') }}
+    cp_admin_runner_https_port: >-
+      {{ cp_resource_host_https_port | default(cp_ingress_https_port) }}
   tasks:
     - name: Validate administrator login qualification variables
       ansible.builtin.assert:
@@ -22,16 +31,36 @@
           - cp_ingress_https_port is defined
           - cp_ingress_https_port | int >= 1
           - cp_ingress_https_port | int <= 65535
+          - cp_ingress_local_tls is defined
+          - cp_admin_guest_ca_path is string
+          - cp_admin_guest_ca_path is match('^/.+')
+          - cp_admin_runner_ca_path is string
+          - cp_admin_runner_ca_path is match('^/.+')
+          - cp_admin_guest_connect_address is string
+          - cp_admin_guest_connect_address is match('^[0-9A-Fa-f:.]{2,45}$')
+          - cp_admin_external_connect_address is string
+          - cp_admin_external_connect_address is match('^[0-9A-Fa-f:.]{2,45}$')
+          - cp_admin_runner_https_port | int >= 1
+          - cp_admin_runner_https_port | int <= 65535
+          - >-
+            (cp_ingress_local_tls | bool) or
+            (cp_ingress_guest_ca_path is defined and
+             cp_ingress_runner_ca_path is defined and
+             cp_ingress_guest_connect_address is defined and
+             cp_ingress_external_connect_address is defined)
+          - >-
+            (cp_ingress_local_tls | bool) or
+            cp_admin_external_connect_address != cp_admin_guest_connect_address
         fail_msg: Administrator credentials and the trusted HTTPS endpoint are required.
       no_log: true
 
-    - name: Inspect the guest Caddy trust anchor
+    - name: Inspect the guest HTTPS trust anchor
       ansible.builtin.stat:
         path: "{{ cp_admin_guest_ca_path }}"
         follow: false
       register: cp_admin_guest_ca
 
-    - name: Require a regular guest Caddy trust anchor
+    - name: Require a regular guest HTTPS trust anchor
       ansible.builtin.assert:
         that:
           - cp_admin_guest_ca.stat.exists
@@ -40,7 +69,7 @@
           - cp_admin_guest_ca.stat.uid | int == 0
           - cp_admin_guest_ca.stat.gid | int == 0
           - cp_admin_guest_ca.stat.mode == '0644'
-        fail_msg: The trusted guest Caddy CA is unavailable or unsafe.
+        fail_msg: The trusted guest HTTPS CA is unavailable or unsafe.
 
     - name: Create protected guest administrator acceptance workspace
       ansible.builtin.tempfile:
@@ -68,6 +97,7 @@
             stdin: >-
               {{ {
                 'server_name': cp_ingress_server_name,
+                'connect_address': cp_admin_guest_connect_address,
                 'port': cp_ingress_https_port | int,
                 'ca_path': cp_admin_guest_ca_path,
                 'username': cp_controller_admin_username,
@@ -121,34 +151,39 @@
           - cp_admin_guest_session_passed | default(false) | bool
         fail_msg: The guest administrator acceptance did not complete.
 
-    - name: Exercise the administrator session through the UTM loopback forward
-      when: cp_profile == 'lab'
+    - name: Exercise the administrator session from the Ansible controller
       run_once: true
       block:
-        - name: Validate host-forwarded administrator qualification variables
+        - name: Validate runner administrator qualification variables
           ansible.builtin.assert:
             that:
-              - ansible_host == '127.0.0.1'
-              - cp_resource_host_https_port is defined
-              - cp_resource_host_https_port | int >= 1
-              - cp_resource_host_https_port | int <= 65535
-              - cp_admin_host_ca_path is string
-              - cp_admin_host_ca_path | length > 0
-            fail_msg: The local Lab requires a loopback HTTPS forward and exported Caddy CA.
+              - >-
+                (not (cp_ingress_local_tls | bool)) or ansible_host == '127.0.0.1'
+              - >-
+                (not (cp_ingress_local_tls | bool)) or
+                cp_admin_external_connect_address == '127.0.0.1'
+              - cp_admin_runner_https_port | int >= 1
+              - cp_admin_runner_https_port | int <= 65535
+              - >-
+                (cp_ingress_local_tls | bool) or
+                cp_admin_runner_https_port | int == cp_ingress_https_port | int
+              - cp_admin_runner_ca_path is string
+              - cp_admin_runner_ca_path | length > 0
+            fail_msg: The runner HTTPS address, port, or trust anchor is invalid.
 
-        - name: Inspect exported Caddy CA on the Ansible controller
+        - name: Inspect HTTPS trust anchor on the Ansible controller
           ansible.builtin.stat:
-            path: "{{ cp_admin_host_ca_path }}"
+            path: "{{ cp_admin_runner_ca_path }}"
           delegate_to: localhost
           become: false
-          register: cp_admin_host_ca
+          register: cp_admin_runner_ca
 
-        - name: Require a regular exported Caddy CA
+        - name: Require a regular runner HTTPS trust anchor
           ansible.builtin.assert:
             that:
-              - cp_admin_host_ca.stat.exists
-              - cp_admin_host_ca.stat.isreg | default(false)
-            fail_msg: The exported Caddy CA is unavailable on the Ansible controller.
+              - cp_admin_runner_ca.stat.exists
+              - cp_admin_runner_ca.stat.isreg | default(false)
+            fail_msg: The HTTPS CA is unavailable on the Ansible controller.
 
         - name: Create protected host administrator acceptance workspace
           ansible.builtin.tempfile:
@@ -159,7 +194,7 @@
           register: cp_admin_host_workspace
           no_log: true
 
-        - name: Run protected host-forwarded administrator acceptance
+        - name: Run protected runner administrator acceptance
           block:
             - name: Install ephemeral host administrator acceptance helper
               ansible.builtin.copy:
@@ -169,7 +204,7 @@
               delegate_to: localhost
               become: false
 
-            - name: Authenticate through loopback with hostname-verified TLS
+            - name: Authenticate through the pinned address with hostname-verified TLS
               ansible.builtin.command:
                 argv:
                   - python3
@@ -177,8 +212,9 @@
                 stdin: >-
                   {{ {
                     'server_name': cp_ingress_server_name,
-                    'port': cp_resource_host_https_port | int,
-                    'ca_path': cp_admin_host_ca_path,
+                    'connect_address': cp_admin_external_connect_address,
+                    'port': cp_admin_runner_https_port | int,
+                    'ca_path': cp_admin_runner_ca_path,
                     'username': cp_controller_admin_username,
                     'password': cp_controller_admin_password
                   } | to_json }}
@@ -232,11 +268,14 @@
           ansible.builtin.assert:
             that:
               - cp_admin_host_session_passed | default(false) | bool
-            fail_msg: The host-forwarded administrator acceptance did not complete.
+            fail_msg: The runner administrator acceptance did not complete.
 
-        - name: Report sanitized host administrator qualification result
+        - name: Report sanitized runner administrator qualification result
           ansible.builtin.debug:
-            msg: host_forwarded_admin_login=passed
+            msg: >-
+              {{ 'host_forwarded_admin_login=passed'
+                 if cp_ingress_local_tls | bool
+                 else 'public_static_address_admin_login=passed' }}
 
     - name: Report administrator login qualification result
       ansible.builtin.debug:

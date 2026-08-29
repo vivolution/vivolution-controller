@@ -15,6 +15,7 @@ cp_firewall_tcp_ports:
   - 22
   - 80
   - 443
+cp_firewall_dhcp_server_ipv4: 168.63.129.16
 
 cp_min_vcpus: 2
 cp_min_memory_mb: 2500
@@ -32,6 +33,7 @@ cp_controller_csrf_origins: https://controller.voice.vivolution.ae
 cp_controller_cookie_secure: true
 cp_controller_trust_forwarded_proto: true
 cp_controller_ssl_redirect: true
+cp_controller_hsts_seconds: 3600
 cp_controller_web_port: 8000
 cp_controller_web_workers: 2
 cp_controller_memory_max: 1G
@@ -42,3 +44,8 @@ cp_controller_base_image: docker.io/library/python@sha256:7e3a6aca9d74f93cca21a9
 cp_ingress_server_name: controller.voice.vivolution.ae
 cp_ingress_https_port: 443
 cp_ingress_local_tls: false
+cp_ingress_loopback_resolution: true
+cp_ingress_guest_ca_path: /etc/ssl/certs/ca-certificates.crt
+cp_ingress_runner_ca_path: /etc/ssl/cert.pem
+cp_ingress_guest_connect_address: 127.0.0.1
+cp_ingress_external_connect_address: controller.voice.vivolution.ae

@@ -6,19 +6,37 @@
   vars:
     cp_resource_service: vivolution-cp-web.service
     cp_resource_ca_path: >-
-      {{ cp_ingress_ca_export_path |
-         default(playbook_dir + '/../../lab/utm/generated/caddy-root.crt') }}
+      {{ cp_ingress_runner_ca_path |
+         default(cp_ingress_ca_export_path |
+         default(playbook_dir + '/../../lab/utm/generated/caddy-root.crt')) }}
+    cp_resource_connect_address: >-
+      {{ cp_ingress_external_connect_address | default('127.0.0.1') }}
   tasks:
-    - name: Require the disposable local-lab profile
+    - name: Require an explicitly authorized bounded endurance profile
       ansible.builtin.assert:
         that:
-          - cp_profile == 'lab'
-          - ansible_host == '127.0.0.1'
-          - cp_ingress_server_name == 'vivo-cp1-lab'
-          - cp_ingress_https_port | int == 8080
+          - cp_qualification_allow_resource_endurance | default(false) | bool
+          - cp_ingress_local_tls is defined
+          - >-
+            cp_profile != 'lab' or
+            (ansible_host == '127.0.0.1' and
+             cp_ingress_server_name == 'vivo-cp1-lab' and
+             cp_ingress_https_port | int == 8080)
+          - >-
+            cp_profile == 'lab' or
+            (not (cp_ingress_local_tls | bool) and
+             cp_ingress_runner_ca_path is defined and
+             cp_ingress_guest_connect_address is defined and
+             cp_ingress_external_connect_address is defined and
+             cp_ingress_external_connect_address != cp_ingress_guest_connect_address)
+          - cp_resource_connect_address is string
+          - cp_resource_connect_address is match('^[0-9A-Fa-f:.]{2,45}$')
           - cp_resource_host_https_port | int >= 1
           - cp_resource_host_https_port | int <= 65535
-        fail_msg: Resource qualification is intentionally limited to the host-forwarded local lab.
+          - >-
+            cp_profile == 'lab' or
+            cp_resource_host_https_port | int == cp_ingress_https_port | int
+        fail_msg: Resource qualification was not explicitly authorized for this bounded HTTPS path.
 
     - name: Require bounded qualification inputs
       ansible.builtin.assert:
@@ -37,19 +55,41 @@
             ((cp_controller_cpu_quota | regex_replace('%$', '') | int) * 1000)
         fail_msg: Resource qualification inputs exceed or weaken their safe operating bounds.
 
-    - name: Verify the local Caddy root certificate exists
+    - name: Validate and normalize the runner HTTPS connect address
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |-
+            import ipaddress
+            import sys
+
+            try:
+                address = ipaddress.ip_address(sys.argv[1])
+            except ValueError:
+                raise SystemExit(1) from None
+            if address.is_unspecified or address.is_multicast:
+                raise SystemExit(1)
+            print(f"[{address.compressed}]" if address.version == 6 else address.compressed)
+          - "{{ cp_resource_connect_address }}"
+      delegate_to: localhost
+      become: false
+      register: cp_resource_curl_connect_address
+      changed_when: false
+
+    - name: Verify the runner HTTPS trust anchor exists
       ansible.builtin.stat:
         path: "{{ cp_resource_ca_path }}"
       delegate_to: localhost
       become: false
       register: cp_resource_ca
 
-    - name: Require a regular local CA certificate
+    - name: Require a regular runner CA certificate
       ansible.builtin.assert:
         that:
           - cp_resource_ca.stat.exists
           - cp_resource_ca.stat.isreg | default(false)
-        fail_msg: Export the trusted local Caddy root before running resource qualification.
+        fail_msg: A trusted runner CA is required before resource qualification.
 
     - name: Capture idle resource baseline
       ansible.builtin.shell:
@@ -90,13 +130,14 @@
       register: cp_resource_sampler_job
       changed_when: false
 
-    - name: Exercise trusted host-forwarded HTTPS at controlled concurrency
+    - name: Exercise trusted pinned-address HTTPS at controlled concurrency
       ansible.builtin.command:
         argv:
           - /bin/sh
           - "{{ playbook_dir }}/../tests/https-soak.sh"
           - "{{ cp_resource_ca_path }}"
           - "{{ cp_ingress_server_name }}"
+          - "{{ cp_resource_connect_address }}"
           - "{{ cp_resource_host_https_port | string }}"
           - "{{ cp_resource_soak_seconds | string }}"
           - "{{ cp_resource_https_concurrency | string }}"
@@ -176,7 +217,7 @@
           - --cacert
           - "{{ cp_resource_ca_path }}"
           - --resolve
-          - "{{ cp_ingress_server_name }}:{{ cp_resource_host_https_port }}:127.0.0.1"
+          - "{{ cp_ingress_server_name }}:{{ cp_resource_host_https_port }}:{{ cp_resource_curl_connect_address.stdout }}"
           - --connect-timeout
           - '2'
           - --max-time
@@ -206,6 +247,7 @@
           - "https_elapsed_seconds={{ cp_resource_https.elapsed_seconds }}"
           - "https_concurrency={{ cp_resource_https.concurrency }}"
           - "host_https_port={{ cp_resource_host_https_port }}"
+          - "https_connect_address={{ cp_resource_connect_address }}"
           - "https_successes={{ cp_resource_https.successful_requests }}"
           - "https_failures={{ cp_resource_https.failed_requests }}"
           - "https_max_latency_seconds={{ cp_resource_https.maximum_latency_seconds }}"

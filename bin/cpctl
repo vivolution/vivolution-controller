@@ -4,7 +4,11 @@ set -eu
 ROOT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 DEPLOY_DIR="$ROOT_DIR/deploy"
 STATE_DIR="$DEPLOY_DIR/.state"
-LAB_SECRETS="$STATE_DIR/lab-secrets.yml"
+CP_SECRETS="${VIVO_CP_SECRETS:-$STATE_DIR/lab-secrets.yml}"
+case "$CP_SECRETS" in
+    /*) ;;
+    *) CP_SECRETS="$ROOT_DIR/$CP_SECRETS" ;;
+esac
 LAB_INVENTORY="${VIVO_CP_INVENTORY:-$DEPLOY_DIR/inventories/lab/hosts.yml}"
 CONTROLLER_TEST_VENV="$STATE_DIR/controller-test-venv"
 EVIDENCE_SIGNING_KEY="$STATE_DIR/evidence-signing-key"
@@ -151,13 +155,13 @@ usage() {
         'Usage: bin/cpctl <command>' \
         '' \
         'Commands:' \
-        '  init       Generate protected, local-only lab credentials' \
+        '  init       Generate protected, profile-specific credentials' \
         '  trust-init Enroll a local evidence signing identity' \
         '  verify-evidence <dir>  Verify a sealed evidence directory' \
         '  preflight  Run all local static, migration, and test gates' \
         '  release-id Print the deterministic controller release identifier' \
         '  syntax     Parse and syntax-check every Ansible playbook' \
-        '  install    Install or reconcile the local CP1 lab' \
+        '  install    Install or reconcile the selected CP1 controller' \
         '  upgrade    Build and activate the current controller source release' \
         '  rollback   Activate the previously deployed controller release' \
         '  failure-test  Prove a failed release restores the known-good image' \
@@ -274,21 +278,38 @@ validate_lab_secret_contents() {
     ' "$1"
 }
 
+require_secrets_target() {
+    [ "$(dirname -- "$CP_SECRETS")" = "$STATE_DIR" ] || {
+        printf 'Controller secrets must be stored directly under deploy/.state.\n' >&2
+        return 1
+    }
+    secrets_basename="$(basename -- "$CP_SECRETS")"
+    printf '%s\n' "$secrets_basename" |
+        grep -Eq '^[a-z0-9][a-z0-9-]*-secrets\.yml$' || {
+            printf 'Controller secrets require a safe profile-specific filename.\n' >&2
+            return 1
+        }
+}
+
 validate_lab_secrets() {
-    require_owned_regular_file "$LAB_SECRETS" 600 || return 1
-    validate_lab_secret_contents "$LAB_SECRETS" || {
-        printf 'Lab secrets do not match the exact protected CP1 schema.\n' >&2
+    require_secrets_target || return 1
+    require_owned_regular_file "$CP_SECRETS" 600 || return 1
+    validate_lab_secret_contents "$CP_SECRETS" || {
+        printf 'Secrets do not match the exact protected CP1 schema.\n' >&2
         return 1
     }
 }
 
 init_secrets() (
     require_command openssl
+    require_inventory
+    require_profile_secrets
     umask 077
     ensure_private_directory "$STATE_DIR"
-    if [ -e "$LAB_SECRETS" ]; then
+    require_secrets_target
+    if [ -e "$CP_SECRETS" ]; then
         validate_lab_secrets
-        printf 'Protected lab secrets already exist: %s\n' "$LAB_SECRETS"
+        printf 'Protected profile secrets already exist: %s\n' "$CP_SECRETS"
         exit 0
     fi
 
@@ -297,7 +318,7 @@ init_secrets() (
     rls_context_key="$(openssl rand -hex 32)"
     django_key="$(openssl rand -base64 48 | tr -d '\n')"
     admin_password="$(openssl rand -hex 24)"
-    temp_file="$(mktemp "$STATE_DIR/lab-secrets.XXXXXX")"
+    temp_file="$(mktemp "$STATE_DIR/cp-secrets.XXXXXX")"
     trap 'rm -f "$temp_file"' EXIT HUP INT TERM
     {
         printf '%s\n' '---'
@@ -309,15 +330,15 @@ init_secrets() (
     } > "$temp_file"
     chmod 0600 "$temp_file"
     validate_lab_secret_contents "$temp_file"
-    mv -n "$temp_file" "$LAB_SECRETS"
+    mv -n "$temp_file" "$CP_SECRETS"
     [ ! -e "$temp_file" ] || {
-        printf 'Lab secrets appeared concurrently and were not overwritten.\n' >&2
+        printf 'Profile secrets appeared concurrently and were not overwritten.\n' >&2
         exit 1
     }
     validate_lab_secrets
     trap - EXIT HUP INT TERM
     unset owner_password runtime_password rls_context_key django_key admin_password
-    printf 'Created protected lab secrets: %s\n' "$LAB_SECRETS"
+    printf 'Created protected profile secrets: %s\n' "$CP_SECRETS"
 )
 
 init_evidence_trust() (
@@ -542,6 +563,26 @@ ensure_secrets() {
     "$ROOT_DIR/bin/cpctl" init >/dev/null || return 1
 }
 
+require_profile_secrets() {
+    require_secrets_target || return 1
+    selected_profile="$(selected_inventory_profile)" || return 1
+    case "$selected_profile" in
+        lab) expected_secrets="$STATE_DIR/lab-secrets.yml" ;;
+        azure) expected_secrets="$STATE_DIR/azure-secrets.yml" ;;
+        azure-single) expected_secrets="$STATE_DIR/azure-single-secrets.yml" ;;
+        *)
+            printf 'Unsupported controller credential profile: %s\n' \
+                "$selected_profile" >&2
+            return 1
+            ;;
+    esac
+    [ "$CP_SECRETS" = "$expected_secrets" ] || {
+        printf 'The %s profile requires its dedicated deploy/.state/%s credentials.\n' \
+            "$selected_profile" "$(basename -- "$expected_secrets")" >&2
+        return 1
+    }
+}
+
 run_ansible_clean() {
     [ -n "${HOME:-}" ] || {
         printf 'A user home directory is required for the pinned SSH identity.\n' >&2
@@ -557,11 +598,12 @@ run_ansible_clean() {
 playbook() {
     require_command ansible-playbook || return 1
     require_inventory || return 1
+    require_profile_secrets || return 1
     ensure_secrets || return 1
     release_id="$("$ROOT_DIR/bin/cpctl" release-id)" || return 1
     run_ansible_clean ansible-playbook \
         --inventory "$LAB_INVENTORY" \
-        --extra-vars "@$LAB_SECRETS" \
+        --extra-vars "@$CP_SECRETS" \
         --extra-vars "cp_controller_release_id=$release_id" \
         "$@" || return 1
 }
@@ -569,20 +611,22 @@ playbook() {
 rollback_playbook() {
     require_command ansible-playbook || return 1
     require_inventory || return 1
+    require_profile_secrets || return 1
     ensure_secrets || return 1
     run_ansible_clean ansible-playbook \
         --inventory "$LAB_INVENTORY" \
-        --extra-vars "@$LAB_SECRETS" \
+        --extra-vars "@$CP_SECRETS" \
         "$DEPLOY_DIR/playbooks/rollback.yml" || return 1
 }
 
 protected_playbook() {
     require_command ansible-playbook || return 1
     require_inventory || return 1
+    require_profile_secrets || return 1
     ensure_secrets || return 1
     run_ansible_clean ansible-playbook \
         --inventory "$LAB_INVENTORY" \
-        --extra-vars "@$LAB_SECRETS" \
+        --extra-vars "@$CP_SECRETS" \
         "$@" || return 1
 }
 
@@ -614,6 +658,51 @@ normalized_inventory() {
     require_command ansible-inventory
     require_inventory
     run_ansible_clean ansible-inventory --inventory "$LAB_INVENTORY" --list
+}
+
+inventory_profile_from_snapshot() {
+    profile_snapshot="$1"
+    profile_python="$(select_controller_python)"
+    "$profile_python" - "$profile_snapshot" <<'PY'
+import json
+import re
+import sys
+
+inventory = json.load(open(sys.argv[1], encoding="utf-8"))
+
+
+def resolve(group_name, seen):
+    if group_name in seen:
+        return set()
+    seen.add(group_name)
+    group = inventory.get(group_name, {})
+    hosts = set(group.get("hosts", []))
+    for child in group.get("children", []):
+        hosts.update(resolve(child, seen))
+    return hosts
+
+
+hosts = sorted(resolve("controllers", set()))
+if len(hosts) != 1:
+    raise SystemExit("profile identity requires exactly one controller")
+profile = inventory.get("_meta", {}).get("hostvars", {}).get(hosts[0], {}).get("cp_profile")
+if not isinstance(profile, str) or not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", profile):
+    raise SystemExit("invalid controller profile identity")
+print(profile)
+PY
+}
+
+selected_inventory_profile() {
+    profile_inventory_snapshot="$(mktemp)" || return 1
+    if ! normalized_inventory > "$profile_inventory_snapshot"; then
+        rm -f "$profile_inventory_snapshot"
+        return 1
+    fi
+    if ! inventory_profile_from_snapshot "$profile_inventory_snapshot"; then
+        rm -f "$profile_inventory_snapshot"
+        return 1
+    fi
+    rm -f "$profile_inventory_snapshot"
 }
 
 require_single_controller_inventory() {
@@ -727,9 +816,14 @@ known_hosts_input = pathlib.Path(known_hosts_value)
 if not known_hosts_input.is_absolute():
     raise SystemExit("controller SSH known-hosts path must be absolute")
 known_hosts_path = known_hosts_input.resolve(strict=True)
-generated_dir = (project_root / "lab" / "utm" / "generated").resolve(strict=True)
-if known_hosts_path.parent != generated_dir:
-    raise SystemExit("controller SSH known-hosts path is outside the guarded generated directory")
+allowed_generated_dirs = {
+    (project_root / "lab" / "utm" / "generated").resolve(strict=True),
+}
+inventory_generated_dir = inventory_dir / "generated"
+if inventory_generated_dir.is_dir() and not inventory_generated_dir.is_symlink():
+    allowed_generated_dirs.add(inventory_generated_dir.resolve(strict=True))
+if known_hosts_path.parent not in allowed_generated_dirs:
+    raise SystemExit("controller SSH known-hosts path is outside an approved generated directory")
 
 relative_known_hosts = known_hosts_path.relative_to(project_root)
 output_file.write_text(
@@ -747,11 +841,21 @@ PY
         printf 'Controller SSH host-key path was not resolved.\n' >&2
         return 1
     }
+    known_hosts_directory="$(dirname -- "$known_hosts_absolute")"
+    known_hosts_directory_metadata="$(stat -f '%u:%Lp' "$known_hosts_directory")"
+    [ "$known_hosts_directory_metadata" = "$(id -u):700" ] || {
+        printf 'Controller known-hosts directory must be owned by the operator with mode 0700.\n' >&2
+        return 1
+    }
     require_owned_regular_file "$known_hosts_absolute" 600
 
     host_identity_host="$(sed -n 's/^ansible_host=//p' "$host_identity_output")"
     host_identity_port="$(sed -n 's/^ansible_port=//p' "$host_identity_output")"
-    expected_known_host="[$host_identity_host]:$host_identity_port"
+    if [ "$host_identity_port" -eq 22 ]; then
+        expected_known_host="$host_identity_host"
+    else
+        expected_known_host="[$host_identity_host]:$host_identity_port"
+    fi
     awk -v expected_host="$expected_known_host" '
         /^[[:space:]]*($|#)/ { next }
         {
@@ -993,6 +1097,7 @@ PY
 begin_evidence() {
     require_clean_project
     require_inventory
+    require_profile_secrets
     require_single_controller_inventory
     require_command openssl
     require_command ssh-keygen
@@ -1004,6 +1109,7 @@ begin_evidence() {
     }
     require_owned_regular_file "$EVIDENCE_SIGNING_KEY" 600
     CP_EVIDENCE_SIGNER_FINGERPRINT="$(validated_local_evidence_signer_fingerprint)"
+    ensure_secrets
     CP_SOURCE_COMMIT="$(source_commit)"
     CP_PROJECT_SOURCE_SHA256="$(project_source_digest)"
     CP_CONTROLLER_RELEASE="$(controller_release_id)"
@@ -1014,6 +1120,8 @@ begin_evidence() {
     mkdir "$evidence_dir"
     chmod 0700 "$evidence_dir"
     normalized_inventory > "$evidence_dir/INVENTORY.json"
+    CP_PROFILE="$(inventory_profile_from_snapshot "$evidence_dir/INVENTORY.json")"
+    export CP_PROFILE
     write_host_identity_snapshot \
         "$evidence_dir/INVENTORY.json" "$evidence_dir/HOST-IDENTITY"
     CP_INVENTORY_SHA256="$(hash_file "$evidence_dir/INVENTORY.json")"
@@ -1022,6 +1130,7 @@ begin_evidence() {
         printf 'run_id=%s\n' "$CP_EVIDENCE_RUN_ID"
         printf 'started_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         printf 'inventory=%s\n' "$inventory_relative"
+        printf 'profile=%s\n' "$CP_PROFILE"
         printf 'inventory_sha256=%s\n' "$CP_INVENTORY_SHA256"
         printf 'source_commit=%s\n' "$CP_SOURCE_COMMIT"
         printf 'project_source_sha256=%s\n' "$CP_PROJECT_SOURCE_SHA256"
@@ -1848,6 +1957,7 @@ seal_failed_qualification() {
             printf 'source_commit=%s\n' "${CP_SOURCE_COMMIT:-unknown}"
             printf 'project_source_sha256=%s\n' "${CP_PROJECT_SOURCE_SHA256:-unknown}"
             printf 'controller_release=%s\n' "${CP_CONTROLLER_RELEASE:-unknown}"
+            printf 'profile=%s\n' "${CP_PROFILE:-unknown}"
             printf 'rollback_recovery=%s\n' \
                 "${rollback_qualification_recovery_outcome:-not-required}"
         } > "$evidence_dir/RESULT"
@@ -1917,7 +2027,7 @@ case "$command_name" in
         ;;
     preflight)
         static_checks
-        printf 'CP1 local preflight passed.\n'
+        printf 'CP1 deployment preflight passed.\n'
         ;;
     release-id)
         controller_release_id
@@ -1977,6 +2087,7 @@ case "$command_name" in
             printf 'source_commit=%s\n' "$CP_SOURCE_COMMIT"
             printf 'project_source_sha256=%s\n' "$CP_PROJECT_SOURCE_SHA256"
             printf 'controller_release=%s\n' "$CP_CONTROLLER_RELEASE"
+            printf 'profile=%s\n' "$CP_PROFILE"
             printf 'qualification=rls-compatibility-bridge\n'
             printf 'security_release_gate=transitional-not-passed\n'
         } > "$evidence_dir/RESULT"
@@ -2114,6 +2225,7 @@ case "$command_name" in
             printf 'source_commit=%s\n' "$CP_SOURCE_COMMIT"
             printf 'project_source_sha256=%s\n' "$CP_PROJECT_SOURCE_SHA256"
             printf 'controller_release=%s\n' "$CP_CONTROLLER_RELEASE"
+            printf 'profile=%s\n' "$CP_PROFILE"
             printf 'n1_release=%s\n' "$rollback_previous_release"
             printf 'signed_only_rls=passed\n'
             printf 'final_n1_final_rollback_cycle=passed\n'
@@ -2140,6 +2252,7 @@ case "$command_name" in
         {
             printf 'result=passed\n'
             printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'profile=%s\n' "$CP_PROFILE"
             printf 'qualification=resource-endurance\n'
         } >"$evidence_dir/RESULT"
         finalize_evidence
@@ -2162,6 +2275,7 @@ case "$command_name" in
         {
             printf 'result=passed\n'
             printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'profile=%s\n' "$CP_PROFILE"
             printf 'qualification=secret-non-exposure-and-component-inventory\n'
             printf 'vulnerability_scan=separate-required-gate\n'
         } >"$evidence_dir/RESULT"
@@ -2185,6 +2299,7 @@ case "$command_name" in
         {
             printf 'result=passed\n'
             printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'profile=%s\n' "$CP_PROFILE"
             printf 'qualification=trivy-fixable-high-critical-package-scan\n'
             printf 'scope=dependency-and-os-package-findings\n'
             printf 'trivy_fixable_high_critical=none\n'
@@ -2209,6 +2324,10 @@ case "$command_name" in
         first_log="$evidence_dir/install-first.log"
         second_log="$evidence_dir/install-second.log"
         run_logged "$evidence_dir/static-preflight.log" "$ROOT_DIR/bin/cpctl" preflight
+        if [ "$CP_PROFILE" = azure-single ]; then
+            run_logged "$evidence_dir/azure-infrastructure-before.log" plain_playbook \
+                "$DEPLOY_DIR/playbooks/qualify-azure-infrastructure.yml"
+        fi
         run_logged "$first_log" playbook "$DEPLOY_DIR/playbooks/install.yml"
         require_successful_install_recap "$first_log" false
         run_logged "$evidence_dir/state-before-second.log" protected_playbook \
@@ -2246,6 +2365,10 @@ case "$command_name" in
         run_logged "$evidence_dir/final-active-release.log" protected_playbook \
             --extra-vars "cp_expected_active_release=$CP_CONTROLLER_RELEASE" \
             "$DEPLOY_DIR/playbooks/qualify-active-release.yml"
+        if [ "$CP_PROFILE" = azure-single ]; then
+            run_logged "$evidence_dir/azure-infrastructure-after.log" plain_playbook \
+                "$DEPLOY_DIR/playbooks/qualify-azure-infrastructure.yml"
+        fi
         verify_source_snapshot
         load_vulnerability_coverage_summary
         {
@@ -2255,9 +2378,13 @@ case "$command_name" in
             printf 'source_commit=%s\n' "$CP_SOURCE_COMMIT"
             printf 'project_source_sha256=%s\n' "$CP_PROJECT_SOURCE_SHA256"
             printf 'controller_release=%s\n' "$CP_CONTROLLER_RELEASE"
+            printf 'profile=%s\n' "$CP_PROFILE"
             printf 'bounded_state_idempotency=passed\n'
             printf 'signed_only_rls=passed\n'
             printf 'runtime_least_privilege=passed\n'
+            if [ "$CP_PROFILE" = azure-single ]; then
+                printf 'azure_infrastructure=passed\n'
+            fi
             printf 'n1_rollback_cycle=pending-separate-required-gate\n'
             printf 'admin_https_login=passed\n'
             printf 'trivy_package_fixable_high_critical=none\n'
@@ -2271,7 +2398,7 @@ case "$command_name" in
         finalize_evidence
         disarm_qualification_traps
         printf '%s\n' \
-            "CP1 local suite passed with zero Trivy-fixable High/Critical package findings; recorded $vulnerability_without_fixed_high High and $vulnerability_without_fixed_critical Critical findings without a Trivy fixed version. The separate N-1 rollback gate remains required. Evidence: $evidence_dir"
+            "CP1 $CP_PROFILE suite passed with zero Trivy-fixable High/Critical package findings; recorded $vulnerability_without_fixed_high High and $vulnerability_without_fixed_critical Critical findings without a Trivy fixed version. The separate N-1 rollback gate remains required. Evidence: $evidence_dir"
         ;;
     -h|--help|help|'')
         usage

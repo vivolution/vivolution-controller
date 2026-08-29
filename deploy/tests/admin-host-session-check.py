@@ -1,4 +1,4 @@
-"""Exercise the CP1 administrator session through a loopback-forwarded TLS socket.
+"""Exercise the CP1 administrator session through an explicitly selected TLS socket.
 
 All configuration and credentials arrive as JSON on stdin. Output is restricted to
 controlled status/reason values so passwords, CSRF tokens, and session cookies never
@@ -8,6 +8,7 @@ appear in argv or qualification logs.
 from __future__ import annotations
 
 import http.client
+import ipaddress
 import json
 import re
 import socket
@@ -43,22 +44,24 @@ class CsrfTokenParser(HTMLParser):
             self.token = attributes["value"]
 
 
-class LoopbackHTTPSConnection(http.client.HTTPSConnection):
-    """Connect to loopback while preserving HTTP Host, SNI, and TLS verification."""
+class AddressHTTPSConnection(http.client.HTTPSConnection):
+    """Connect to one pinned address while preserving Host, SNI, and TLS verification."""
 
     def __init__(
         self,
         server_name: str,
+        connect_address: str,
         port: int,
         *,
         context: ssl.SSLContext,
         timeout: float,
     ) -> None:
         super().__init__(server_name, port, context=context, timeout=timeout)
+        self.connect_address = connect_address
 
     def connect(self) -> None:
         raw_socket = socket.create_connection(
-            ("127.0.0.1", self.port),
+            (self.connect_address, self.port),
             self.timeout,
             self.source_address,
         )
@@ -85,6 +88,7 @@ def controlled_configuration() -> dict[str, object]:
     password = configuration.get("password")
     port = configuration.get("port")
     ca_path_value = configuration.get("ca_path")
+    connect_address_value = configuration.get("connect_address")
     if not isinstance(server_name, str) or not HOSTNAME_RE.fullmatch(server_name):
         raise AcceptanceError("invalid_server_name")
     if not isinstance(username, str) or not 1 <= len(username) <= 150:
@@ -95,6 +99,14 @@ def controlled_configuration() -> dict[str, object]:
         raise AcceptanceError("invalid_port")
     if not isinstance(ca_path_value, str) or not ca_path_value.startswith("/"):
         raise AcceptanceError("invalid_ca_path")
+    if not isinstance(connect_address_value, str):
+        raise AcceptanceError("invalid_connect_address")
+    try:
+        connect_address = ipaddress.ip_address(connect_address_value)
+    except ValueError:
+        raise AcceptanceError("invalid_connect_address") from None
+    if connect_address.is_unspecified or connect_address.is_multicast:
+        raise AcceptanceError("invalid_connect_address")
     try:
         ca_path = Path(ca_path_value).resolve(strict=True)
     except (OSError, RuntimeError):
@@ -108,12 +120,21 @@ def controlled_configuration() -> dict[str, object]:
         "password": password,
         "port": port,
         "ca_path": ca_path,
+        "connect_address": connect_address.compressed,
     }
 
 
 class AdminSession:
-    def __init__(self, *, server_name: str, port: int, ca_path: Path) -> None:
+    def __init__(
+        self,
+        *,
+        server_name: str,
+        connect_address: str,
+        port: int,
+        ca_path: Path,
+    ) -> None:
         self.server_name = server_name
+        self.connect_address = connect_address
         self.port = port
         self.cookies: dict[str, str] = {}
         self.context = ssl.create_default_context(cafile=str(ca_path))
@@ -121,6 +142,8 @@ class AdminSession:
 
     @property
     def origin(self) -> str:
+        if self.port == 443:
+            return f"https://{self.server_name}"
         return f"https://{self.server_name}:{self.port}"
 
     def cookie_header(self) -> str:
@@ -163,8 +186,9 @@ class AdminSession:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
             headers["Content-Length"] = str(len(body))
 
-        connection = LoopbackHTTPSConnection(
+        connection = AddressHTTPSConnection(
             self.server_name,
+            self.connect_address,
             self.port,
             context=self.context,
             timeout=5.0,
@@ -210,11 +234,17 @@ def qualify(configuration: dict[str, object]) -> None:
     username = str(configuration["username"])
     password = str(configuration["password"])
     port = int(configuration["port"])
+    connect_address = str(configuration["connect_address"])
     ca_path = configuration["ca_path"]
     if not isinstance(ca_path, Path):
         raise AcceptanceError("invalid_ca_path")
 
-    session = AdminSession(server_name=server_name, port=port, ca_path=ca_path)
+    session = AdminSession(
+        server_name=server_name,
+        connect_address=connect_address,
+        port=port,
+        ca_path=ca_path,
+    )
     login_path = "/admin/login/?next=/admin/"
 
     status, headers, login_document = session.request("GET", login_path)

@@ -6,6 +6,7 @@
   roles:
     - role: preflight
     - role: base_os
+    - role: ssh_hardening
     - role: host_firewall
     - role: podman
     - role: postgres_local
@@ -13,3 +14,41 @@
     - role: pgbouncer
     - role: ingress
     - role: controller_services
+
+  post_tasks:
+    - name: Wait for trusted HTTPS readiness after controller activation
+      ansible.builtin.command:
+        argv:
+          - curl
+          - --silent
+          - --show-error
+          - --fail
+          - --proto
+          - =https
+          - --tlsv1.2
+          - --noproxy
+          - '*'
+          - --cacert
+          - >-
+            {{ cp_ingress_guest_ca_path |
+               default('/usr/local/share/ca-certificates/vivolution-lab-caddy.crt'
+                       if (cp_ingress_local_tls | bool)
+                       else '/etc/ssl/certs/ca-certificates.crt') }}
+          - --resolve
+          - "{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}:{{ cp_ingress_guest_connect_address | default('127.0.0.1') }}"
+          - --connect-timeout
+          - '2'
+          - --max-time
+          - '5'
+          - --output
+          - /dev/null
+          - --write-out
+          - '%{http_code}'
+          - "https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }}/health/ready"
+      register: cp_ingress_activation_ready
+      changed_when: false
+      retries: "{{ cp_ingress_readiness_retries | default(60) }}"
+      delay: "{{ cp_ingress_readiness_delay | default(2) }}"
+      until:
+        - cp_ingress_activation_ready.rc == 0
+        - cp_ingress_activation_ready.stdout | trim == '200'

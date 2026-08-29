@@ -1,16 +1,18 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 5 ]; then
-    printf 'Usage: https-soak.sh CA_FILE SERVER_NAME PORT DURATION_SECONDS CONCURRENCY\n' >&2
+if [ "$#" -ne 6 ]; then
+    printf '%s\n' \
+        'Usage: https-soak.sh CA_FILE SERVER_NAME CONNECT_ADDRESS PORT DURATION_SECONDS CONCURRENCY' >&2
     exit 2
 fi
 
 ca_file="$1"
 server_name="$2"
-port="$3"
-duration_seconds="$4"
-concurrency="$5"
+connect_address="$3"
+port="$4"
+duration_seconds="$5"
+concurrency="$6"
 
 if [ ! -f "$ca_file" ]; then
     printf 'Trusted CA file does not exist: %s\n' "$ca_file" >&2
@@ -22,6 +24,23 @@ case "$server_name" in
         exit 2
         ;;
 esac
+if ! curl_connect_address="$(python3 - "$connect_address" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1) from None
+if address.is_unspecified or address.is_multicast:
+    raise SystemExit(1)
+print(f"[{address.compressed}]" if address.version == 6 else address.compressed)
+PY
+)"
+then
+    printf 'Invalid HTTPS connect address.\n' >&2
+    exit 2
+fi
 case "$port:$duration_seconds:$concurrency" in
     *[!0-9:]*|::*|*::*)
         printf 'Port, duration, and concurrency must be integers.\n' >&2
@@ -59,7 +78,7 @@ trap cleanup EXIT
 trap on_signal HUP INT TERM
 
 url="https://${server_name}:${port}/health/ready"
-resolve="${server_name}:${port}:127.0.0.1"
+resolve="${server_name}:${port}:${curl_connect_address}"
 start_epoch="$(date +%s)"
 end_epoch="$((start_epoch + duration_seconds))"
 

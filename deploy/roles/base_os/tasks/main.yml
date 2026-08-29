@@ -11,12 +11,28 @@
     line: "127.0.1.1\t{{ cp_expected_hostname }}"
     state: present
 
+- name: Resolve the trusted ingress name through guest loopback
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.0\.1\s+\S+\s+# Vivolution CP1 ingress$'
+    line: "127.0.0.1\t{{ cp_ingress_server_name }} # Vivolution CP1 ingress"
+    state: present
+  when: cp_ingress_loopback_resolution | default(true) | bool
+
+- name: Apply available Debian upgrades without removals
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+    upgrade: safe
+    lock_timeout: 120
+
 - name: Install controller foundation packages
   ansible.builtin.apt:
     name: "{{ cp_base_packages + (cp_lab_database_packages if cp_install_local_postgres | bool else []) }}"
     state: present
     update_cache: true
     cache_valid_time: 3600
+    lock_timeout: 120
   vars:
     cp_base_packages:
       - acl

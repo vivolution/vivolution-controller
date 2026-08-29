@@ -6,6 +6,13 @@
   vars:
     cp_verify_rls_fixtures_owned_by_run: false
     cp_verify_release_config_root: /etc/vivolution/releases
+    cp_verify_firewall_public_tcp_ports: >-
+      {{ cp_firewall_public_tcp_ports | default(cp_firewall_tcp_ports) }}
+    cp_verify_ssh_source_ipv4_cidrs: >-
+      {{ cp_firewall_ssh_source_ipv4_cidrs | default([]) }}
+    cp_verify_ssh_source_ipv4_addresses: >-
+      {{ cp_firewall_ssh_source_ipv4_cidrs | default([]) |
+         map('regex_replace', '/32$', '') | list | sort }}
   tasks:
     - name: Re-run deployment preflight
       ansible.builtin.include_role:
@@ -31,6 +38,39 @@
       ansible.builtin.assert:
         that: ansible_facts['hostname'] == cp_expected_hostname
         fail_msg: Controller hostname does not match its declared inventory identity.
+
+    - name: Inspect the effective OpenSSH administration policy
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/sshd
+          - -T
+          - -C
+          - "user={{ cp_ssh_allowed_user | default(ansible_user) }},host={{ cp_expected_hostname }},addr=127.0.0.1"
+      register: cp_verify_ssh_effective_policy
+      changed_when: false
+
+    - name: Require the effective key-only OpenSSH policy
+      ansible.builtin.assert:
+        that:
+          - "'permitrootlogin no' in cp_verify_ssh_effective_policy.stdout_lines"
+          - "'passwordauthentication no' in cp_verify_ssh_effective_policy.stdout_lines"
+          - "'kbdinteractiveauthentication no' in cp_verify_ssh_effective_policy.stdout_lines"
+          - "'pubkeyauthentication yes' in cp_verify_ssh_effective_policy.stdout_lines"
+          - "'authenticationmethods publickey' in cp_verify_ssh_effective_policy.stdout_lines"
+          - "'permitemptypasswords no' in cp_verify_ssh_effective_policy.stdout_lines"
+          - "'permituserenvironment no' in cp_verify_ssh_effective_policy.stdout_lines"
+          - "'x11forwarding no' in cp_verify_ssh_effective_policy.stdout_lines"
+          - "'allowagentforwarding no' in cp_verify_ssh_effective_policy.stdout_lines"
+          - "'allowtcpforwarding no' in cp_verify_ssh_effective_policy.stdout_lines"
+          - "'gatewayports no' in cp_verify_ssh_effective_policy.stdout_lines"
+          - "'permittunnel no' in cp_verify_ssh_effective_policy.stdout_lines"
+          - "'maxauthtries 3' in cp_verify_ssh_effective_policy.stdout_lines"
+          - >-
+            (cp_profile not in ['azure', 'azure-single']) or
+            ((cp_verify_ssh_effective_policy.stdout_lines |
+              select('match', '^allowusers ') | list) ==
+             ['allowusers ' ~ (cp_ssh_allowed_user | default(ansible_user))])
+        fail_msg: The effective OpenSSH daemon policy is not the declared key-only contract.
 
     - name: Collect required service state
       ansible.builtin.command:
@@ -63,6 +103,9 @@
         that:
           - "'127.0.0.1:' ~ (cp_controller_web_port | string) in cp_listeners.stdout"
           - "'*:' ~ (cp_ingress_https_port | string) in cp_listeners.stdout"
+          - >-
+            (cp_ingress_local_tls | bool) or
+            ('*:80' in cp_listeners.stdout)
           - "':2019' not in cp_listeners.stdout"
         fail_msg: The declared listeners are missing or the disabled Caddy admin API is listening.
 
@@ -109,15 +152,56 @@
       register: cp_nftables_forward
       changed_when: false
 
+    - name: Collect the active source-restricted SSH set
+      ansible.builtin.command:
+        argv: [nft, --json, list, set, inet, vivolution_filter, ssh_source_ipv4]
+      register: cp_nftables_ssh_source_set_raw
+      changed_when: false
+      when: cp_verify_ssh_source_ipv4_cidrs | length > 0
+
+    - name: Parse the active source-restricted SSH set
+      ansible.builtin.set_fact:
+        cp_nftables_ssh_source_set: >-
+          {{ ((cp_nftables_ssh_source_set_raw.stdout | from_json).nftables |
+              selectattr('set', 'defined') | map(attribute='set') | list | first) }}
+      when: cp_verify_ssh_source_ipv4_cidrs | length > 0
+
     - name: Require persistent default-deny host policy
       ansible.builtin.assert:
         that:
           - "'policy drop' in cp_nftables_input.stdout"
           - "'policy drop' in cp_nftables_forward.stdout"
           - >-
-            'tcp dport { ' ~ (cp_firewall_tcp_ports | sort | join(', ')) ~ ' } ct state new accept'
+            'tcp dport { ' ~ (cp_verify_firewall_public_tcp_ports | sort | join(', ')) ~
+            ' } ct state new accept'
             in cp_nftables_input.stdout
+          - >-
+            (cp_verify_ssh_source_ipv4_cidrs | length == 0) or
+            ('ip saddr @ssh_source_ipv4 tcp dport 22 ct state new accept'
+             in cp_nftables_input.stdout)
+          - >-
+            (cp_verify_ssh_source_ipv4_cidrs | length == 0) or
+            ((cp_nftables_input.stdout |
+              regex_findall('tcp dport 22 ct state new accept') | length) == 1)
+          - >-
+            (cp_firewall_dhcp_server_ipv4 | default('') | length == 0) or
+            (('ip saddr ' ~ cp_firewall_dhcp_server_ipv4 ~
+              ' udp sport 67 udp dport 68 accept') in cp_nftables_input.stdout)
         fail_msg: Active nftables policy is not default-deny with only declared TCP ports.
+
+    - name: Require the exact source-restricted SSH address set
+      ansible.builtin.assert:
+        that:
+          - cp_nftables_ssh_source_set.family == 'inet'
+          - cp_nftables_ssh_source_set.table == 'vivolution_filter'
+          - cp_nftables_ssh_source_set.name == 'ssh_source_ipv4'
+          - cp_nftables_ssh_source_set.type == 'ipv4_addr'
+          - "'interval' in cp_nftables_ssh_source_set.flags"
+          - >-
+            (cp_nftables_ssh_source_set.elem | default([]) | sort) ==
+            cp_verify_ssh_source_ipv4_addresses
+        fail_msg: The active SSH source set does not match the tracked IPv4 host CIDRs.
+      when: cp_verify_ssh_source_ipv4_cidrs | length > 0
 
     - name: Verify PgBouncer database login
       ansible.builtin.command:
@@ -221,6 +305,27 @@
         checksum_algorithm: sha256
       register: cp_verify_active_runtime_environment
       no_log: true
+
+    - name: Read the sanitized active HSTS policy
+      ansible.builtin.command:
+        argv:
+          - awk
+          - -F=
+          - >-
+            $1 == "DJANGO_SECURE_HSTS_SECONDS" { print $2; count++ }
+            END { if (count != 1) exit 1 }
+          - >-
+            {{ cp_verify_release_config_root }}/{{ cp_verify_active_release }}/runtime.env
+      register: cp_verify_active_hsts
+      changed_when: false
+
+    - name: Require the declared active HSTS policy
+      ansible.builtin.assert:
+        that:
+          - >-
+            cp_verify_active_hsts.stdout | trim ==
+            (cp_controller_hsts_seconds_effective | string)
+        fail_msg: The active controller HSTS policy differs from the declared capability.
 
     - name: Inspect running controller image ID
       ansible.builtin.command:

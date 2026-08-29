@@ -1,6 +1,6 @@
 # Vivolution SBC
 
-Status: Local Debian 13.6 ARM64 CP1 foundation with signed qualification gates; Azure is no-go
+Status: CP1 management-plane foundation with signed local and Azure acceptance gates
 
 ## Working hypothesis
 
@@ -53,9 +53,13 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
   HIGH/CRITICAL inventory as signed evidence; findings for which Trivy reports
   no fixed version remain explicit residual risk rather than being hidden or
   mislabeled as remediated.
-- The existing Azure CP1 VM remains outside this automation and has not been
-  changed by the local qualification work. Azure Database for PostgreSQL has
-  not been provisioned by this kit.
+- The Azure acceptance kit includes a deliberately self-contained
+  `azure-single` profile: one Debian 13 AMD64 VM runs PostgreSQL, PgBouncer,
+  Caddy, Podman, and the immutable CP1 application. It does not depend on Azure
+  Database for PostgreSQL or another managed runtime service. The separately
+  retained `azure` profile continues to require an external PostgreSQL service.
+  Signed evidence, rather than this narrative, is authoritative for the latest
+  Azure qualification result.
 - No vendor purchase, customer pilot, live traffic, or production deployment is
   authorized. Microsoft supportability, certified-SBC licensing, carrier
   agreements, and UAE regulatory feasibility remain mandatory gates.

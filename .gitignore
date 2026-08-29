@@ -9,6 +9,10 @@ deploy/evidence/
 lab/utm/generated/*
 !lab/utm/generated/.gitignore
 
+# Per-host Azure acceptance identity is pinned locally and never committed.
+deploy/inventories/azure-single/generated/*
+!deploy/inventories/azure-single/generated/.gitignore
+
 # Controller development/build output.
 controller/.venv/
 controller/.pytest_cache/

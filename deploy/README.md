@@ -1,17 +1,24 @@
 # CP1 deployment kit
 
-This kit keeps the controller host portable and separates the disposable local
-database from the future Azure Database for PostgreSQL Flexible Server profile.
+This kit keeps the controller host portable across a local lab, a self-contained
+Azure acceptance VM, and a future managed-database Azure layout.
 
 ## Profiles
 
 - `lab`: installs PostgreSQL 17 on Debian, loopback only.
-- `azure`: refuses a loopback database target and never installs PostgreSQL.
-- Both profiles place PgBouncer on `127.0.0.1:6432`, so the application
+- `azure-single`: installs PostgreSQL 17, PgBouncer, Caddy, Podman, and CP1 on
+  one Debian 13 AMD64 VM. PostgreSQL, PgBouncer, and CP1 remain loopback-only;
+  only SSH from approved `/32` sources and public HTTP/HTTPS ingress are
+  accepted.
+- `azure`: refuses a loopback database target and never installs PostgreSQL;
+  it is reserved for the future managed-database topology.
+- Every profile places PgBouncer on `127.0.0.1:6432`, so the application
   connection contract does not change between environments.
 
-The Azure inventory is deliberately an example only. It must not be activated
-until the final Azure acceptance test is explicitly approved.
+The tracked `azure-single` inventory is specific to the approved UAE North
+acceptance VM. Its SSH host identity and credentials are protected local state
+and are never committed. The managed-database Azure inventory remains an
+inactive example.
 
 ## Local commands
 
@@ -50,10 +57,10 @@ bin/cpctl qualify
 bin/cpctl verify-evidence deploy/evidence/<run-id>
 ```
 
-`outage-test` stops only the disposable lab's concrete PostgreSQL cluster. It
-proves that HTTPS liveness remains available, readiness returns `503`, and the
-controller reconnects after PostgreSQL is restored. Its `always` recovery path
-starts PostgreSQL even when an assertion fails.
+`outage-test` stops only the explicitly authorized profile's local PostgreSQL
+cluster. It proves that HTTPS liveness remains available, readiness returns
+`503`, and the controller reconnects after PostgreSQL is restored. Its `always`
+recovery path starts PostgreSQL even when an assertion fails.
 
 `failure-test` activates an intentionally unhealthy release and proves that the
 exact prior image and runtime environment are restored. `restore-test` restores
@@ -69,17 +76,17 @@ database-selected authorization.
 all controller services and trusted HTTPS, and then reruns the full acceptance
 playbook.
 
-`resource-test` is a local-lab-only, roughly two-minute endurance gate. After a
-ten-second idle sample, it drives eight concurrent trusted HTTPS readiness
-workers through the macOS host forward, with each worker pausing one second
-between requests, using
-`lab/utm/generated/caddy-root.crt`. It records idle and peak controller memory
-and CPU, minimum free guest memory, root-disk and journal baseline/final/growth,
-request failures and maximum latency. It fails on OOM events, failed systemd
-units, changed controller limits, readiness failure, or growth outside the
-declared inventory bounds. It never stops services, reboots, changes the VM,
-or intentionally exhausts memory. A sanitized log and result marker are kept
-under the ignored, mode-protected `deploy/evidence/` directory.
+`resource-test` is an explicitly authorized, roughly two-minute endurance gate.
+After a ten-second idle sample, it drives eight concurrent trusted HTTPS
+readiness workers, with each worker pausing one second between requests. The
+inventory selects either the lab CA and host forward or the Azure system CA and
+static public endpoint. It records idle and peak controller memory and CPU,
+minimum free guest memory, root-disk and journal baseline/final/growth, request
+failures, and maximum latency. It fails on OOM events, failed systemd units,
+changed controller limits, readiness failure, or growth outside the declared
+inventory bounds. It never stops services, reboots, changes the VM, or
+intentionally exhausts memory. A sanitized log and result marker are kept under
+the ignored, mode-protected `deploy/evidence/` directory.
 
 ## Historical functional record — 2026-08-27 (superseded)
 
@@ -114,6 +121,27 @@ VIVO_CP_INVENTORY=deploy/inventories/rebuild/hosts.yml bin/cpctl qualify
 The rebuild inventory uses host ports 2223/8081 and a separate exported Caddy
 root, so it cannot accidentally test or overwrite the working lab's endpoints.
 
+The self-contained Azure profile requires both its explicit inventory and its
+dedicated secrets file:
+
+```bash
+VIVO_CP_INVENTORY=deploy/inventories/azure-single/hosts.yml \
+VIVO_CP_SECRETS=deploy/.state/azure-single-secrets.yml \
+bin/cpctl qualify
+```
+
+Its signed qualification additionally audits the exact read-only Azure
+control-plane contract before and after deployment: subscription, UAE North
+resource group, six-resource VM footprint, pinned Debian image, Trusted Launch,
+encrypted private OS disk, static public IP, NIC, NSG rules, and public DNS.
+Public HTTPS uses the system trust store and the declared DNS name; guest probes
+pin that name to loopback while runner probes pin it to the approved static IP.
+
+The local logical backup/restore gate proves database recoverability inside the
+host. Because the approved topology deliberately uses no second service or
+storage target, those local backups do **not** protect against complete VM or OS
+disk loss. Off-VM backup is a separate production prerequisite.
+
 `secret-test` scans source and accumulated qualification evidence, the active
 OCI image metadata/layers/history, process arguments, and relevant service
 journals for the protected deployment values without printing those values. It
@@ -142,8 +170,11 @@ ends, and force-recovers the final immutable release and canonical marker pair
 if any normal rollback step is interrupted.
 
 `deploy/.state` is mode-protected and excluded from version control. Commands
-use `no_log` for secret-bearing Ansible tasks. The initial lab uses
-passwordless sudo only on the disposable UTM VM; that is not the Azure policy.
+use `no_log` for secret-bearing Ansible tasks. In the active `azure-single`
+profile, administration is limited to the pinned Ed25519 identity over
+source-restricted SSH; password and root login are disabled. The inactive
+managed-database `azure` example must receive its own equivalent host identity
+and source policy before it can be activated.
 
 The current automation covers the host, nftables, PostgreSQL, PgBouncer,
 Podman, and an immutable Django controller image with active/previous release

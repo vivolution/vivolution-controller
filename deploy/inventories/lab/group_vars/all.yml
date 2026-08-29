@@ -3,12 +3,15 @@ cp_expected_hostname: vivo-cp1-lab
 cp_install_local_postgres: true
 cp_postgres_enforce_least_privilege: true
 cp_controller_require_signed_rls_cutover: true
+cp_qualification_allow_database_outage: true
+cp_qualification_allow_resource_endurance: true
 
 cp_database_name: vivolution
 cp_db_owner: vivo_owner
 cp_db_runtime_user: vivo_runtime
 cp_db_upstream_host: 127.0.0.1
 cp_db_upstream_port: 5432
+cp_db_server_tls_sslmode: disable
 cp_pgbouncer_host: 127.0.0.1
 cp_pgbouncer_port: 6432
 
@@ -35,6 +38,7 @@ cp_controller_csrf_origins: https://vivo-cp1-lab:8080
 cp_controller_cookie_secure: true
 cp_controller_trust_forwarded_proto: true
 cp_controller_ssl_redirect: true
+cp_controller_hsts_seconds: 0
 cp_controller_web_port: 8000
 cp_controller_web_workers: 2
 cp_controller_memory_max: 768M
@@ -57,3 +61,7 @@ cp_ingress_server_name: vivo-cp1-lab
 cp_ingress_https_port: 8080
 cp_ingress_local_tls: true
 cp_ingress_ca_export_path: "{{ playbook_dir }}/../../lab/utm/generated/caddy-root.crt"
+cp_ingress_guest_ca_path: /usr/local/share/ca-certificates/vivolution-lab-caddy.crt
+cp_ingress_runner_ca_path: "{{ cp_ingress_ca_export_path }}"
+cp_ingress_guest_connect_address: 127.0.0.1
+cp_ingress_external_connect_address: 127.0.0.1

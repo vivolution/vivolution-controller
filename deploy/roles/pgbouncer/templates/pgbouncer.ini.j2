@@ -18,11 +18,10 @@ query_wait_timeout = {{ cp_pgbouncer_query_wait_timeout }}
 server_connect_timeout = {{ cp_pgbouncer_server_connect_timeout }}
 server_login_retry = {{ cp_pgbouncer_server_login_retry }}
 ignore_startup_parameters = extra_float_digits
-{% if cp_profile == 'azure' %}
-server_tls_sslmode = {{ cp_db_server_tls_sslmode }}
+{% set cp_effective_db_server_tls_sslmode = cp_db_server_tls_sslmode | default('disable' if (cp_install_local_postgres | bool) else 'verify-full') %}
+server_tls_sslmode = {{ cp_effective_db_server_tls_sslmode }}
+{% if cp_effective_db_server_tls_sslmode == 'verify-full' %}
 server_tls_ca_file = /etc/ssl/certs/ca-certificates.crt
-{% else %}
-server_tls_sslmode = disable
 {% endif %}
 log_connections = 1
 log_disconnections = 1

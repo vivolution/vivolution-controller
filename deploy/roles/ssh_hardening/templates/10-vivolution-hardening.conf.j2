@@ -1,0 +1,19 @@
+# Managed by the Vivolution CP1 deployment kit.
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+PermitEmptyPasswords no
+PermitUserEnvironment no
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+GatewayPorts no
+PermitTunnel no
+MaxAuthTries 3
+LoginGraceTime 30
+LogLevel VERBOSE
+{% if cp_profile in ['azure', 'azure-single'] %}
+AllowUsers {{ cp_ssh_allowed_user }}
+{% endif %}

@@ -2,9 +2,92 @@
 - name: Validate deployment profile
   ansible.builtin.assert:
     that:
-      - cp_profile in ['lab', 'azure']
-      - (cp_profile == 'lab' and cp_install_local_postgres | bool) or (cp_profile == 'azure' and not (cp_install_local_postgres | bool))
-    fail_msg: The lab profile must install PostgreSQL; the Azure profile must not.
+      - cp_profile in ['lab', 'azure', 'azure-single']
+      - >-
+        (cp_install_local_postgres | bool) ==
+        (cp_profile in ['lab', 'azure-single'])
+    fail_msg: >-
+      The lab and azure-single profiles must install PostgreSQL; the managed
+      Azure profile must use an external PostgreSQL service.
+
+- name: Derive explicit deployment capabilities
+  ansible.builtin.set_fact:
+    cp_db_server_tls_sslmode_effective: >-
+      {{ cp_db_server_tls_sslmode |
+         default('disable' if (cp_install_local_postgres | bool) else 'verify-full') }}
+    cp_controller_hsts_seconds_effective: >-
+      {{ cp_controller_hsts_seconds |
+         default(0 if (cp_ingress_local_tls | bool) else 3600) | int }}
+    cp_firewall_public_tcp_ports_effective: >-
+      {{ cp_firewall_public_tcp_ports |
+         default(cp_firewall_tcp_ports | default([])) }}
+    cp_firewall_ssh_source_ipv4_cidrs_effective: >-
+      {{ cp_firewall_ssh_source_ipv4_cidrs | default([]) }}
+    cp_firewall_dhcp_server_ipv4_effective: >-
+      {{ cp_firewall_dhcp_server_ipv4 | default('') }}
+    cp_ingress_guest_ca_path_effective: >-
+      {{ cp_ingress_guest_ca_path |
+         default('/usr/local/share/ca-certificates/vivolution-lab-caddy.crt'
+                 if (cp_ingress_local_tls | bool)
+                 else '/etc/ssl/certs/ca-certificates.crt') }}
+    cp_ingress_guest_connect_address_effective: >-
+      {{ cp_ingress_guest_connect_address | default('127.0.0.1') }}
+
+- name: Validate database transport capability
+  ansible.builtin.assert:
+    that:
+      - cp_db_upstream_port | int >= 1
+      - cp_db_upstream_port | int <= 65535
+      - cp_pgbouncer_host == '127.0.0.1'
+      - cp_pgbouncer_port | int >= 1
+      - cp_pgbouncer_port | int <= 65535
+      - >-
+        ((cp_install_local_postgres | bool) and
+         cp_db_upstream_host == '127.0.0.1' and
+         cp_db_server_tls_sslmode_effective == 'disable') or
+        ((not (cp_install_local_postgres | bool)) and
+         cp_db_upstream_host not in ['127.0.0.1', 'localhost', '::1'] and
+         cp_db_server_tls_sslmode_effective == 'verify-full')
+    fail_msg: >-
+      Local PostgreSQL must use loopback with TLS disabled; an external
+      PostgreSQL service must use a non-local endpoint with verify-full TLS.
+
+- name: Validate ingress and host-firewall capabilities
+  ansible.builtin.assert:
+    that:
+      - cp_ingress_server_name is match(cp_ingress_server_name_pattern)
+      - cp_ingress_https_port | int >= 1
+      - cp_ingress_https_port | int <= 65535
+      - cp_ingress_guest_connect_address_effective == '127.0.0.1'
+      - cp_ingress_guest_ca_path_effective is match('^/[^\n]+$')
+      - cp_firewall_public_tcp_ports_effective | length > 0
+      - >-
+        (cp_firewall_public_tcp_ports_effective | map('int') | list | min) >= 1
+      - >-
+        (cp_firewall_public_tcp_ports_effective | map('int') | list | max) <= 65535
+      - >-
+        (cp_firewall_public_tcp_ports_effective | map('int') | list | unique | length) ==
+        (cp_firewall_public_tcp_ports_effective | length)
+      - >-
+        (cp_firewall_ssh_source_ipv4_cidrs_effective |
+         select('match', cp_ipv4_host_cidr_pattern) | list | length) ==
+        (cp_firewall_ssh_source_ipv4_cidrs_effective | length)
+      - >-
+        (cp_firewall_ssh_source_ipv4_cidrs_effective | unique | length) ==
+        (cp_firewall_ssh_source_ipv4_cidrs_effective | length)
+      - >-
+        (cp_firewall_ssh_source_ipv4_cidrs_effective | length == 0) or
+        (22 not in (cp_firewall_public_tcp_ports_effective | map('int') | list))
+      - >-
+        (cp_firewall_dhcp_server_ipv4_effective | length == 0) or
+        (cp_firewall_dhcp_server_ipv4_effective is match(cp_ipv4_address_pattern))
+    fail_msg: >-
+      Ingress, public TCP ports, the guest trust path, or source-restricted SSH
+      CIDRs are outside the supported fail-closed contract.
+  vars:
+    cp_ingress_server_name_pattern: '^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
+    cp_ipv4_host_cidr_pattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})/32$'
+    cp_ipv4_address_pattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})$'
 
 - name: Validate supported operating system and architecture
   ansible.builtin.assert:
@@ -13,6 +96,13 @@
       - ansible_facts['distribution_major_version'] == '13'
       - ansible_facts['architecture'] in ['aarch64', 'x86_64']
     fail_msg: CP1 currently supports Debian 13 on ARM64 or AMD64 only.
+
+- name: Require AMD64 for Azure deployment profiles
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['architecture'] == 'x86_64'
+    fail_msg: Azure CP1 acceptance requires Debian 13 on AMD64.
+  when: cp_profile in ['azure', 'azure-single']
 
 - name: Determine root filesystem
   ansible.builtin.set_fact:
@@ -26,13 +116,57 @@
       - cp_root_mount.size_total | int >= (cp_min_root_disk_gb | int * 1000 * 1000 * 1000)
     fail_msg: CP1 does not meet the declared CPU, memory, or root-disk minimum.
 
-- name: Reject a local database target in Azure profile
+- name: Validate the self-contained Azure profile
   ansible.builtin.assert:
     that:
-      - cp_db_upstream_host not in ['127.0.0.1', 'localhost', '::1']
-      - cp_db_server_tls_sslmode == 'verify-full'
-    fail_msg: Azure must use a non-local PostgreSQL endpoint with verify-full TLS.
-  when: cp_profile == 'azure'
+      - cp_db_server_tls_sslmode is defined
+      - cp_db_server_tls_sslmode == 'disable'
+      - cp_controller_hsts_seconds is defined
+      - cp_controller_hsts_seconds | int == 3600
+      - cp_firewall_public_tcp_ports is defined
+      - >-
+        (cp_firewall_public_tcp_ports | map('int') | list | sort) == [80, 443]
+      - cp_firewall_ssh_source_ipv4_cidrs is defined
+      - cp_firewall_ssh_source_ipv4_cidrs | length >= 1
+      - cp_firewall_ssh_source_ipv4_cidrs | length <= 8
+      - cp_firewall_ssh_source_ipv4_cidrs == (cp_firewall_ssh_source_ipv4_cidrs | sort)
+      - cp_firewall_dhcp_server_ipv4 is defined
+      - cp_firewall_dhcp_server_ipv4 == '168.63.129.16'
+      - cp_ingress_guest_ca_path is defined
+      - cp_ingress_guest_ca_path == '/etc/ssl/certs/ca-certificates.crt'
+      - cp_ingress_guest_connect_address is defined
+      - cp_ingress_guest_connect_address == '127.0.0.1'
+      - cp_ingress_loopback_resolution is defined
+      - cp_ingress_loopback_resolution | bool
+      - cp_ingress_runner_ca_path is defined
+      - cp_ingress_runner_ca_path == '/etc/ssl/cert.pem'
+      - cp_azure_public_ip is defined
+      - cp_ingress_external_connect_address is defined
+      - cp_ingress_external_connect_address == cp_azure_public_ip
+      - cp_expected_hostname == 'controller'
+      - not (cp_ingress_local_tls | bool)
+      - cp_ingress_https_port | int == 443
+      - cp_resource_host_https_port is defined
+      - cp_resource_host_https_port | int == cp_ingress_https_port | int
+      - cp_resource_host_ca_path is defined
+      - cp_resource_host_ca_path == cp_ingress_runner_ca_path
+      - cp_ingress_server_name is match(cp_public_fqdn_pattern)
+      - cp_controller_cookie_secure | bool
+      - cp_controller_trust_forwarded_proto | bool
+      - cp_controller_ssl_redirect | bool
+      - cp_ingress_server_name in cp_controller_allowed_hosts.split(',')
+      - "'127.0.0.1' in cp_controller_allowed_hosts.split(',')"
+      - "'localhost' in cp_controller_allowed_hosts.split(',')"
+      - cp_controller_csrf_origins == 'https://' ~ cp_ingress_server_name
+      - cp_min_vcpus | int >= 2
+      - cp_min_memory_mb | int >= 7000
+      - cp_min_root_disk_gb | int >= 50
+    fail_msg: >-
+      azure-single requires local PostgreSQL, public trusted HTTPS, explicit
+      HSTS, source-restricted SSH, and the declared AMD64 host capacity.
+  vars:
+    cp_public_fqdn_pattern: '^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
+  when: cp_profile == 'azure-single'
 
 - name: Require deployment secrets
   ansible.builtin.assert:
