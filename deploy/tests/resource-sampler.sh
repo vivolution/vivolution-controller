@@ -34,8 +34,11 @@ require_unsigned_integer() {
     esac
 }
 
-start_epoch="$(date +%s)"
-end_epoch="$((start_epoch + duration_seconds))"
+sample_interval_ns=1000000000
+start_time_ns="$(date +%s%N)"
+require_unsigned_integer start_time_ns "$start_time_ns"
+end_time_ns="$((start_time_ns + (duration_seconds * sample_interval_ns)))"
+next_sample_time_ns="$start_time_ns"
 samples=0
 peak_service_memory_bytes=0
 peak_cpu_millipercent=0
@@ -47,8 +50,24 @@ last_sample_time_ns=0
 previous_cpu_usage_ns=0
 previous_sample_time_ns=0
 
-while [ "$(date +%s)" -lt "$end_epoch" ]; do
+while :; do
     sample_time_ns="$(date +%s%N)"
+    require_unsigned_integer sample_time_ns "$sample_time_ns"
+
+    while [ "$sample_time_ns" -lt "$next_sample_time_ns" ]; do
+        remaining_ns="$((next_sample_time_ns - sample_time_ns))"
+        sleep_seconds="$(printf '%d.%09d' \
+            "$((remaining_ns / sample_interval_ns))" \
+            "$((remaining_ns % sample_interval_ns))")"
+        sleep "$sleep_seconds"
+        sample_time_ns="$(date +%s%N)"
+        require_unsigned_integer sample_time_ns "$sample_time_ns"
+    done
+
+    if [ "$sample_time_ns" -ge "$end_time_ns" ]; then
+        break
+    fi
+
     service_memory_bytes="$(systemd_value MemoryCurrent)"
     service_cpu_usage_ns="$(systemd_value CPUUsageNSec)"
     system_available_kib="$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo)"
@@ -85,7 +104,16 @@ while [ "$(date +%s)" -lt "$end_epoch" ]; do
     last_cpu_usage_ns="$service_cpu_usage_ns"
     last_sample_time_ns="$sample_time_ns"
     samples="$((samples + 1))"
-    sleep 1
+
+    post_sample_time_ns="$(date +%s%N)"
+    require_unsigned_integer post_sample_time_ns "$post_sample_time_ns"
+    next_sample_time_ns="$((next_sample_time_ns + sample_interval_ns))"
+    if [ "$next_sample_time_ns" -le "$post_sample_time_ns" ]; then
+        missed_intervals="$(((post_sample_time_ns - next_sample_time_ns) / \
+            sample_interval_ns + 1))"
+        next_sample_time_ns="$((next_sample_time_ns + \
+            (missed_intervals * sample_interval_ns)))"
+    fi
 done
 
 if [ "$samples" -lt 2 ]; then

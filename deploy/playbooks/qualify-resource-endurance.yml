@@ -197,6 +197,33 @@
           {{ [((cp_resource_final.journal_bytes | int) -
                (cp_resource_baseline.journal_bytes | int)), 0] | max }}
 
+    - name: Report sanitized resource qualification evidence
+      ansible.builtin.debug:
+        msg:
+          - "duration_seconds={{ cp_resource_sample.duration_seconds }}"
+          - "idle_samples={{ cp_resource_idle_sample.samples }}"
+          - "endurance_samples={{ cp_resource_sample.samples }}"
+          - "https_elapsed_seconds={{ cp_resource_https.elapsed_seconds }}"
+          - "https_concurrency={{ cp_resource_https.concurrency }}"
+          - "host_https_port={{ cp_resource_host_https_port }}"
+          - "https_successes={{ cp_resource_https.successful_requests }}"
+          - "https_failures={{ cp_resource_https.failed_requests }}"
+          - "https_max_latency_seconds={{ cp_resource_https.maximum_latency_seconds }}"
+          - "controller_idle_memory_mib={{ ((cp_resource_baseline.service_memory_current_bytes | float) / 1048576) | round(2) }}"
+          - "controller_idle_peak_memory_mib={{ ((cp_resource_idle_sample.peak_service_memory_bytes | float) / 1048576) | round(2) }}"
+          - "controller_idle_average_cpu_percent={{ (((cp_resource_idle_sample.service_cpu_usage_delta_ns | float) * 100) / (cp_resource_idle_sample.elapsed_sample_ns | float)) | round(2) }}"
+          - "controller_idle_peak_cpu_percent={{ ((cp_resource_idle_sample.peak_cpu_millipercent | float) / 1000) | round(2) }}"
+          - "controller_peak_memory_mib={{ ((cp_resource_sample.peak_service_memory_bytes | float) / 1048576) | round(2) }}"
+          - "controller_average_cpu_percent={{ (((cp_resource_sample.service_cpu_usage_delta_ns | float) * 100) / (cp_resource_sample.elapsed_sample_ns | float)) | round(2) }}"
+          - "controller_peak_cpu_percent={{ ((cp_resource_sample.peak_cpu_millipercent | float) / 1000) | round(2) }}"
+          - "minimum_system_available_mib={{ ((cp_resource_sample.minimum_system_available_bytes | float) / 1048576) | round(2) }}"
+          - "root_used_baseline_mib={{ ((cp_resource_baseline.root_used_bytes | float) / 1048576) | round(2) }}"
+          - "root_used_final_mib={{ ((cp_resource_final.root_used_bytes | float) / 1048576) | round(2) }}"
+          - "root_growth_mib={{ ((cp_resource_root_growth_bytes | float) / 1048576) | round(2) }}"
+          - "journal_baseline_mib={{ ((cp_resource_baseline.journal_bytes | float) / 1048576) | round(2) }}"
+          - "journal_final_mib={{ ((cp_resource_final.journal_bytes | float) / 1048576) | round(2) }}"
+          - "journal_growth_mib={{ ((cp_resource_journal_growth_bytes | float) / 1048576) | round(2) }}"
+
     - name: Require the bounded endurance envelope
       ansible.builtin.assert:
         that:
@@ -229,27 +256,3 @@
           - cp_resource_journal_growth_bytes | int <= cp_resource_max_journal_growth_bytes | int
           - cp_resource_oom_events.stdout | trim | length == 0
         fail_msg: CP1 exceeded its bounded resource/endurance qualification envelope.
-
-    - name: Report sanitized resource qualification evidence
-      ansible.builtin.debug:
-        msg:
-          - "duration_seconds={{ cp_resource_sample.duration_seconds }}"
-          - "https_concurrency={{ cp_resource_https.concurrency }}"
-          - "host_https_port={{ cp_resource_host_https_port }}"
-          - "https_successes={{ cp_resource_https.successful_requests }}"
-          - "https_failures={{ cp_resource_https.failed_requests }}"
-          - "https_max_latency_seconds={{ cp_resource_https.maximum_latency_seconds }}"
-          - "controller_idle_memory_mib={{ ((cp_resource_baseline.service_memory_current_bytes | float) / 1048576) | round(2) }}"
-          - "controller_idle_peak_memory_mib={{ ((cp_resource_idle_sample.peak_service_memory_bytes | float) / 1048576) | round(2) }}"
-          - "controller_idle_average_cpu_percent={{ (((cp_resource_idle_sample.service_cpu_usage_delta_ns | float) * 100) / (cp_resource_idle_sample.elapsed_sample_ns | float)) | round(2) }}"
-          - "controller_idle_peak_cpu_percent={{ ((cp_resource_idle_sample.peak_cpu_millipercent | float) / 1000) | round(2) }}"
-          - "controller_peak_memory_mib={{ ((cp_resource_sample.peak_service_memory_bytes | float) / 1048576) | round(2) }}"
-          - "controller_average_cpu_percent={{ (((cp_resource_sample.service_cpu_usage_delta_ns | float) * 100) / (cp_resource_sample.elapsed_sample_ns | float)) | round(2) }}"
-          - "controller_peak_cpu_percent={{ ((cp_resource_sample.peak_cpu_millipercent | float) / 1000) | round(2) }}"
-          - "minimum_system_available_mib={{ ((cp_resource_sample.minimum_system_available_bytes | float) / 1048576) | round(2) }}"
-          - "root_used_baseline_mib={{ ((cp_resource_baseline.root_used_bytes | float) / 1048576) | round(2) }}"
-          - "root_used_final_mib={{ ((cp_resource_final.root_used_bytes | float) / 1048576) | round(2) }}"
-          - "root_growth_mib={{ ((cp_resource_root_growth_bytes | float) / 1048576) | round(2) }}"
-          - "journal_baseline_mib={{ ((cp_resource_baseline.journal_bytes | float) / 1048576) | round(2) }}"
-          - "journal_final_mib={{ ((cp_resource_final.journal_bytes | float) / 1048576) | round(2) }}"
-          - "journal_growth_mib={{ ((cp_resource_journal_growth_bytes | float) / 1048576) | round(2) }}"
