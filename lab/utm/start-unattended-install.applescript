@@ -1,4 +1,3 @@
-property workingVmId : "81C7DE36-9421-4E1C-AC4E-48336131D1EC"
 property rebuildVmName : "vivo-cp1-lab-rebuild"
 property rebuildMarker : "vivolution-cp1-disposable-rebuild-v1"
 
@@ -11,8 +10,6 @@ on run argv
     end if
 
     if vmName is not rebuildVmName then error "start is restricted to the exact disposable rebuild VM name"
-    if expectedVmId is workingVmId then error "refusing to start the protected working VM"
-
     tell application "UTM"
         set auto terminate to false
         set vmMatches to every virtual machine whose name is vmName

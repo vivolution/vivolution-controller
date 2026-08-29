@@ -1,6 +1,6 @@
 # Vivolution SBC
 
-Status: Local Debian 13.6 ARM64 CP1 functional POC working; security/release requalification in progress; Azure is no-go
+Status: Local Debian 13.6 ARM64 CP1 foundation with signed qualification gates; Azure is no-go
 
 ## Working hypothesis
 
@@ -39,9 +39,11 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
   coverage gaps. Those historical runs remain credible bounded functional
   evidence, not current security/release acceptance.
 - Remediation was promoted through a one-release signed-RLS compatibility
-  bridge to the signed-only/least-privilege Lab release. Replacement security
-  qualification and a new guarded clean rebuild remain in progress; the bridge
-  itself is not the final isolation boundary.
+  bridge to the signed-only/least-privilege Lab release. The UTM kit can now
+  create the protected primary from a truly empty registry without a template
+  VM, then run the signed current-release and distinct N-1 gates. The latest
+  verified evidence, rather than this narrative, is authoritative for pass/fail
+  status; the bridge itself is not the final isolation boundary.
 - This is a management-plane foundation POC, not a working SBC product. Edge
   enrollment/PKI, signed configuration, telemetry, SIP signaling, RTP/media,
   Teams onboarding, and carrier interworking are not implemented yet.

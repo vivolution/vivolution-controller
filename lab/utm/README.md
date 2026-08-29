@@ -5,7 +5,8 @@ This directory builds Debian 13 ARM64 base VMs used to qualify the CP1 deploymen
 ## Protected source shape
 
 - UTM/QEMU VM: `vivo-cp1-lab`
-- VM UUID: `81C7DE36-9421-4E1C-AC4E-48336131D1EC`
+- a UUID created by UTM and recorded in ignored `generated/primary-vm-id`
+- ownership marker `vivolution-cp1-primary-lab-v1`
 - 2 vCPU, 3072 MiB RAM
 - 64 GiB sparse VirtIO disk (host storage is consumed only as data is written)
 - QEMU user-mode networking with host-only forwards for SSH
@@ -53,6 +54,43 @@ injected initrd and GRUB policy back from the derived ISO and compares them
 byte-for-byte before UTM is allowed to attach it. The dedicated private SSH key remains in
 `~/.ssh/vivo_cp1_lab_ed25519`.
 
+## Seedless primary bootstrap
+
+`bootstrap-lab.sh` creates the protected primary from a truly empty UTM state;
+it does not require a template, clone, exported bundle, or old VM UUID. It first
+requires both UTM's registry and local Documents directory to contain zero VMs,
+then uses UTM 4.7.5's supported AppleScript configuration API to create the
+fixed profile above. It never deletes, stops, imports, or modifies an existing
+VM. The normal creation path requires both UTM's registry and local Documents
+directory to contain zero VMs. The sole exception is recovery of one exact,
+stopped, marker-owned VM interrupted before staging, as described below; no
+other existing VM is changed.
+
+The workflow pins UTM's version, build, code signature, stock ARM64 firmware
+digest, and the official Debian ISO checksum. It builds and verifies the
+derived unattended ISO, persists the UTM-generated UUID before later changes,
+attaches the ISO to the one fresh disk, resets only the new VM's UEFI variables
+to the pinned stock template, waits for installer poweroff, removes the ISO,
+and starts the installed system. It then captures exactly one ED25519 host key,
+waits out Debian's SSH no-auth penalty window, authenticates with the dedicated
+key, and runs the base assertions.
+
+From an empty UTM registry and Documents directory:
+
+```bash
+cd "/Users/jay/Projects/Active/Vivolution SBC"
+lab/utm/bootstrap-lab.sh
+```
+
+The generated UUID is returned and recorded before configuration validation.
+If creation is interrupted even earlier, a rerun can adopt only one exact,
+stopped, marker-owned VM whose qcow2 is still untouched and whose UUID is not
+already the recorded primary. Once the UUID is recorded, later failures remain
+for inspection and require an explicit operator cleanup or recovery decision;
+the script never reinstalls an already recorded VM. A successful run leaves the
+primary running on `127.0.0.1:2222` and pins its host key in
+`generated/known_hosts`, ready for `deploy/inventories/lab/hosts.yml`.
+
 ## Safe clean-rebuild qualification
 
 The rebuild workflow never stops, starts, reconfigures, or deletes
@@ -60,7 +98,8 @@ The rebuild workflow never stops, starts, reconfigures, or deletes
 under the exact disposable name, and then replaces only the clone's copied
 firmware-variable store with UTM's validated stock ARM64 template and its
 copied system disk with a fresh 64 GiB sparse qcow2 through UTM's AppleScript
-configuration API. Both replacements require the exact UUID, exact name,
+configuration API. The protected UUID is loaded from the seedless bootstrap's
+`generated/primary-vm-id`; both replacements require the exact UUID, exact name,
 managed-disposable marker and stopped state. It attaches the checksum-derived
 unattended Debian ISO even when a previous finalization removed all removable
 media, waits for the installer poweroff, finalizes the clone, boots it, and
@@ -74,9 +113,10 @@ proves that no process has the disposable store open and that the protected
 VM's `efi_vars.fd` inode, link count and digest remain unchanged. The protected
 store is validated but never written.
 
-The installer build, configure, start, and finalize helpers have no
-working-VM default and reject the protected UUID. Invoke them only through the
-guarded rebuild driver:
+The rebuild installer build, configure, start, and finalize helpers have no
+working-VM default, and the builder requires the protected UUID separately from
+the disposable target UUID. Invoke them only through the guarded rebuild
+driver:
 
 ```bash
 cd "/Users/jay/Projects/Active/Vivolution SBC"

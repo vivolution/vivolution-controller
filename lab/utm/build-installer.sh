@@ -8,9 +8,11 @@ OUT_DIR="$SCRIPT_DIR/generated"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vivo-cp1-installer.XXXXXX")"
 EXPECTED_ISO_SHA512="43eef37fe589c8995f713c2d731604494f4353dfcc9c6f7dc4abdedab1e8f313a68bd1eb1ae299f4fb8995cbc1306c7348dc20d3dbd95ad1b613131611506bb8"
 UTMCTL="/Applications/UTM.app/Contents/MacOS/utmctl"
-WORKING_VM_ID="81C7DE36-9421-4E1C-AC4E-48336131D1EC"
+PRIMARY_VM_NAME="vivo-cp1-lab"
+PRIMARY_MARKER="vivolution-cp1-primary-lab-v1"
 REBUILD_VM_NAME="vivo-cp1-lab-rebuild"
 REBUILD_MARKER="vivolution-cp1-disposable-rebuild-v1"
+PROTECTED_VM_ID="${VIVO_LAB_PROTECTED_VM_ID:-}"
 VM_NAME="${VIVO_LAB_VM_NAME:-}"
 EXPECTED_VM_ID="${VIVO_LAB_EXPECTED_VM_ID:-}"
 VM_BUNDLE="${VIVO_LAB_VM_BUNDLE:-$HOME/Library/Containers/com.utmapp.UTM/Data/Documents/$VM_NAME.utm}"
@@ -52,10 +54,6 @@ if [ -z "$EXPECTED_VM_ID" ]; then
 fi
 
 case "$EXPECTED_VM_ID" in
-    "$WORKING_VM_ID")
-        printf 'Refusing to stage unattended installer assets in the protected working VM.\n' >&2
-        exit 1
-        ;;
     ????????-????-????-????-????????????) ;;
     *)
         printf 'Invalid expected UTM VM UUID: %s\n' "$EXPECTED_VM_ID" >&2
@@ -68,10 +66,35 @@ case "$EXPECTED_VM_ID" in
         exit 1
         ;;
 esac
-if [ "$VM_NAME" != "$REBUILD_VM_NAME" ]; then
-    printf 'Installer staging is restricted to the exact disposable rebuild VM name.\n' >&2
-    exit 1
-fi
+case "$VM_NAME" in
+    "$PRIMARY_VM_NAME")
+        expected_vm_marker="$PRIMARY_MARKER"
+        ;;
+    "$REBUILD_VM_NAME")
+        expected_vm_marker="$REBUILD_MARKER"
+        case "$PROTECTED_VM_ID" in
+            ????????-????-????-????-????????????) ;;
+            *)
+                printf 'A valid protected primary UUID is required for rebuild staging.\n' >&2
+                exit 1
+                ;;
+        esac
+        case "$PROTECTED_VM_ID" in
+            *[!0-9A-Fa-f-]*)
+                printf 'Invalid protected primary UUID.\n' >&2
+                exit 1
+                ;;
+        esac
+        if [ "$EXPECTED_VM_ID" = "$PROTECTED_VM_ID" ]; then
+            printf 'Refusing to treat the protected primary UUID as disposable.\n' >&2
+            exit 1
+        fi
+        ;;
+    *)
+        printf 'Installer staging is restricted to a managed CP1 lab VM.\n' >&2
+        exit 1
+        ;;
+esac
 
 [ -f "$ISO_PATH" ] || {
     printf 'Debian ISO not found: %s\n' "$ISO_PATH" >&2
@@ -224,13 +247,13 @@ if [ "$actual_vm_id" != "$EXPECTED_VM_ID" ] || [ "$actual_vm_name" != "$VM_NAME"
     exit 1
 fi
 actual_vm_notes="$(/usr/libexec/PlistBuddy -c 'Print :Information:Notes' "$CONFIG_PLIST" 2>/dev/null || true)"
-if [ "$actual_vm_notes" != "$REBUILD_MARKER" ]; then
-    printf 'Disposable rebuild marker mismatch; refusing to stage installer assets.\n' >&2
+if [ "$actual_vm_notes" != "$expected_vm_marker" ]; then
+    printf 'Managed lab marker mismatch; refusing to stage installer assets.\n' >&2
     exit 1
 fi
 
 printf 'Built unattended installer assets in %s\n' "$OUT_DIR"
 printf 'Built checksum-derived unattended ISO: %s\n' "$CUSTOM_ISO"
-printf 'Validated disposable target identity: %s (%s)\n' "$VM_NAME" "$EXPECTED_VM_ID"
+printf 'Validated managed target identity: %s (%s)\n' "$VM_NAME" "$EXPECTED_VM_ID"
 printf 'SSH key: %s\n' "$SSH_KEY"
 cat "$OUT_DIR/SSH_KEY_FINGERPRINT"

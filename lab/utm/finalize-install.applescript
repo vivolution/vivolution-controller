@@ -1,4 +1,3 @@
-property workingVmId : "81C7DE36-9421-4E1C-AC4E-48336131D1EC"
 property rebuildVmName : "vivo-cp1-lab-rebuild"
 property rebuildMarker : "vivolution-cp1-disposable-rebuild-v1"
 property guestIpAddress : "10.0.2.15"
@@ -15,7 +14,6 @@ on run argv
     end if
 
     if vmName is not rebuildVmName then error "finalization is restricted to the exact disposable rebuild VM name"
-    if expectedVmId is workingVmId then error "refusing to finalize the protected working VM"
     if hostSshPort is less than 1 or hostSshPort is greater than 65535 then error "invalid SSH host port"
     if hostPortalPort is less than 1 or hostPortalPort is greater than 65535 then error "invalid portal host port"
 

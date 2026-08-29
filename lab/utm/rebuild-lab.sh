@@ -8,12 +8,13 @@ UTMCTL="/Applications/UTM.app/Contents/MacOS/utmctl"
 EXPECTED_UTM_VERSION="4.7.5"
 EXPECTED_UTM_BUILD="118"
 WORKING_VM_NAME="vivo-cp1-lab"
-WORKING_VM_ID="81C7DE36-9421-4E1C-AC4E-48336131D1EC"
+WORKING_MARKER="vivolution-cp1-primary-lab-v1"
 REBUILD_VM_NAME="vivo-cp1-lab-rebuild"
 REBUILD_MARKER="vivolution-cp1-disposable-rebuild-v1"
 UTM_DOCUMENTS_DIR="$HOME/Library/Containers/com.utmapp.UTM/Data/Documents"
 UEFI_VARS_TEMPLATE="/Applications/UTM.app/Contents/Resources/qemu/edk2-arm-vars.fd"
 EXPECTED_UEFI_VARS_SHA256="7b0a7f26192011e6e98c770694269b40f8b70620ca58fc4973a232fb223600d5"
+PRIMARY_STATE="$GENERATED_DIR/primary-vm-id"
 REBUILD_STATE="$GENERATED_DIR/rebuild-vm-id"
 REBUILD_KNOWN_HOSTS="$GENERATED_DIR/known_hosts-rebuild"
 REBUILD_KNOWN_HOSTS_OPTION="UserKnownHostsFile=\"$REBUILD_KNOWN_HOSTS\""
@@ -57,7 +58,7 @@ if [ "$#" -gt 1 ]; then
     exit 2
 fi
 
-for command_name in awk chmod cmp codesign date grep install lsof mktemp mv osascript rm shasum sleep ssh ssh-keygen ssh-keyscan stat xxd; do
+for command_name in awk chmod cmp codesign date grep id install lsof mktemp mv osascript rm shasum sleep ssh ssh-keygen ssh-keyscan stat xxd; do
     command -v "$command_name" >/dev/null 2>&1 || {
         printf 'Missing required command: %s\n' "$command_name" >&2
         exit 1
@@ -82,14 +83,14 @@ if [ "$actual_iso_sha512" != "$EXPECTED_ISO_SHA512" ]; then
 fi
 
 case "$INSTALL_TIMEOUT_SECONDS" in
-    ''|*[!0-9]*)
-        printf 'Install and boot timeouts must be positive integer seconds.\n' >&2
+    ''|0|0*|??????*|*[!0-9]*)
+        printf 'Install timeout must be a bounded positive decimal integer.\n' >&2
         exit 1
         ;;
 esac
 case "$BOOT_TIMEOUT_SECONDS" in
-    ''|*[!0-9]*)
-        printf 'Install and boot timeouts must be positive integer seconds.\n' >&2
+    ''|0|0*|?????*|*[!0-9]*)
+        printf 'Boot timeout must be a bounded positive decimal integer.\n' >&2
         exit 1
         ;;
 esac
@@ -122,6 +123,21 @@ if [ -L "$GENERATED_DIR" ]; then
     exit 1
 fi
 install -d -m 0700 "$GENERATED_DIR"
+if [ ! -f "$PRIMARY_STATE" ] || [ -L "$PRIMARY_STATE" ]; then
+    printf 'Required primary VM state is missing, not regular, or symlinked: %s\n' \
+        "$PRIMARY_STATE" >&2
+    exit 1
+fi
+if [ "$(stat -f '%u:%l:%Lp' "$PRIMARY_STATE")" != "$(id -u):1:600" ]; then
+    printf 'Primary VM state has unsafe ownership, links, or mode: %s\n' \
+        "$PRIMARY_STATE" >&2
+    exit 1
+fi
+IFS= read -r working_vm_id < "$PRIMARY_STATE"
+if ! uuid_is_valid "$working_vm_id"; then
+    printf 'Recorded primary VM UUID is invalid: %s\n' "$PRIMARY_STATE" >&2
+    exit 1
+fi
 if [ -L "$REBUILD_STATE" ]; then
     printf 'Refusing a symlinked rebuild state file: %s\n' "$REBUILD_STATE" >&2
     exit 1
@@ -132,12 +148,16 @@ if [ -e "$REBUILD_STATE" ]; then
         printf 'Rebuild state path is not a regular file: %s\n' "$REBUILD_STATE" >&2
         exit 1
     fi
+    if [ "$(stat -f '%u:%l:%Lp' "$REBUILD_STATE")" != "$(id -u):1:600" ]; then
+        printf 'Rebuild VM state has unsafe ownership, links, or mode.\n' >&2
+        exit 1
+    fi
     IFS= read -r previous_rebuild_id < "$REBUILD_STATE"
     if ! uuid_is_valid "$previous_rebuild_id"; then
         printf 'Recorded rebuild UUID is invalid; refusing automatic replacement.\n' >&2
         exit 1
     fi
-    if [ "$previous_rebuild_id" = "$WORKING_VM_ID" ]; then
+    if [ "$previous_rebuild_id" = "$working_vm_id" ]; then
         printf 'Recorded rebuild UUID equals the protected working VM UUID; refusing.\n' >&2
         exit 1
     fi
@@ -145,15 +165,17 @@ fi
 
 printf 'Preparing exact disposable clone %s from stopped source %s.\n' "$REBUILD_VM_NAME" "$WORKING_VM_NAME"
 if [ -n "$previous_rebuild_id" ]; then
-    rebuild_vm_id="$(osascript "$SCRIPT_DIR/prepare-rebuild-clone.applescript" "$previous_rebuild_id")"
+    rebuild_vm_id="$(osascript "$SCRIPT_DIR/prepare-rebuild-clone.applescript" \
+        "$working_vm_id" "$previous_rebuild_id")"
 else
-    rebuild_vm_id="$(osascript "$SCRIPT_DIR/prepare-rebuild-clone.applescript")"
+    rebuild_vm_id="$(osascript "$SCRIPT_DIR/prepare-rebuild-clone.applescript" \
+        "$working_vm_id")"
 fi
 if ! uuid_is_valid "$rebuild_vm_id"; then
     printf 'UTM returned an invalid rebuild UUID: %s\n' "$rebuild_vm_id" >&2
     exit 1
 fi
-if [ "$rebuild_vm_id" = "$WORKING_VM_ID" ]; then
+if [ "$rebuild_vm_id" = "$working_vm_id" ]; then
     printf 'UTM returned the protected working VM UUID; refusing.\n' >&2
     exit 1
 fi
@@ -178,10 +200,12 @@ for bundle_candidate in "$UTM_DOCUMENTS_DIR"/*.utm; do
     [ -f "$candidate_config" ] || continue
     [ ! -L "$candidate_config" ] || continue
     candidate_id="$(/usr/libexec/PlistBuddy -c 'Print :Information:UUID' "$candidate_config" 2>/dev/null || true)"
-    if [ "$candidate_id" = "$WORKING_VM_ID" ]; then
+    if [ "$candidate_id" = "$working_vm_id" ]; then
         candidate_name="$(/usr/libexec/PlistBuddy -c 'Print :Information:Name' "$candidate_config" 2>/dev/null || true)"
-        if [ "$candidate_name" != "$WORKING_VM_NAME" ]; then
-            printf 'Protected UUID resolved to the wrong VM name: %s\n' "$candidate_name" >&2
+        candidate_notes="$(/usr/libexec/PlistBuddy -c 'Print :Information:Notes' "$candidate_config" 2>/dev/null || true)"
+        if [ "$candidate_name" != "$WORKING_VM_NAME" ] || \
+           [ "$candidate_notes" != "$WORKING_MARKER" ]; then
+            printf 'Protected UUID resolved to the wrong VM name or ownership marker.\n' >&2
             exit 1
         fi
         working_bundle_matches=$((working_bundle_matches + 1))
@@ -204,7 +228,7 @@ if [ "$rebuild_bundle_matches" -ne 1 ]; then
 fi
 if [ "$working_bundle_matches" -ne 1 ]; then
     printf 'Expected exactly one local UTM bundle for protected UUID %s; found %s.\n' \
-        "$WORKING_VM_ID" "$working_bundle_matches" >&2
+        "$working_vm_id" "$working_bundle_matches" >&2
     exit 1
 fi
 if [ "$REBUILD_VM_BUNDLE" = "$WORKING_VM_BUNDLE" ]; then
@@ -215,7 +239,7 @@ if [ "$("$UTMCTL" status "$rebuild_vm_id")" != stopped ]; then
     printf 'Disposable rebuild VM is no longer stopped; refusing firmware reset.\n' >&2
     exit 1
 fi
-if [ "$("$UTMCTL" status "$WORKING_VM_ID")" != stopped ]; then
+if [ "$("$UTMCTL" status "$working_vm_id")" != stopped ]; then
     printf 'Protected working VM is no longer stopped; refusing firmware reset.\n' >&2
     exit 1
 fi
@@ -248,7 +272,7 @@ reset_disposable_uefi_vars() {
         printf 'Disposable rebuild VM is not stopped; refusing firmware reset.\n' >&2
         exit 1
     fi
-    if [ "$("$UTMCTL" status "$WORKING_VM_ID")" != stopped ]; then
+    if [ "$("$UTMCTL" status "$working_vm_id")" != stopped ]; then
         printf 'Protected working VM is not stopped; refusing firmware reset.\n' >&2
         exit 1
     fi
@@ -339,6 +363,7 @@ reset_disposable_uefi_vars() {
 VIVO_LAB_VM_NAME="$REBUILD_VM_NAME" \
 VIVO_LAB_EXPECTED_VM_ID="$rebuild_vm_id" \
 VIVO_LAB_VM_BUNDLE="$REBUILD_VM_BUNDLE" \
+VIVO_LAB_PROTECTED_VM_ID="$working_vm_id" \
     "$SCRIPT_DIR/build-installer.sh" "$ISO_PATH"
 
 unattended_iso="$SCRIPT_DIR/generated/debian-13.6.0-arm64-vivo-preseed.iso"
@@ -515,7 +540,7 @@ VIVO_LAB_EXPECTED_HOSTNAME="vivo-cp1-lab" \
 VIVO_LAB_EXPECTED_DISK_BYTES="68719476736" \
     "$SCRIPT_DIR/verify-base.sh"
 
-if [ "$("$UTMCTL" status "$WORKING_VM_NAME")" != stopped ]; then
+if [ "$("$UTMCTL" status "$working_vm_id")" != stopped ]; then
     printf 'Warning: the protected working VM is no longer stopped; this workflow did not start it.\n' >&2
 fi
 

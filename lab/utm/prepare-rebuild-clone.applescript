@@ -1,12 +1,13 @@
 property workingVmName : "vivo-cp1-lab"
-property workingVmId : "81C7DE36-9421-4E1C-AC4E-48336131D1EC"
+property workingMarker : "vivolution-cp1-primary-lab-v1"
 property rebuildVmName : "vivo-cp1-lab-rebuild"
 property rebuildMarker : "vivolution-cp1-disposable-rebuild-v1"
 
 on run argv
-    if (count of argv) is greater than 1 then error "usage: osascript prepare-rebuild-clone.applescript [previous-rebuild-uuid]"
-    if (count of argv) is 1 then
-        set previousRebuildId to item 1 of argv
+    if (count of argv) is less than 1 or (count of argv) is greater than 2 then error "usage: osascript prepare-rebuild-clone.applescript primary-uuid [previous-rebuild-uuid]"
+    set workingVmId to item 1 of argv
+    if (count of argv) is 2 then
+        set previousRebuildId to item 2 of argv
     else
         set previousRebuildId to ""
     end if
@@ -23,6 +24,7 @@ on run argv
         if backend of sourceVm is not qemu then error "protected working VM must use the QEMU backend"
 
         set sourceCfg to configuration of sourceVm
+        if notes of sourceCfg is not workingMarker then error "protected working VM ownership marker mismatch"
         if architecture of sourceCfg is not "aarch64" then error "protected working VM must use the aarch64 architecture"
         set sourceSystemDrives to {}
         repeat with driveConfig in drives of sourceCfg
@@ -92,6 +94,7 @@ on run argv
         set sourceAfterVm to item 1 of sourceAfterMatches
         if id of sourceAfterVm is not workingVmId then error "protected working VM identity changed during clone"
         set sourceAfterCfg to configuration of sourceAfterVm
+        if notes of sourceAfterCfg is not workingMarker then error "protected working VM ownership marker changed during clone"
         set sourceAfterSystemDrives to {}
         repeat with driveConfig in drives of sourceAfterCfg
             if removable of driveConfig is false then set end of sourceAfterSystemDrives to contents of driveConfig

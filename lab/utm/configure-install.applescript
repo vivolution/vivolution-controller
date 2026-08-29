@@ -1,4 +1,3 @@
-property workingVmId : "81C7DE36-9421-4E1C-AC4E-48336131D1EC"
 property rebuildVmName : "vivo-cp1-lab-rebuild"
 property rebuildMarker : "vivolution-cp1-disposable-rebuild-v1"
 property freshDiskSizeMiB : 65536
@@ -22,10 +21,8 @@ on run argv
     if hostSshPort is hostPortalPort then error "host forwards must use distinct ports"
     if diskMode is not "preserve" and diskMode is not "fresh-64g" then error "disk mode must be preserve or fresh-64g"
     if vmName is not rebuildVmName then error "configuration is restricted to the exact disposable rebuild VM name"
-    if expectedVmId is workingVmId then error "refusing to configure the protected working VM"
     if diskMode is "fresh-64g" then
         if vmName is not rebuildVmName then error "fresh-disk mode is restricted to the exact disposable rebuild VM name"
-        if expectedVmId is workingVmId then error "refusing to replace the protected working VM disk"
     end if
 
     set isoFile to POSIX file isoPath

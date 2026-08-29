@@ -15,6 +15,17 @@ until the final Azure acceptance test is explicitly approved.
 
 ## Local commands
 
+From a completely empty UTM registry and Documents directory, first create and
+base-verify the protected Debian VM:
+
+```bash
+lab/utm/bootstrap-lab.sh
+```
+
+The script records UTM's generated UUID and pins the fresh SSH host key. It
+never deletes or replaces an existing VM. See `lab/utm/README.md` for the
+empty-state and failure-recovery contract.
+
 ```bash
 bin/cpctl init
 bin/cpctl trust-init
@@ -136,7 +147,7 @@ passwordless sudo only on the disposable UTM VM; that is not the Azure policy.
 
 The current automation covers the host, nftables, PostgreSQL, PgBouncer,
 Podman, and an immutable Django controller image with active/previous release
-markers; replacement qualification of this combined layer remains in progress.
+markers. The latest sealed evidence is authoritative for qualification status.
 The enrollment gateway and step-ca are unimplemented future layers that require
 separate implementation and qualification. SIP signaling, RTP/media, Edge
 Agent behavior, signed artifacts, and production telemetry are also outside
