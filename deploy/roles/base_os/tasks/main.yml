@@ -102,7 +102,7 @@
   ansible.builtin.set_fact:
     cp_systemd_resolved_llmnr_assignments: >-
       {{ cp_systemd_resolved_merged_config.stdout |
-         regex_findall('(?m)^\\s*LLMNR\\s*=\\s*([^#;\\s]+)\\s*$') }}
+         regex_findall('(?m)^\s*LLMNR\s*=\s*([^#;\s]+)\s*$') }}
 
 - name: Require the managed policy to be the effective LLMNR assignment
   ansible.builtin.assert:
