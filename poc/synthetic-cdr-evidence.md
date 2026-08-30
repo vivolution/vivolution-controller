@@ -17,9 +17,12 @@ the complete fixture manifest digest.
 The signed tenant fragment contains guarded accounting hooks. The privileged
 runtime renderer enables them only for `SYNTHETIC_PRIVATE`; the
 `DIRECT_ROUTING` renderer does not define the guard, so the hooks are
-preprocessed out. OpenSIPS 3.6 provides `xlog` from its pinned core binary;
-there is no separate `xlog.so` module to load. A marker is emitted only when
-both fixed headers are present:
+preprocessed out. The synthetic runtime also sets the transaction module's
+`onreply_avp_mode` to exactly `1`, so the immutable test identity and direction
+AVPs set on the request transaction remain visible to its named reply route.
+Direct Routing does not enable that parameter. OpenSIPS 3.6 provides `xlog`
+from its pinned core binary; there is no separate `xlog.so` module to load. A
+marker is emitted only when both fixed headers are present:
 
 - `X-Vivolution-Fixture: no-pstn`
 - `X-Vivolution-Test-ID: YYYYMMDDTHHMMSSZ-sbc1|sbc2-<pid>`
@@ -33,9 +36,22 @@ refuses Direct Routing, reads only the fixed root-owned node facts and runtime
 authority, and queries only `opensips.service` within the test-derived bounded
 journal window. It requires one `START` and one `FINAL` marker for each fixed
 direction, exact OpenSIPS user/service provenance, a single boot identity per
-call, and no duplicates. The immutable canonical result is stored as
+call, and no duplicates. The parser accepts only the exact raw, `NOTICE:`, or
+legacy `NOTICE:script: ` journal presentation immediately before the marker;
+any other prefix fails closed. Prefix text is never retained in the canonical
+evidence. The immutable canonical result is stored as
 `/var/lib/vivolution-edge/synthetic-cdr-evidence/<test-id>.json` with mode
 `0400`.
+
+Changing the privileged runtime renderer alone does not rewrite an already
+active immutable OpenSIPS configuration. After deploying reviewed source, the
+Edge must receive a newly activated signed release (or an equivalently
+qualified replacement release) before the reply-route setting can be claimed;
+a source-refresh receipt by itself is not that activation evidence.
+The exact committed-node maintenance path is
+`deploy/playbooks/refresh-active-edge-cdr-exporter.yml`; it digest-pins and
+atomically replaces only the root-only exporter, rolls exact old bytes back on
+validation failure, and leaves runtime identity and health unchanged.
 
 The voice fixture records Asterisk CDR CSV rows with direction-specific
 account codes. Its normalizer requires exactly one answered logical record in

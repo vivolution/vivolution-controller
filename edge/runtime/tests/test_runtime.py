@@ -1474,6 +1474,9 @@ class RuntimeTests(unittest.TestCase):
             self.harness.layout.secrets,
         ).decode("ascii")
         self.assertIn("#!define VIVO_SYNTHETIC_CDR", synthetic)
+        self.assertEqual(
+            synthetic.count('modparam("tm", "onreply_avp_mode", 1)'), 1
+        )
         self.assertNotIn('loadmodule "xlog.so"', synthetic)
         self.assertEqual(synthetic.count("VIVO_SYNTHETIC_CDR_V1"), 9)
         self.assertIn("TEAMS_FIXTURE_TO_PBX_FIXTURE", synthetic)
@@ -1549,6 +1552,7 @@ class RuntimeTests(unittest.TestCase):
         ).decode("ascii")
 
         self.assertNotIn("#!define VIVO_SYNTHETIC_CDR", direct)
+        self.assertNotIn('modparam("tm", "onreply_avp_mode", 1)', direct)
         self.assertNotIn('loadmodule "xlog.so"', direct)
         self.assertIn("#!ifdef VIVO_SYNTHETIC_CDR", direct)
         self.assertEqual(

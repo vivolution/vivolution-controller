@@ -1,0 +1,646 @@
+---
+- name: Refresh the reviewed synthetic CDR exporter on committed private Edge nodes
+  hosts: edge_nodes
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  order: sorted
+  serial: 1
+
+  vars:
+    edge_cdr_exporter_refresh_controller_source: >-
+      {{ playbook_dir }}/../roles/edge_runtime_install/files/edge_synthetic_cdr_export.py
+    edge_cdr_exporter_refresh_remote_source: >-
+      /usr/local/sbin/vivolution-edge-synthetic-cdr-export
+    edge_cdr_exporter_refresh_remote_parent: /usr/local/sbin
+    edge_cdr_exporter_refresh_evidence_root: >-
+      {{ inventory_dir }}/generated/cdr-exporter-refresh
+
+  pre_tasks:
+    - name: Select the explicit per-node CDR exporter refresh contract
+      ansible.builtin.set_fact:
+        edge_cdr_exporter_refresh_target: >-
+          {{ (edge_cdr_exporter_refresh_targets | default({})).get(inventory_hostname, {}) }}
+
+    - name: Inspect the operating-system hostname before accepting CDR refresh authority
+      ansible.builtin.command:
+        argv: [/usr/bin/hostnamectl, --static]
+      register: edge_cdr_exporter_refresh_hostname
+      changed_when: false
+
+    - name: Require explicit bounded CDR exporter digest authority
+      ansible.builtin.assert:
+        that:
+          - edge_cdr_exporter_refresh_acknowledgement == 'REFRESH_ACTIVE_SYNTHETIC_CDR_EXPORTER'
+          - edge_cdr_exporter_refresh_single_operator_acknowledgement == 'NO_CONCURRENT_EDGE_ACTIVATION_OR_RECOVERY'
+          - edge_cdr_exporter_refresh_targets is mapping
+          - edge_cdr_exporter_refresh_targets.keys() | list | sort == ansible_play_hosts_all | sort
+          - edge_cdr_exporter_refresh_target == edge_cdr_exporter_refresh_targets[inventory_hostname]
+          - (edge_cdr_exporter_refresh_target.keys() | list | sort) == ['activeSequence', 'generation', 'lastEvidenceDigest', 'manifestDigest', 'nodeId', 'profile', 'runtimeReleaseDigest']
+          - edge_cdr_exporter_refresh_target.nodeId == inventory_hostname
+          - edge_cdr_exporter_refresh_target.profile == 'SYNTHETIC_PRIVATE'
+          - edge_cdr_exporter_refresh_target.profile == edge_runtime_profile
+          - edge_cdr_exporter_refresh_target.generation is number
+          - edge_cdr_exporter_refresh_target.generation | int >= 1
+          - edge_cdr_exporter_refresh_target.generation | int == edge_generation | int
+          - edge_cdr_exporter_refresh_target.activeSequence is number
+          - edge_cdr_exporter_refresh_target.activeSequence | int >= 1
+          - edge_cdr_exporter_refresh_target.activeSequence | int <= 9007199254740991
+          - edge_cdr_exporter_refresh_target.manifestDigest is match('^sha256:[0-9a-f]{64}$')
+          - edge_cdr_exporter_refresh_target.runtimeReleaseDigest is match('^sha256:[0-9a-f]{64}$')
+          - edge_cdr_exporter_refresh_target.lastEvidenceDigest is match('^sha256:[0-9a-f]{64}$')
+          - edge_cdr_exporter_refresh_expected_old_sha256 is match('^[0-9a-f]{64}$')
+          - edge_cdr_exporter_refresh_expected_new_sha256 is match('^[0-9a-f]{64}$')
+          - edge_cdr_exporter_refresh_expected_old_sha256 != edge_cdr_exporter_refresh_expected_new_sha256
+          - edge_expected_hostname is match('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+          - edge_cdr_exporter_refresh_hostname.stdout | trim == edge_expected_hostname
+          - edge_cdr_exporter_refresh_controller_source == playbook_dir ~ '/../roles/edge_runtime_install/files/edge_synthetic_cdr_export.py'
+          - edge_cdr_exporter_refresh_remote_source == '/usr/local/sbin/vivolution-edge-synthetic-cdr-export'
+          - edge_cdr_exporter_refresh_remote_parent == '/usr/local/sbin'
+          - edge_cdr_exporter_refresh_evidence_root == inventory_dir ~ '/generated/cdr-exporter-refresh'
+        fail_msg: >-
+          CDR exporter refresh requires the exact play host set, committed
+          SYNTHETIC_PRIVATE identity, distinct reviewed old/new SHA-256 values,
+          installed hostname, and both one-time operator acknowledgements.
+
+    - name: Define fixed same-directory CDR exporter transaction paths
+      ansible.builtin.set_fact:
+        edge_cdr_exporter_refresh_stage: >-
+          {{ edge_cdr_exporter_refresh_remote_parent }}/.vivolution-edge-synthetic-cdr-export.refresh-{{ edge_cdr_exporter_refresh_expected_new_sha256 }}.stage
+        edge_cdr_exporter_refresh_backup: >-
+          {{ edge_cdr_exporter_refresh_remote_parent }}/.vivolution-edge-synthetic-cdr-export.refresh-{{ edge_cdr_exporter_refresh_expected_old_sha256 }}.backup
+        edge_cdr_exporter_refresh_evidence_file: >-
+          {{ edge_cdr_exporter_refresh_evidence_root }}/{{ inventory_hostname }}-{{ edge_cdr_exporter_refresh_expected_new_sha256 }}.json
+
+    - name: Require exact derived CDR transaction and evidence paths
+      ansible.builtin.assert:
+        that:
+          - >-
+            edge_cdr_exporter_refresh_stage ==
+            '/usr/local/sbin/.vivolution-edge-synthetic-cdr-export.refresh-' ~
+            edge_cdr_exporter_refresh_expected_new_sha256 ~ '.stage'
+          - >-
+            edge_cdr_exporter_refresh_backup ==
+            '/usr/local/sbin/.vivolution-edge-synthetic-cdr-export.refresh-' ~
+            edge_cdr_exporter_refresh_expected_old_sha256 ~ '.backup'
+          - >-
+            edge_cdr_exporter_refresh_evidence_file ==
+            inventory_dir ~ '/generated/cdr-exporter-refresh/' ~ inventory_hostname ~ '-' ~
+            edge_cdr_exporter_refresh_expected_new_sha256 ~ '.json'
+        fail_msg: Derived CDR exporter transaction or evidence paths were overridden.
+
+    - name: Inspect the reviewed controller CDR exporter
+      ansible.builtin.stat:
+        path: "{{ edge_cdr_exporter_refresh_controller_source }}"
+        follow: false
+        get_checksum: true
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      register: edge_cdr_exporter_refresh_controller_stat
+
+    - name: Require exact bounded single-link controller CDR exporter bytes
+      ansible.builtin.assert:
+        that:
+          - edge_cdr_exporter_refresh_controller_stat.stat.exists
+          - edge_cdr_exporter_refresh_controller_stat.stat.isreg | default(false)
+          - not (edge_cdr_exporter_refresh_controller_stat.stat.islnk | default(false))
+          - edge_cdr_exporter_refresh_controller_stat.stat.nlink | int == 1
+          - edge_cdr_exporter_refresh_controller_stat.stat.size | int > 0
+          - edge_cdr_exporter_refresh_controller_stat.stat.size | int <= 1048576
+          - edge_cdr_exporter_refresh_controller_stat.stat.mode in ['0400', '0440', '0444', '0500', '0540', '0544', '0600', '0640', '0644']
+          - edge_cdr_exporter_refresh_controller_stat.stat.checksum == edge_cdr_exporter_refresh_expected_new_sha256
+        fail_msg: The controller CDR exporter is linked, oversized, writable by untrusted users, or differs from the pinned new digest.
+
+    - name: Read installed CDR exporter identity inputs
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - /var/lib/vivolution-edge/runtime/runtime-authority.json
+        - /etc/vivolution-edge/node-facts.json
+        - /usr/lib/vivolution-edge/config/node-facts.json
+      register: edge_cdr_exporter_refresh_identity_raw
+
+    - name: Decode installed CDR exporter identity inputs
+      ansible.builtin.set_fact:
+        edge_cdr_exporter_refresh_authority: >-
+          {{ edge_cdr_exporter_refresh_identity_raw.results[0].content | b64decode | from_json }}
+        edge_cdr_exporter_refresh_root_facts: >-
+          {{ edge_cdr_exporter_refresh_identity_raw.results[1].content | b64decode | from_json }}
+        edge_cdr_exporter_refresh_compiler_facts: >-
+          {{ edge_cdr_exporter_refresh_identity_raw.results[2].content | b64decode | from_json }}
+
+    - name: Bind CDR exporter refresh to exact installed private authority
+      ansible.builtin.assert:
+        that:
+          - edge_cdr_exporter_refresh_authority.apiVersion == 'edge.vivolution.ae/runtime-authority/v0.1'
+          - edge_cdr_exporter_refresh_authority.nodeId == inventory_hostname
+          - edge_cdr_exporter_refresh_authority.profile == edge_cdr_exporter_refresh_target.profile
+          - edge_cdr_exporter_refresh_authority.generation | int == edge_cdr_exporter_refresh_target.generation | int
+          - edge_cdr_exporter_refresh_authority.slot == edge_slot
+          - edge_cdr_exporter_refresh_identity_raw.results[1].content == edge_cdr_exporter_refresh_identity_raw.results[2].content
+          - edge_cdr_exporter_refresh_root_facts == edge_cdr_exporter_refresh_compiler_facts
+          - edge_cdr_exporter_refresh_root_facts.nodeId == inventory_hostname
+          - edge_cdr_exporter_refresh_root_facts.generation | int == edge_cdr_exporter_refresh_target.generation | int
+          - edge_cdr_exporter_refresh_root_facts.slot == edge_slot
+          - edge_cdr_exporter_refresh_root_facts.clusterId == edge_cluster_id
+          - edge_cdr_exporter_refresh_root_facts.tenantContextId == edge_tenant_context_id
+          - edge_cdr_exporter_refresh_root_facts.allocationId == edge_allocation_id
+          - edge_cdr_exporter_refresh_root_facts.publicIpv4 == edge_public_ipv4
+          - edge_cdr_exporter_refresh_root_facts.privateIpv4 == edge_private_ipv4
+        fail_msg: Installed authority or node facts differ from the selected private Edge.
+
+    - name: Inspect installed CDR exporter hierarchy and runtime journal
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+        get_checksum: "{{ item == edge_cdr_exporter_refresh_remote_source }}"
+        checksum_algorithm: sha256
+      loop:
+        - "{{ edge_cdr_exporter_refresh_remote_parent }}"
+        - "{{ edge_cdr_exporter_refresh_remote_source }}"
+        - /var/lib/vivolution-edge/runtime/transaction.json
+      register: edge_cdr_exporter_refresh_path_stats
+
+    - name: Require exact installed old CDR exporter and no runtime transaction
+      ansible.builtin.assert:
+        that:
+          - edge_cdr_exporter_refresh_path_stats.results[0].stat.exists
+          - edge_cdr_exporter_refresh_path_stats.results[0].stat.isdir | default(false)
+          - not (edge_cdr_exporter_refresh_path_stats.results[0].stat.islnk | default(false))
+          - edge_cdr_exporter_refresh_path_stats.results[0].stat.pw_name == 'root'
+          - edge_cdr_exporter_refresh_path_stats.results[0].stat.gr_name == 'root'
+          - edge_cdr_exporter_refresh_path_stats.results[0].stat.mode == '0755'
+          - edge_cdr_exporter_refresh_path_stats.results[1].stat.exists
+          - edge_cdr_exporter_refresh_path_stats.results[1].stat.isreg | default(false)
+          - not (edge_cdr_exporter_refresh_path_stats.results[1].stat.islnk | default(false))
+          - edge_cdr_exporter_refresh_path_stats.results[1].stat.nlink | int == 1
+          - edge_cdr_exporter_refresh_path_stats.results[1].stat.pw_name == 'root'
+          - edge_cdr_exporter_refresh_path_stats.results[1].stat.gr_name == 'root'
+          - edge_cdr_exporter_refresh_path_stats.results[1].stat.mode == '0500'
+          - edge_cdr_exporter_refresh_path_stats.results[1].stat.size | int > 0
+          - edge_cdr_exporter_refresh_path_stats.results[1].stat.size | int <= 1048576
+          - edge_cdr_exporter_refresh_path_stats.results[1].stat.checksum == edge_cdr_exporter_refresh_expected_old_sha256
+          - not (edge_cdr_exporter_refresh_path_stats.results[2].stat.exists | default(false))
+          - not (edge_cdr_exporter_refresh_path_stats.results[2].stat.islnk | default(false))
+        fail_msg: Installed CDR exporter differs from the pinned old bytes or a runtime transaction is present.
+
+    - name: Find abandoned CDR exporter refresh transaction files
+      ansible.builtin.find:
+        paths: "{{ edge_cdr_exporter_refresh_remote_parent }}"
+        patterns: '.vivolution-edge-synthetic-cdr-export.refresh-*'
+        hidden: true
+        recurse: false
+        file_type: any
+        follow: false
+      register: edge_cdr_exporter_refresh_debris
+
+    - name: Refuse abandoned CDR exporter refresh material
+      ansible.builtin.assert:
+        that:
+          - edge_cdr_exporter_refresh_debris.matched | int == 0
+          - edge_cdr_exporter_refresh_debris.files | length == 0
+        fail_msg: A prior CDR exporter refresh left transaction material; inspect and recover the exact old digest before retrying.
+
+    - name: Read protected runtime status before CDR exporter mutation
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+      register: edge_cdr_exporter_refresh_runtime_before_raw
+      changed_when: false
+
+    - name: Prove locked runtime health before CDR exporter mutation
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+      register: edge_cdr_exporter_refresh_health_before_raw
+      changed_when: false
+
+    - name: Parse CDR exporter runtime preconditions
+      ansible.builtin.set_fact:
+        edge_cdr_exporter_refresh_runtime_before: >-
+          {{ edge_cdr_exporter_refresh_runtime_before_raw.stdout | from_json }}
+        edge_cdr_exporter_refresh_health_before: >-
+          {{ edge_cdr_exporter_refresh_health_before_raw.stdout | from_json }}
+
+    - name: Require exact committed healthy runtime before CDR exporter refresh
+      ansible.builtin.assert:
+        that:
+          - (edge_cdr_exporter_refresh_runtime_before.keys() | list | sort) == ['active', 'apiVersion', 'highestSeenSequence', 'journalPresent', 'kind', 'lastEvidenceDigest', 'previous']
+          - edge_cdr_exporter_refresh_runtime_before.apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+          - edge_cdr_exporter_refresh_runtime_before.kind == 'EdgeRuntimeStatus'
+          - not (edge_cdr_exporter_refresh_runtime_before.journalPresent | bool)
+          - edge_cdr_exporter_refresh_runtime_before.active.kind == 'CANDIDATE'
+          - edge_cdr_exporter_refresh_runtime_before.active.sequence | int == edge_cdr_exporter_refresh_target.activeSequence | int
+          - edge_cdr_exporter_refresh_runtime_before.active.sequence | int == edge_cdr_exporter_refresh_runtime_before.highestSeenSequence | int
+          - edge_cdr_exporter_refresh_runtime_before.active.manifestDigest == edge_cdr_exporter_refresh_target.manifestDigest
+          - edge_cdr_exporter_refresh_runtime_before.active.releaseDigest == edge_cdr_exporter_refresh_target.runtimeReleaseDigest
+          - edge_cdr_exporter_refresh_runtime_before.lastEvidenceDigest == edge_cdr_exporter_refresh_target.lastEvidenceDigest
+          - edge_cdr_exporter_refresh_health_before.active == edge_cdr_exporter_refresh_runtime_before.active
+          - edge_cdr_exporter_refresh_health_before.highestSeenSequence | int == edge_cdr_exporter_refresh_runtime_before.highestSeenSequence | int
+          - edge_cdr_exporter_refresh_health_before.runtimeChecks | length > 0
+          - edge_cdr_exporter_refresh_health_before.runtimeChecks | rejectattr('status', 'equalto', 'PASSED') | list | length == 0
+        fail_msg: Only the pinned transaction-free healthy synthetic runtime may receive this exporter refresh.
+
+    - name: Inspect deterministic CDR exporter evidence path
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ edge_cdr_exporter_refresh_evidence_root }}"
+        - "{{ edge_cdr_exporter_refresh_evidence_file }}"
+      delegate_to: localhost
+      become: false
+      register: edge_cdr_exporter_refresh_existing_evidence
+
+    - name: Require protected evidence root and brand-new CDR exporter leaf
+      ansible.builtin.assert:
+        that:
+          - >-
+            not (edge_cdr_exporter_refresh_existing_evidence.results[0].stat.exists | default(false)) or
+            (edge_cdr_exporter_refresh_existing_evidence.results[0].stat.isdir | default(false) and
+             not (edge_cdr_exporter_refresh_existing_evidence.results[0].stat.islnk | default(false)) and
+             edge_cdr_exporter_refresh_existing_evidence.results[0].stat.mode == '0700')
+          - not (edge_cdr_exporter_refresh_existing_evidence.results[1].stat.exists | default(false))
+          - not (edge_cdr_exporter_refresh_existing_evidence.results[1].stat.islnk | default(false))
+        fail_msg: Refusing to replace existing CDR exporter refresh evidence.
+
+  tasks:
+    - name: Transactionally replace and validate exact CDR exporter bytes
+      block:
+        - name: Stage reviewed CDR exporter beside installed target
+          ansible.builtin.copy:
+            src: "{{ edge_cdr_exporter_refresh_controller_source }}"
+            dest: "{{ edge_cdr_exporter_refresh_stage }}"
+            owner: root
+            group: root
+            mode: '0500'
+            force: true
+
+        - name: Preserve exact old CDR exporter beside installed target
+          ansible.builtin.copy:
+            src: "{{ edge_cdr_exporter_refresh_remote_source }}"
+            dest: "{{ edge_cdr_exporter_refresh_backup }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: '0500'
+            force: false
+
+        - name: Inspect protected CDR exporter stage and backup
+          ansible.builtin.stat:
+            path: "{{ item.path }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          loop:
+            - path: "{{ edge_cdr_exporter_refresh_stage }}"
+              sha256: "{{ edge_cdr_exporter_refresh_expected_new_sha256 }}"
+            - path: "{{ edge_cdr_exporter_refresh_backup }}"
+              sha256: "{{ edge_cdr_exporter_refresh_expected_old_sha256 }}"
+          register: edge_cdr_exporter_refresh_transaction_stats
+
+        - name: Require exact protected CDR exporter transaction bytes
+          ansible.builtin.assert:
+            that:
+              - item.stat.exists
+              - item.stat.isreg | default(false)
+              - not (item.stat.islnk | default(false))
+              - item.stat.nlink | int == 1
+              - item.stat.pw_name == 'root'
+              - item.stat.gr_name == 'root'
+              - item.stat.mode == '0500'
+              - item.stat.size | int > 0
+              - item.stat.size | int <= 1048576
+              - item.stat.checksum == item.item.sha256
+            fail_msg: Staged or backup CDR exporter violates the exact digest/type/ownership boundary.
+          loop: "{{ edge_cdr_exporter_refresh_transaction_stats.results }}"
+
+        - name: Atomically install reviewed CDR exporter
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - -c
+              - |
+                import hashlib, os, stat, sys
+                target, stage, old_digest, new_digest = sys.argv[1:]
+                parent = os.path.dirname(target)
+                if os.path.dirname(stage) != parent:
+                    raise SystemExit("stage is not beside target")
+                for path, expected in ((target, old_digest), (stage, new_digest)):
+                    value = os.lstat(path)
+                    if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+                        raise SystemExit("CDR exporter transaction leaf is invalid")
+                    if value.st_uid != 0 or value.st_gid != 0 or stat.S_IMODE(value.st_mode) != 0o500:
+                        raise SystemExit("CDR exporter transaction metadata changed")
+                    with open(path, "rb", buffering=0) as handle:
+                        if hashlib.sha256(handle.read(1048577)).hexdigest() != expected:
+                            raise SystemExit("CDR exporter transaction digest changed")
+                os.replace(stage, target)
+                directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+              - "{{ edge_cdr_exporter_refresh_remote_source }}"
+              - "{{ edge_cdr_exporter_refresh_stage }}"
+              - "{{ edge_cdr_exporter_refresh_expected_old_sha256 }}"
+              - "{{ edge_cdr_exporter_refresh_expected_new_sha256 }}"
+          changed_when: true
+
+        - name: Inspect installed reviewed CDR exporter
+          ansible.builtin.stat:
+            path: "{{ edge_cdr_exporter_refresh_remote_source }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          register: edge_cdr_exporter_refresh_new_stat
+
+        - name: Require exact installed reviewed CDR exporter protection
+          ansible.builtin.assert:
+            that:
+              - edge_cdr_exporter_refresh_new_stat.stat.exists
+              - edge_cdr_exporter_refresh_new_stat.stat.isreg | default(false)
+              - not (edge_cdr_exporter_refresh_new_stat.stat.islnk | default(false))
+              - edge_cdr_exporter_refresh_new_stat.stat.nlink | int == 1
+              - edge_cdr_exporter_refresh_new_stat.stat.pw_name == 'root'
+              - edge_cdr_exporter_refresh_new_stat.stat.gr_name == 'root'
+              - edge_cdr_exporter_refresh_new_stat.stat.mode == '0500'
+              - edge_cdr_exporter_refresh_new_stat.stat.checksum == edge_cdr_exporter_refresh_expected_new_sha256
+            fail_msg: Atomic CDR exporter replacement installed unexpected bytes or metadata.
+
+        - name: Compile and import installed CDR exporter in isolated interpreter
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - -c
+              - |
+                import hashlib, importlib.util, pathlib, sys
+                source = pathlib.Path(sys.argv[1])
+                raw = source.read_bytes()
+                if hashlib.sha256(raw).hexdigest() != sys.argv[2]:
+                    raise SystemExit("installed CDR exporter digest changed")
+                compile(raw, str(source), "exec")
+                sys.path.insert(0, "/usr/lib/vivolution-edge/python")
+                spec = importlib.util.spec_from_file_location("vivolution_cdr_export_refresh", source)
+                if spec is None or spec.loader is None:
+                    raise SystemExit("cannot construct CDR exporter module spec")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                if module.MARKER != "VIVO_SYNTHETIC_CDR_V1":
+                    raise SystemExit("CDR exporter marker contract changed")
+                if tuple(module.OPENSIPS_LOG_PREFIXES) != ("", "NOTICE:", "NOTICE:script: "):
+                    raise SystemExit("CDR exporter prefix contract is not the reviewed exact set")
+              - "{{ edge_cdr_exporter_refresh_remote_source }}"
+              - "{{ edge_cdr_exporter_refresh_expected_new_sha256 }}"
+          changed_when: false
+
+        - name: Reprove locked runtime health after CDR exporter refresh
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+          register: edge_cdr_exporter_refresh_health_after_raw
+          changed_when: false
+
+        - name: Re-read protected runtime status after CDR exporter refresh
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+          register: edge_cdr_exporter_refresh_runtime_after_raw
+          changed_when: false
+
+        - name: Require unchanged healthy runtime after CDR exporter refresh
+          ansible.builtin.assert:
+            that:
+              - (edge_cdr_exporter_refresh_runtime_after_raw.stdout | from_json) == edge_cdr_exporter_refresh_runtime_before
+              - (edge_cdr_exporter_refresh_health_after_raw.stdout | from_json).active == edge_cdr_exporter_refresh_runtime_before.active
+              - (edge_cdr_exporter_refresh_health_after_raw.stdout | from_json).highestSeenSequence | int == edge_cdr_exporter_refresh_runtime_before.highestSeenSequence | int
+              - (edge_cdr_exporter_refresh_health_after_raw.stdout | from_json).runtimeChecks | length > 0
+              - (edge_cdr_exporter_refresh_health_after_raw.stdout | from_json).runtimeChecks | rejectattr('status', 'equalto', 'PASSED') | list | length == 0
+            fail_msg: CDR exporter refresh changed runtime identity or health.
+
+        - name: Build deterministic non-secret CDR exporter refresh evidence
+          ansible.builtin.set_fact:
+            edge_cdr_exporter_refresh_evidence:
+              active: "{{ edge_cdr_exporter_refresh_runtime_before.active }}"
+              apiVersion: edge.vivolution.ae/cdr-exporter-refresh/v0.1
+              generation: "{{ edge_cdr_exporter_refresh_target.generation | int }}"
+              kind: EdgeCdrExporterRefreshEvidence
+              lastEvidenceDigest: "{{ edge_cdr_exporter_refresh_runtime_before.lastEvidenceDigest }}"
+              newSha256: "sha256:{{ edge_cdr_exporter_refresh_expected_new_sha256 }}"
+              nodeId: "{{ inventory_hostname }}"
+              oldSha256: "sha256:{{ edge_cdr_exporter_refresh_expected_old_sha256 }}"
+              profile: SYNTHETIC_PRIVATE
+              runtimeStateUnchanged: true
+              sourcePath: /usr/local/sbin/vivolution-edge-synthetic-cdr-export
+              status: ACTIVE_SYNTHETIC_CDR_EXPORTER_REFRESHED
+
+        - name: Serialize deterministic CDR exporter refresh evidence
+          ansible.builtin.set_fact:
+            edge_cdr_exporter_refresh_evidence_bytes: >-
+              {{ edge_cdr_exporter_refresh_evidence | to_nice_json }}{{ '\n' }}
+            edge_cdr_exporter_refresh_evidence_sha256: >-
+              {{ ((edge_cdr_exporter_refresh_evidence | to_nice_json) ~ '\n') | hash('sha256') }}
+
+        - name: Create protected CDR exporter evidence directory
+          ansible.builtin.file:
+            path: "{{ edge_cdr_exporter_refresh_evidence_root }}"
+            state: directory
+            mode: '0700'
+          delegate_to: localhost
+          become: false
+
+        - name: Preserve deterministic CDR exporter refresh evidence
+          ansible.builtin.copy:
+            content: "{{ edge_cdr_exporter_refresh_evidence_bytes }}"
+            dest: "{{ edge_cdr_exporter_refresh_evidence_file }}"
+            mode: '0600'
+            force: false
+          delegate_to: localhost
+          become: false
+
+        - name: Verify protected CDR exporter refresh evidence
+          ansible.builtin.stat:
+            path: "{{ edge_cdr_exporter_refresh_evidence_file }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          delegate_to: localhost
+          become: false
+          register: edge_cdr_exporter_refresh_final_evidence
+
+        - name: Require protected CDR exporter evidence before removing rollback
+          ansible.builtin.assert:
+            that:
+              - edge_cdr_exporter_refresh_final_evidence.stat.exists
+              - edge_cdr_exporter_refresh_final_evidence.stat.isreg | default(false)
+              - not (edge_cdr_exporter_refresh_final_evidence.stat.islnk | default(false))
+              - edge_cdr_exporter_refresh_final_evidence.stat.nlink | int == 1
+              - edge_cdr_exporter_refresh_final_evidence.stat.mode == '0600'
+              - edge_cdr_exporter_refresh_final_evidence.stat.size | int > 0
+              - edge_cdr_exporter_refresh_final_evidence.stat.size | int <= 65536
+              - edge_cdr_exporter_refresh_final_evidence.stat.checksum == edge_cdr_exporter_refresh_evidence_sha256
+            fail_msg: CDR exporter refresh evidence was not preserved exactly.
+
+        - name: Report exact reviewed CDR exporter refresh
+          ansible.builtin.debug:
+            msg: >-
+              ACTIVE_SYNTHETIC_CDR_EXPORTER_REFRESHED node={{ inventory_hostname }}
+              old=sha256:{{ edge_cdr_exporter_refresh_expected_old_sha256 }}
+              new=sha256:{{ edge_cdr_exporter_refresh_expected_new_sha256 }}
+
+        - name: Remove exact old CDR exporter backup after acceptance
+          ansible.builtin.file:
+            path: "{{ edge_cdr_exporter_refresh_backup }}"
+            state: absent
+
+      rescue:
+        - name: Inspect CDR exporter rollback bytes and current target
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          loop:
+            - "{{ edge_cdr_exporter_refresh_backup }}"
+            - "{{ edge_cdr_exporter_refresh_remote_source }}"
+          register: edge_cdr_exporter_refresh_rescue_stats
+
+        - name: Classify CDR exporter rollback requirement
+          ansible.builtin.set_fact:
+            edge_cdr_exporter_refresh_backup_present: >-
+              {{ edge_cdr_exporter_refresh_rescue_stats.results[0].stat.exists | default(false) }}
+
+        - name: Require exact rollback exporter or untouched original
+          ansible.builtin.assert:
+            that:
+              - >-
+                (edge_cdr_exporter_refresh_backup_present | bool and
+                 edge_cdr_exporter_refresh_rescue_stats.results[0].stat.isreg | default(false) and
+                 not (edge_cdr_exporter_refresh_rescue_stats.results[0].stat.islnk | default(false)) and
+                 edge_cdr_exporter_refresh_rescue_stats.results[0].stat.nlink | int == 1 and
+                 edge_cdr_exporter_refresh_rescue_stats.results[0].stat.pw_name == 'root' and
+                 edge_cdr_exporter_refresh_rescue_stats.results[0].stat.gr_name == 'root' and
+                 edge_cdr_exporter_refresh_rescue_stats.results[0].stat.mode == '0500' and
+                 edge_cdr_exporter_refresh_rescue_stats.results[0].stat.checksum == edge_cdr_exporter_refresh_expected_old_sha256) or
+                (not (edge_cdr_exporter_refresh_backup_present | bool) and
+                 edge_cdr_exporter_refresh_rescue_stats.results[1].stat.exists and
+                 edge_cdr_exporter_refresh_rescue_stats.results[1].stat.isreg | default(false) and
+                 not (edge_cdr_exporter_refresh_rescue_stats.results[1].stat.islnk | default(false)) and
+                 edge_cdr_exporter_refresh_rescue_stats.results[1].stat.nlink | int == 1 and
+                 edge_cdr_exporter_refresh_rescue_stats.results[1].stat.pw_name == 'root' and
+                 edge_cdr_exporter_refresh_rescue_stats.results[1].stat.gr_name == 'root' and
+                 edge_cdr_exporter_refresh_rescue_stats.results[1].stat.mode == '0500' and
+                 edge_cdr_exporter_refresh_rescue_stats.results[1].stat.checksum == edge_cdr_exporter_refresh_expected_old_sha256)
+            fail_msg: CDR exporter refresh cannot prove exact rollback bytes; transaction material is retained.
+
+        - name: Atomically restore exact original CDR exporter
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - -c
+              - |
+                import hashlib, os, stat, sys
+                target, backup, expected = sys.argv[1:]
+                parent = os.path.dirname(target)
+                value = os.lstat(backup)
+                if os.path.dirname(backup) != parent or not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+                    raise SystemExit("rollback CDR exporter path is invalid")
+                if value.st_uid != 0 or value.st_gid != 0 or stat.S_IMODE(value.st_mode) != 0o500:
+                    raise SystemExit("rollback CDR exporter metadata changed")
+                with open(backup, "rb", buffering=0) as handle:
+                    if hashlib.sha256(handle.read(1048577)).hexdigest() != expected:
+                        raise SystemExit("rollback CDR exporter digest changed")
+                os.replace(backup, target)
+                directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+              - "{{ edge_cdr_exporter_refresh_remote_source }}"
+              - "{{ edge_cdr_exporter_refresh_backup }}"
+              - "{{ edge_cdr_exporter_refresh_expected_old_sha256 }}"
+          changed_when: true
+          when: edge_cdr_exporter_refresh_backup_present | bool
+
+        - name: Remove failed CDR exporter stage
+          ansible.builtin.file:
+            path: "{{ edge_cdr_exporter_refresh_stage }}"
+            state: absent
+
+        - name: Remove CDR exporter evidence invalidated by rollback
+          ansible.builtin.file:
+            path: "{{ edge_cdr_exporter_refresh_evidence_file }}"
+            state: absent
+          delegate_to: localhost
+          become: false
+
+        - name: Reinspect rolled-back CDR exporter
+          ansible.builtin.stat:
+            path: "{{ edge_cdr_exporter_refresh_remote_source }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          register: edge_cdr_exporter_refresh_rollback_stat
+
+        - name: Require exact original CDR exporter after rollback
+          ansible.builtin.assert:
+            that:
+              - edge_cdr_exporter_refresh_rollback_stat.stat.exists
+              - edge_cdr_exporter_refresh_rollback_stat.stat.isreg | default(false)
+              - not (edge_cdr_exporter_refresh_rollback_stat.stat.islnk | default(false))
+              - edge_cdr_exporter_refresh_rollback_stat.stat.nlink | int == 1
+              - edge_cdr_exporter_refresh_rollback_stat.stat.pw_name == 'root'
+              - edge_cdr_exporter_refresh_rollback_stat.stat.gr_name == 'root'
+              - edge_cdr_exporter_refresh_rollback_stat.stat.mode == '0500'
+              - edge_cdr_exporter_refresh_rollback_stat.stat.checksum == edge_cdr_exporter_refresh_expected_old_sha256
+            fail_msg: Original CDR exporter was not restored exactly.
+
+        - name: Compile rolled-back original CDR exporter
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - -c
+              - |
+                import hashlib, pathlib, sys
+                source = pathlib.Path(sys.argv[1])
+                raw = source.read_bytes()
+                if hashlib.sha256(raw).hexdigest() != sys.argv[2]:
+                    raise SystemExit("rolled-back CDR exporter digest changed")
+                compile(raw, str(source), "exec")
+              - "{{ edge_cdr_exporter_refresh_remote_source }}"
+              - "{{ edge_cdr_exporter_refresh_expected_old_sha256 }}"
+          changed_when: false
+
+        - name: Reprove runtime health and identity after CDR exporter rollback
+          block:
+            - name: Read runtime health after CDR exporter rollback
+              ansible.builtin.command:
+                argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+              register: edge_cdr_exporter_refresh_rollback_health_raw
+              changed_when: false
+
+            - name: Read runtime status after CDR exporter rollback
+              ansible.builtin.command:
+                argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+              register: edge_cdr_exporter_refresh_rollback_runtime_raw
+              changed_when: false
+
+        - name: Require unchanged healthy runtime after CDR exporter rollback
+          ansible.builtin.assert:
+            that:
+              - (edge_cdr_exporter_refresh_rollback_runtime_raw.stdout | from_json) == edge_cdr_exporter_refresh_runtime_before
+              - (edge_cdr_exporter_refresh_rollback_health_raw.stdout | from_json).active == edge_cdr_exporter_refresh_runtime_before.active
+              - (edge_cdr_exporter_refresh_rollback_health_raw.stdout | from_json).highestSeenSequence | int == edge_cdr_exporter_refresh_runtime_before.highestSeenSequence | int
+              - (edge_cdr_exporter_refresh_rollback_health_raw.stdout | from_json).runtimeChecks | rejectattr('status', 'equalto', 'PASSED') | list | length == 0
+            fail_msg: CDR exporter rollback did not preserve runtime identity and health.
+
+        - name: Report CDR exporter refresh failure after exact rollback
+          ansible.builtin.fail:
+            msg: >-
+              CDR exporter refresh failed and exact original bytes were
+              atomically restored with unchanged runtime state and health.

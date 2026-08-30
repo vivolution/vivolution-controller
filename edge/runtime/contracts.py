@@ -1748,6 +1748,7 @@ def render_opensips(
         _fail("Teams ingress must have at least one local source authority")
     synthetic_cdr_runtime = (
         "#!define VIVO_SYNTHETIC_CDR\n"
+        'modparam("tm", "onreply_avp_mode", 1)\n'
         if authority.profile == "SYNTHETIC_PRIVATE"
         else ""
     )

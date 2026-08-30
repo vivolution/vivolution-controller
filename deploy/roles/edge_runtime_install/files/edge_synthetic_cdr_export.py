@@ -33,7 +33,11 @@ API_VERSION = "edge.vivolution.ae/synthetic-edge-cdr/v0.1"
 SCOPE = "SYNTHETIC_PRIVATE_NO_PSTN"
 LIVE_M365_STATUS = "NOT_ASSERTED"
 MARKER = "VIVO_SYNTHETIC_CDR_V1"
-OPENSIPS_SCRIPT_LOG_PREFIX = "NOTICE:script: "
+# OpenSIPS 3.6's syslog transport presents xlog() messages with ``NOTICE:``.
+# Retain the two previously reviewed presentations for offline/unit fixtures,
+# but never strip an arbitrary prefix: journal provenance is validated below
+# and the marker must begin immediately after one of these exact values.
+OPENSIPS_LOG_PREFIXES = ("", "NOTICE:", "NOTICE:script: ")
 DIRECTIONS = (
     "TEAMS_FIXTURE_TO_PBX_FIXTURE",
     "PBX_FIXTURE_TO_TEAMS_FIXTURE",
@@ -214,13 +218,17 @@ def _marker_from_message(message: object) -> str | None:
         if MARKER in stripped:
             raise EdgeCdrExportError("OpenSIPS CDR marker spans multiple log lines")
         return None
-    if stripped.startswith(MARKER):
-        marker = stripped
-    elif stripped.startswith(OPENSIPS_SCRIPT_LOG_PREFIX + MARKER):
-        marker = stripped[len(OPENSIPS_SCRIPT_LOG_PREFIX) :]
-    elif MARKER in stripped:
+    marker = next(
+        (
+            stripped[len(prefix) :]
+            for prefix in OPENSIPS_LOG_PREFIXES
+            if stripped.startswith(prefix + MARKER)
+        ),
+        None,
+    )
+    if marker is None and MARKER in stripped:
         raise EdgeCdrExportError("OpenSIPS CDR marker has an unexpected log prefix")
-    else:
+    if marker is None:
         return None
     if marker.find(MARKER, len(MARKER)) >= 0:
         raise EdgeCdrExportError("one journal message contains duplicate CDR markers")

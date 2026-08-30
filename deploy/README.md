@@ -418,6 +418,78 @@ under the ignored private inventory's `generated/runtime-source-refresh/`
 directory. A prior transaction artifact or evidence leaf is never overwritten;
 inspect and recover it instead of deleting it blindly.
 
+### Reviewed active synthetic CDR exporter refresh
+
+`playbooks/refresh-active-edge-cdr-exporter.yml` is the companion bounded POC
+workflow for the root-only
+`/usr/local/sbin/vivolution-edge-synthetic-cdr-export`. The normal installation
+playbook deliberately refuses an already committed Agent/runtime state, while
+the runtime source-refresh workflow above deliberately owns only
+`edge/runtime/contracts.py`. This separate workflow allows reviewed exporter
+parser bytes to be installed without weakening either boundary.
+
+Prepare a mode-`0600` JSON file containing the exact installed and reviewed
+raw SHA-256 values plus the same active identity captured from locked runtime
+status:
+
+```json
+{
+  "edge_cdr_exporter_refresh_acknowledgement": "REFRESH_ACTIVE_SYNTHETIC_CDR_EXPORTER",
+  "edge_cdr_exporter_refresh_expected_new_sha256": "REPLACE_WITH_REVIEWED_EXPORTER_SHA256",
+  "edge_cdr_exporter_refresh_expected_old_sha256": "REPLACE_WITH_EXACT_INSTALLED_EXPORTER_SHA256",
+  "edge_cdr_exporter_refresh_single_operator_acknowledgement": "NO_CONCURRENT_EDGE_ACTIVATION_OR_RECOVERY",
+  "edge_cdr_exporter_refresh_targets": {
+    "sbc1": {
+      "activeSequence": 1,
+      "generation": 2,
+      "lastEvidenceDigest": "sha256:REPLACE_WITH_64_LOWERCASE_HEX",
+      "manifestDigest": "sha256:REPLACE_WITH_64_LOWERCASE_HEX",
+      "nodeId": "sbc1",
+      "profile": "SYNTHETIC_PRIVATE",
+      "runtimeReleaseDigest": "sha256:REPLACE_WITH_64_LOWERCASE_HEX"
+    }
+  }
+}
+```
+
+Run only the explicitly named hosts:
+
+```bash
+chmod 600 /absolute/private/cdr-exporter-refresh.json
+ANSIBLE_ROLES_PATH=deploy/roles ansible-playbook \
+  -i /absolute/private/poc-edge/hosts.yml \
+  --limit sbc1 \
+  -e @/absolute/private/cdr-exporter-refresh.json \
+  deploy/playbooks/refresh-active-edge-cdr-exporter.yml
+```
+
+The playbook binds the host, positive generation and `SYNTHETIC_PRIVATE`
+authority to both installed node-facts copies; pins the exact committed active
+sequence, manifest, release and last evidence digest; refuses a runtime
+transaction or unhealthy runtime; and verifies the old and new exporter bytes
+before mutation. Stage and backup files are root-only mode `0500` leaves beside
+the target. The final rename and any rollback rename are same-filesystem atomic
+and directory-fsynced. The installed module must compile and import in an
+isolated interpreter with the exact reviewed marker and prefix set; locked
+runtime status and health must remain unchanged. Only then is protected,
+deterministic evidence written under `generated/cdr-exporter-refresh/` and the
+old-byte backup released.
+
+Use the existing runtime source refresh and this exporter refresh as two
+serialized, fail-closed maintenance transactions. They are intentionally not
+claimed as one cross-directory atomic operation: a failure between them leaves
+either the old exporter or old runtime renderer, both of which reject or omit
+new CDR evidence rather than falsely accepting it. Resume the incomplete
+digest-pinned workflow before activation. A runner/SSH loss may leave the
+same-directory backup and stage names; the next run refuses that debris until
+an operator proves and restores the exact old digest.
+
+Neither refresh rewrites the active immutable OpenSIPS configuration. After
+both reviewed files are installed, materialize and activate a new signed
+candidate so `modparam("tm", "onreply_avp_mode", 1)` is actually present in the
+synthetic runtime. Direct Routing must not contain that setting. Only fresh
+two-direction calls with four complete journal markers qualify the change.
+
 ## Private synthetic node-failover gate
 
 `playbooks/qualify-synthetic-node-failover.yml` is the bounded disruptive POC

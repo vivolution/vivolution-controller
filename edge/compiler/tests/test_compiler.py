@@ -172,6 +172,7 @@ class CompilerTests(unittest.TestCase):
         self.assertEqual(opensips.count("VIVO_SYNTHETIC_CDR_V1"), 9)
         self.assertEqual(opensips.count("#!ifdef VIVO_SYNTHETIC_CDR"), 9)
         self.assertNotIn("#!define VIVO_SYNTHETIC_CDR", opensips)
+        self.assertNotIn("onreply_avp_mode", opensips)
         self.assertIn("TEAMS_FIXTURE_TO_PBX_FIXTURE", opensips)
         self.assertIn("PBX_FIXTURE_TO_TEAMS_FIXTURE", opensips)
         self.assertIn("|result=ACCEPTED", opensips)

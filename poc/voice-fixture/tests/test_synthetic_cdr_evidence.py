@@ -135,7 +135,9 @@ def raw_cdr(test_id: str = TEST_ID) -> bytes:
     return stream.getvalue().encode("utf-8")
 
 
-def journal_rows(test_id: str = TEST_ID, *, uid: str = "101") -> list[dict]:
+def journal_rows(
+    test_id: str = TEST_ID, *, uid: str = "101", prefix: str = "NOTICE:"
+) -> list[dict]:
     facts = NodeFacts.from_mapping(facts_record())
     token = edge._route_token(facts)
     epoch_usec = 1_788_076_800_000_000
@@ -152,8 +154,8 @@ def journal_rows(test_id: str = TEST_ID, *, uid: str = "101") -> list[dict]:
                 message += f"|result={result}"
             rows.append(
                 {
-                    "MESSAGE": "NOTICE:script: " + message,
-                    "SYSLOG_IDENTIFIER": "opensips",
+                    "MESSAGE": prefix + message,
+                    "SYSLOG_IDENTIFIER": "/usr/sbin/opensips",
                     "_BOOT_ID": BOOT_ID,
                     "_COMM": "opensips",
                     "_SYSTEMD_UNIT": "opensips.service",
@@ -213,18 +215,27 @@ class SyntheticCdrEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["status"], "TWO_LOGICAL_SYNTHETIC_CALLS_ACCOUNTED")
         self.assertEqual([item["result"] for item in evidence["calls"]], ["ACCEPTED", "ACCEPTED"])
         serialized = edge.canonical_bytes(evidence)
-        self.assertNotIn(b"NOTICE:script", serialized)
+        self.assertNotIn(b"NOTICE:", serialized)
         self.assertNotIn(b"Call-ID", serialized)
+
+        for prefix in ("", "NOTICE:", "NOTICE:script: "):
+            accepted = edge_evidence(journal_rows(prefix=prefix))
+            self.assertEqual(
+                accepted["status"], "TWO_LOGICAL_SYNTHETIC_CALLS_ACCOUNTED"
+            )
 
         forged_uid = journal_rows(uid="0")
         with self.assertRaisesRegex(edge.EdgeCdrExportError, "provenance"):
             edge_evidence(forged_uid)
         forged_prefix = journal_rows()
-        forged_prefix[0]["MESSAGE"] = forged_prefix[0]["MESSAGE"].replace(
-            "NOTICE:script: ", "attacker-controlled: ", 1
-        )
+        forged_prefix[0]["MESSAGE"] = "attacker-controlled:" + forged_prefix[0][
+            "MESSAGE"
+        ]
         with self.assertRaisesRegex(edge.EdgeCdrExportError, "unexpected log prefix"):
             edge_evidence(forged_prefix)
+        almost_live_prefix = journal_rows(prefix="NOTICE: ")
+        with self.assertRaisesRegex(edge.EdgeCdrExportError, "unexpected log prefix"):
+            edge_evidence(almost_live_prefix)
         reused_cursor = journal_rows()
         reused_cursor[1]["__CURSOR"] = reused_cursor[0]["__CURSOR"]
         with self.assertRaisesRegex(edge.EdgeCdrExportError, "reuse a journal cursor"):
