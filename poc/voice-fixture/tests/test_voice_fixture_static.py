@@ -355,12 +355,14 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertIn("normalize_socket_bind", readiness)
         self.assertIn("require_exact_word_set", readiness)
         self.assertNotIn("grep -Fq 'IPAddressDeny=any'", readiness)
-        self.assertIn('ip -4 route get "$edge_ip" uid 10001 | head -n 1', readiness)
+        self.assertIn('ip -j -4 route get "$edge_ip" uid 10001', readiness)
         self.assertIn(
-            'via $controller_gateway dev $controller_interface src '
-            '$controller_ip uid 10001',
+            'keys == ["cache", "dev", "dst", "flags", "gateway", '
+            '"prefsrc", "uid"]',
             readiness,
         )
+        self.assertIn(".uid == 10001", readiness)
+        self.assertIn(".flags == [] and .cache == []", readiness)
         self.assertIn("fixture kernel-autobind route identity is not exact", readiness)
 
     def test_readiness_accepts_only_equivalent_systemd_policy_renderings(self) -> None:

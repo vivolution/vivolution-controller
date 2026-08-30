@@ -561,9 +561,19 @@ done
 for edge_ip in \
     {{ voice_fixture_sbc1_ipv4 | quote }} \
     {{ voice_fixture_sbc2_ipv4 | quote }}; do
-    edge_route=$(ip -4 route get "$edge_ip" uid 10001 | head -n 1)
-    expected_edge_route="$edge_ip via $controller_gateway dev $controller_interface src $controller_ip uid 10001"
-    if [[ $edge_route != "$expected_edge_route" ]]; then
+    edge_route=$(ip -j -4 route get "$edge_ip" uid 10001)
+    if ! jq --exit-status \
+        --arg destination "$edge_ip" \
+        --arg gateway "$controller_gateway" \
+        --arg interface "$controller_interface" \
+        --arg source "$controller_ip" \
+        'type == "array" and length == 1 and
+         (.[0] |
+          keys == ["cache", "dev", "dst", "flags", "gateway", "prefsrc", "uid"] and
+          .dst == $destination and .gateway == $gateway and
+          .dev == $interface and .prefsrc == $source and .uid == 10001 and
+          .flags == [] and .cache == [])' \
+        >/dev/null <<<"$edge_route"; then
         printf 'fixture kernel-autobind route identity is not exact for %s\n' \
             "$edge_ip" >&2
         exit 3
