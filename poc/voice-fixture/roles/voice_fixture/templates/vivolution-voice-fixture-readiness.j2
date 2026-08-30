@@ -17,6 +17,68 @@ state_root={{ voice_fixture_state_root | quote }}
 asterisk_image_file={{ (voice_fixture_config_root + '/asterisk-image-id') | quote }}
 sipp_image_file={{ (voice_fixture_config_root + '/sipp-image-id') | quote }}
 
+# BEGIN SIPP UAS RECOVERY HELPERS
+sipp_uas_recovery_sample() {
+    local main_pid
+    local tls_check
+
+    systemctl is-active --quiet vivolution-voice-fixture-sipp.service || return 1
+    main_pid=$(systemctl show vivolution-voice-fixture-sipp.service \
+        --property=MainPID --value) || return 1
+    [[ $main_pid =~ ^[1-9][0-9]*$ ]] || return 1
+    ss -H -lnt4 | awk '{print $4}' \
+        | grep -Fxq "$controller_ip:{{ voice_fixture_sipp_uas_tls_port }}" || return 1
+    ss -H -lnu4 | awk '{print $4}' \
+        | grep -Fxq "$controller_ip:{{ voice_fixture_sipp_uas_rtp_port }}" || return 1
+    if ! tls_check=$(timeout 3 openssl s_client \
+        -connect "$controller_ip:{{ voice_fixture_sipp_uas_tls_port }}" \
+        -cert "$pki_root/sbc1.crt" \
+        -key "$pki_root/sbc1.key" \
+        -CAfile "$pki_root/ca.crt" \
+        -verify_ip "$controller_ip" \
+        -verify_return_error \
+        -brief </dev/null 2>&1); then
+        return 1
+    fi
+    grep -Fq 'Verification: OK' <<<"$tls_check" || return 1
+    printf '%s\n' "$main_pid"
+}
+
+wait_for_sipp_uas_recovery() {
+    local attempt
+    local current_pid
+    local stable_pid=
+    local stable_samples=0
+
+    # SIPp can report a fatal TLS accept error just after the certificate-less
+    # client observes its expected rejection. Let that failure become visible
+    # before accepting any health sample from the original process.
+    sleep 1
+    for attempt in {1..12}; do
+        if current_pid=$(sipp_uas_recovery_sample); then
+            if [[ $current_pid == "$stable_pid" ]]; then
+                stable_samples=$((stable_samples + 1))
+            else
+                stable_pid=$current_pid
+                stable_samples=1
+            fi
+            if (( stable_samples >= 3 )); then
+                return 0
+            fi
+        else
+            stable_pid=
+            stable_samples=0
+        fi
+        if (( attempt < 12 )); then
+            sleep 1
+        fi
+    done
+
+    printf 'SIPp fixture did not recover stably after the negative mTLS probe\n' >&2
+    return 1
+}
+# END SIPP UAS RECOVERY HELPERS
+
 # BEGIN SYSTEMD POLICY HELPERS
 policy_error() {
     printf 'fixture systemd policy mismatch: %s\n' "$1" >&2
@@ -671,6 +733,16 @@ if [[ $asterisk_resolver_config != $'nameserver 127.0.0.53\noptions edns0 trust-
     printf 'Asterisk resolver authority is not the exact loopback-only stub\n' >&2
     exit 3
 fi
+/usr/local/libexec/vivolution-verify-private-edge-dns resolved-effective >/dev/null
+/usr/local/libexec/vivolution-verify-private-edge-dns hosts-post >/dev/null
+asterisk_private_edge_dns=$(
+    podman exec vivolution-voice-fixture-asterisk \
+        /usr/local/libexec/vivolution-private-edge-dns-probe
+)
+if [[ $asterisk_private_edge_dns != 'PRIVATE_EDGE_STUB_DNS_OK' ]]; then
+    printf 'Asterisk did not receive the exact private A and absent AAAA answers from 127.0.0.53\n' >&2
+    exit 3
+fi
 
 expected_asterisk_modules=(
     app_dial.so
@@ -814,6 +886,7 @@ if timeout 8 openssl s_client \
     printf 'SIPp fixture accepted a TLS client without its fixture certificate\n' >&2
     exit 6
 fi
+wait_for_sipp_uas_recovery
 
 asterisk_image=$(<"$asterisk_image_file")
 sipp_image=$(<"$sipp_image_file")

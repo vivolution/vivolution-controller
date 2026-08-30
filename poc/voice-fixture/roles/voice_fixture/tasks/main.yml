@@ -174,6 +174,10 @@
       owner: root
       group: root
       mode: '0755'
+    - path: /etc/systemd/resolved.conf.d
+      owner: root
+      group: root
+      mode: '0755'
     - path: "{{ voice_fixture_root }}"
       owner: root
       group: root
@@ -248,6 +252,128 @@
       owner: root
       group: root
       mode: '0700'
+
+- name: Install the private Edge DNS contract verifier
+  ansible.builtin.copy:
+    src: bin/verify_private_edge_dns.py
+    dest: /usr/local/libexec/vivolution-verify-private-edge-dns
+    owner: root
+    group: root
+    mode: '0550'
+
+- name: Inspect the host mapping authority without following links
+  ansible.builtin.stat:
+    path: /etc/hosts
+    follow: false
+  register: voice_fixture_hosts_file
+  changed_when: false
+
+- name: Require an exclusive root-owned host mapping authority
+  ansible.builtin.assert:
+    that:
+      - voice_fixture_hosts_file.stat.exists
+      - voice_fixture_hosts_file.stat.isreg | default(false)
+      - not (voice_fixture_hosts_file.stat.islnk | default(false))
+      - voice_fixture_hosts_file.stat.nlink | int == 1
+      - voice_fixture_hosts_file.stat.uid | int == 0
+      - voice_fixture_hosts_file.stat.gid | int == 0
+      - voice_fixture_hosts_file.stat.mode == '0644'
+    fail_msg: >-
+      /etc/hosts must be one root-owned, root-group, regular, single-link 0644
+      file before the fixture may install its two exact private Edge mappings.
+
+- name: Reject conflicting partial or unmanaged Edge host mappings
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-verify-private-edge-dns
+      - hosts-pre
+  changed_when: false
+
+- name: Explicitly enable systemd-resolved host-file synthesis
+  ansible.builtin.copy:
+    content: |
+      [Resolve]
+      ReadEtcHosts=yes
+    dest: /etc/systemd/resolved.conf.d/99-vivolution-voice-fixture-private-edge.conf
+    owner: root
+    group: root
+    mode: '0644'
+  register: voice_fixture_resolved_hosts_configuration
+
+- name: Atomically install the two exact private Edge host mappings
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    create: false
+    marker: '# {mark} VIVOLUTION VOICE FIXTURE PRIVATE EDGE DNS'
+    block: |
+      10.20.2.4 sbc1.voice.vivolution.ae
+      10.20.2.5 sbc2.voice.vivolution.ae
+    owner: root
+    group: root
+    mode: '0644'
+    validate: /usr/local/libexec/vivolution-verify-private-edge-dns hosts-post %s
+  register: voice_fixture_private_edge_hosts
+
+- name: Synchronously restart systemd-resolved after authority changes
+  ansible.builtin.systemd_service:
+    name: systemd-resolved.service
+    state: restarted
+  when: >-
+    (voice_fixture_resolved_hosts_configuration.changed | bool) or
+    (voice_fixture_private_edge_hosts.changed | bool)
+
+- name: Flush resolved caches only after the host mapping changed
+  ansible.builtin.command:
+    argv:
+      - resolvectl
+      - flush-caches
+  when: voice_fixture_private_edge_hosts.changed | bool
+  changed_when: false
+
+- name: Require reboot-persistent active systemd-resolved authority
+  ansible.builtin.systemd_service:
+    name: systemd-resolved.service
+    enabled: true
+    state: started
+
+- name: Require active systemd-resolved authority
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - systemd-resolved.service
+  register: voice_fixture_resolved_active
+  changed_when: false
+
+- name: Require enabled systemd-resolved authority
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-enabled
+      - systemd-resolved.service
+  register: voice_fixture_resolved_enabled
+  changed_when: false
+
+- name: Require exact active and reboot-persistent systemd-resolved state
+  ansible.builtin.assert:
+    that:
+      - voice_fixture_resolved_active.stdout == 'active'
+      - voice_fixture_resolved_active.stderr == ''
+      - voice_fixture_resolved_enabled.stdout == 'enabled'
+      - voice_fixture_resolved_enabled.stderr == ''
+    fail_msg: >-
+      The loopback DNS authority is not exactly active and enabled across
+      reboot.
+
+- name: Require the exact effective resolved and host mapping contracts
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-verify-private-edge-dns
+      - "{{ item }}"
+  loop:
+    - resolved-effective
+    - hosts-post
+  changed_when: false
 
 - name: Install reboot-safe protected fixture runtime directory policy
   ansible.builtin.template:

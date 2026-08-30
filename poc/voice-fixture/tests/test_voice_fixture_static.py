@@ -4,6 +4,8 @@
 from pathlib import Path
 import re
 import subprocess
+import sys
+import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -87,6 +89,70 @@ class VoiceFixtureStaticTests(unittest.TestCase):
             },
         )
 
+    def run_sipp_uas_recovery_helper(
+        self, *, mode: str
+    ) -> subprocess.CompletedProcess[str]:
+        readiness = self.read(
+            "roles/voice_fixture/templates/vivolution-voice-fixture-readiness.j2"
+        )
+        helpers = readiness.split("# BEGIN SIPP UAS RECOVERY HELPERS\n", 1)[
+            1
+        ].split("# END SIPP UAS RECOVERY HELPERS\n", 1)[0]
+        helpers = helpers.replace(
+            "{{ voice_fixture_sipp_uas_tls_port }}", "25061"
+        ).replace("{{ voice_fixture_sipp_uas_rtp_port }}", "22000")
+        command = f"""
+set -euo pipefail
+controller_ip=10.20.1.4
+pki_root=/run/fixture-pki
+{helpers}
+systemctl() {{
+    if [[ $1 == is-active ]]; then
+        [[ $RECOVERY_MODE != inactive ]]
+        return
+    fi
+    if [[ $1 == show ]]; then
+        if [[ $RECOVERY_MODE == changing-pid ]]; then
+            counter=$(<"$RECOVERY_COUNTER")
+            printf '%d\n' "$((counter + 1))" >"$RECOVERY_COUNTER"
+            printf '%d\n' "$((counter + 100))"
+        else
+            printf '123\n'
+        fi
+        return
+    fi
+    return 2
+}}
+ss() {{
+    if [[ $* == *-lnt4* ]]; then
+        printf 'LISTEN 0 128 10.20.1.4:25061 0.0.0.0:*\n'
+    elif [[ $RECOVERY_MODE != missing-rtp ]]; then
+        printf 'UNCONN 0 0 10.20.1.4:22000 0.0.0.0:*\n'
+    fi
+}}
+timeout() {{ shift; "$@"; }}
+openssl() {{
+    [[ $RECOVERY_MODE != bad-tls ]] || return 1
+    printf 'Verification: OK\n'
+}}
+sleep() {{ :; }}
+wait_for_sipp_uas_recovery
+"""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            counter = Path(temporary_directory) / "counter"
+            counter.write_text("1\n", encoding="utf-8")
+            return subprocess.run(
+                ["bash", "-c", command],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "RECOVERY_MODE": mode,
+                    "RECOVERY_COUNTER": str(counter),
+                },
+            )
+
     def test_all_expected_artifacts_exist(self) -> None:
         required = [
             "README.md",
@@ -95,7 +161,9 @@ class VoiceFixtureStaticTests(unittest.TestCase):
             "roles/voice_fixture/tasks/main.yml",
             "roles/voice_fixture/handlers/main.yml",
             "roles/voice_fixture/files/asterisk/Containerfile",
+            "roles/voice_fixture/files/asterisk/private-edge-dns-probe.c",
             "roles/voice_fixture/files/asterisk/pjproject-dns-kernel-autobind.patch",
+            "roles/voice_fixture/files/bin/verify_private_edge_dns.py",
             "roles/voice_fixture/files/sipp/Containerfile",
             "roles/voice_fixture/files/sipp/bin/fixture_sipp.py",
             "roles/voice_fixture/files/bin/synthetic_cdr_evidence.py",
@@ -263,7 +331,7 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         config = self.read("roles/voice_fixture/templates/asterisk.conf.j2")
         tasks = self.read("roles/voice_fixture/tasks/main.yml")
         image_tag = (
-            "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind4"
+            "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind4-dns1"
         )
         self.assertIn(image_tag, defaults)
         self.assertIn(image_tag, teardown_defaults)
@@ -467,6 +535,148 @@ class VoiceFixtureStaticTests(unittest.TestCase):
             "$'nameserver 127.0.0.53\\noptions edns0 trust-ad'", readiness
         )
         self.assertIn("exact loopback-only stub", readiness)
+
+    def test_private_edge_dns_is_exact_atomic_and_tls_name_preserving(self) -> None:
+        tasks = self.read("roles/voice_fixture/tasks/main.yml")
+        teardown = self.read("roles/voice_fixture_teardown/tasks/main.yml")
+        quadlet = self.read(
+            "roles/voice_fixture/templates/vivolution-voice-fixture-asterisk.container.j2"
+        )
+        pjsip = self.read("roles/voice_fixture/templates/pjsip.conf.j2")
+        readiness = self.read(
+            "roles/voice_fixture/templates/vivolution-voice-fixture-readiness.j2"
+        )
+        containerfile = self.read("roles/voice_fixture/files/asterisk/Containerfile")
+        probe = self.read(
+            "roles/voice_fixture/files/asterisk/private-edge-dns-probe.c"
+        )
+        verifier = self.read(
+            "roles/voice_fixture/files/bin/verify_private_edge_dns.py"
+        )
+
+        self.assertIn(
+            "# {mark} VIVOLUTION VOICE FIXTURE PRIVATE EDGE DNS", tasks
+        )
+        self.assertIn("10.20.2.4 sbc1.voice.vivolution.ae", tasks)
+        self.assertIn("10.20.2.5 sbc2.voice.vivolution.ae", tasks)
+        self.assertEqual(tasks.count("ReadEtcHosts=yes"), 1)
+        self.assertIn("voice_fixture_hosts_file.stat.nlink | int == 1", tasks)
+        self.assertIn("voice_fixture_hosts_file.stat.mode == '0644'", tasks)
+        self.assertIn("validate: /usr/local/libexec/vivolution-verify-private-edge-dns hosts-post %s", tasks)
+        self.assertLess(
+            tasks.index("Reject conflicting partial or unmanaged Edge host mappings"),
+            tasks.index("Atomically install the two exact private Edge host mappings"),
+        )
+        self.assertIn("state: restarted", tasks)
+        self.assertIn("when: voice_fixture_private_edge_hosts.changed | bool", tasks)
+        self.assertIn("resolvectl", tasks)
+        self.assertIn("hosts-post", tasks)
+        self.assertIn("resolved-effective", tasks)
+        self.assertIn(
+            "Require reboot-persistent active systemd-resolved authority", tasks
+        )
+        self.assertIn("- is-enabled\n      - systemd-resolved.service", tasks)
+        self.assertIn("voice_fixture_resolved_enabled.stdout == 'enabled'", tasks)
+
+        self.assertIn("AddHost={{ voice_fixture_sbc1_server_name }}", quadlet)
+        self.assertIn("AddHost={{ voice_fixture_sbc2_server_name }}", quadlet)
+        self.assertIn(
+            "contact=sips:{{ voice_fixture_sbc1_server_name }}:", pjsip
+        )
+        self.assertIn(
+            "contact=sips:{{ voice_fixture_sbc2_server_name }}:", pjsip
+        )
+        self.assertNotIn("maddr=", pjsip)
+        self.assertNotIn("outbound_proxy=", pjsip)
+
+        self.assertIn("private-edge-dns-probe.c", containerfile)
+        self.assertIn("vivolution-private-edge-dns-probe", containerfile)
+        self.assertIn('"127.0.0.53"', probe)
+        self.assertIn("DNS_TYPE_AAAA", probe)
+        self.assertIn("query_type == DNS_TYPE_AAAA && answers != 0", probe)
+        self.assertIn("PRIVATE_EDGE_STUB_DNS_OK", probe)
+        self.assertIn("podman exec vivolution-voice-fixture-asterisk", readiness)
+        self.assertIn("vivolution-private-edge-dns-probe", readiness)
+        self.assertIn("PRIVATE_EDGE_STUB_DNS_OK", readiness)
+
+        self.assertIn("MARKER_BEGIN", verifier)
+        self.assertIn("private_edge_mapping_not_exclusive", verifier)
+        self.assertIn("resolved_read_etc_hosts_not_enabled", verifier)
+        self.assertIn("hosts-absent", teardown)
+        self.assertIn("state: absent", teardown)
+        self.assertIn("Inspect the trusted private Edge DNS verifier source", teardown)
+        self.assertIn("checksum_algorithm: sha256", teardown)
+        self.assertIn(
+            "Restore the exact verifier solely for bounded cleanup when absent",
+            teardown,
+        )
+        self.assertIn(
+            "Require exact fixture resolved authority content before deletion",
+            teardown,
+        )
+        self.assertIn("'[Resolve]\\nReadEtcHosts=yes\\n'", teardown)
+        self.assertIn(
+            "/etc/systemd/resolved.conf.d/99-vivolution-voice-fixture-private-edge.conf",
+            teardown,
+        )
+
+    def test_private_edge_hosts_verifier_rejects_drift(self) -> None:
+        verifier = ROOT / "roles/voice_fixture/files/bin/verify_private_edge_dns.py"
+
+        def run(mode: str, content: str) -> subprocess.CompletedProcess[str]:
+            with tempfile.TemporaryDirectory() as temporary_directory:
+                hosts = Path(temporary_directory) / "hosts"
+                hosts.write_text(content, encoding="utf-8")
+                return subprocess.run(
+                    [sys.executable, str(verifier), mode, str(hosts)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+        absent = "127.0.0.1 localhost\n"
+        exact = (
+            absent
+            + "# BEGIN VIVOLUTION VOICE FIXTURE PRIVATE EDGE DNS\n"
+            + "10.20.2.4 sbc1.voice.vivolution.ae\n"
+            + "10.20.2.5 sbc2.voice.vivolution.ae\n"
+            + "# END VIVOLUTION VOICE FIXTURE PRIVATE EDGE DNS\n"
+        )
+        self.assertEqual(run("hosts-pre", absent).returncode, 0)
+        self.assertEqual(run("hosts-post", exact).returncode, 0)
+        self.assertEqual(run("hosts-absent", absent).returncode, 0)
+        for drift in (
+            "20.46.45.96 sbc1.voice.vivolution.ae\n",
+            exact + "10.20.2.4 sbc1.voice.vivolution.ae\n",
+            exact.replace("10.20.2.5", "20.216.14.173"),
+            exact.replace("# END VIVOLUTION VOICE FIXTURE PRIVATE EDGE DNS\n", ""),
+        ):
+            with self.subTest(drift=drift):
+                rejected = run("hosts-pre", drift)
+                self.assertNotEqual(rejected.returncode, 0)
+
+    def test_readiness_waits_for_stable_sipp_uas_after_negative_mtls(self) -> None:
+        readiness = self.read(
+            "roles/voice_fixture/templates/vivolution-voice-fixture-readiness.j2"
+        )
+        negative_probe = readiness.index(
+            "SIPp fixture accepted a TLS client without its fixture certificate"
+        )
+        recovery = readiness.index("wait_for_sipp_uas_recovery", negative_probe)
+        ready = readiness.index("printf 'READY no-pstn", recovery)
+        self.assertLess(negative_probe, recovery)
+        self.assertLess(recovery, ready)
+        self.assertIn("for attempt in {1..12}", readiness)
+        self.assertIn("stable_samples >= 3", readiness)
+        self.assertIn("--property=MainPID --value", readiness)
+
+        recovered = self.run_sipp_uas_recovery_helper(mode="stable")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        for mode in ("inactive", "changing-pid", "missing-rtp", "bad-tls"):
+            with self.subTest(mode=mode):
+                rejected = self.run_sipp_uas_recovery_helper(mode=mode)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("did not recover stably", rejected.stderr)
 
     def test_readiness_accepts_only_equivalent_systemd_policy_renderings(self) -> None:
         socket_renderings = {

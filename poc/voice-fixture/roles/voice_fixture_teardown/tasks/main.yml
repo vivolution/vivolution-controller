@@ -44,12 +44,153 @@
   ansible.builtin.systemd_service:
     daemon_reload: true
 
+- name: Inspect the trusted private Edge DNS verifier source
+  ansible.builtin.stat:
+    path: "{{ role_path }}/../voice_fixture/files/bin/verify_private_edge_dns.py"
+    follow: false
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: voice_fixture_private_edge_dns_verifier_source
+  changed_when: false
+
+- name: Inspect the installed private Edge DNS verifier before bounded cleanup
+  ansible.builtin.stat:
+    path: /usr/local/libexec/vivolution-verify-private-edge-dns
+    follow: false
+    checksum_algorithm: sha256
+  register: voice_fixture_private_edge_dns_verifier
+  changed_when: false
+
+- name: Require an exact trusted source and absent or identical installed verifier
+  ansible.builtin.assert:
+    that:
+      - voice_fixture_private_edge_dns_verifier_source.stat.exists
+      - voice_fixture_private_edge_dns_verifier_source.stat.isreg | default(false)
+      - not (voice_fixture_private_edge_dns_verifier_source.stat.islnk | default(false))
+      - voice_fixture_private_edge_dns_verifier_source.stat.nlink | int == 1
+      - >-
+        (not (voice_fixture_private_edge_dns_verifier.stat.exists | default(false))) or
+        (
+          (voice_fixture_private_edge_dns_verifier.stat.isreg | default(false)) and
+          (not (voice_fixture_private_edge_dns_verifier.stat.islnk | default(false))) and
+          (voice_fixture_private_edge_dns_verifier.stat.nlink | int == 1) and
+          (voice_fixture_private_edge_dns_verifier.stat.uid | int == 0) and
+          (voice_fixture_private_edge_dns_verifier.stat.gid | int == 0) and
+          (voice_fixture_private_edge_dns_verifier.stat.mode == '0550') and
+          (voice_fixture_private_edge_dns_verifier.stat.checksum ==
+           voice_fixture_private_edge_dns_verifier_source.stat.checksum)
+        )
+    fail_msg: >-
+      Refusing private Edge DNS cleanup because the trusted source is invalid
+      or the installed verifier is neither absent nor its exact root-owned,
+      single-link 0550 copy.
+
+- name: Restore the exact verifier solely for bounded cleanup when absent
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../voice_fixture/files/bin/verify_private_edge_dns.py"
+    dest: /usr/local/libexec/vivolution-verify-private-edge-dns
+    owner: root
+    group: root
+    mode: '0550'
+  when: not (voice_fixture_private_edge_dns_verifier.stat.exists | default(false))
+
+- name: Require absent or exact fixture-owned private Edge mappings
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-verify-private-edge-dns
+      - hosts-pre
+  changed_when: false
+
+- name: Atomically remove only the exact fixture-owned Edge mappings
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    create: false
+    marker: '# {mark} VIVOLUTION VOICE FIXTURE PRIVATE EDGE DNS'
+    state: absent
+    owner: root
+    group: root
+    mode: '0644'
+    validate: /usr/local/libexec/vivolution-verify-private-edge-dns hosts-absent %s
+  register: voice_fixture_removed_private_edge_hosts
+
+- name: Inspect the fixture resolved authority before deletion
+  ansible.builtin.stat:
+    path: /etc/systemd/resolved.conf.d/99-vivolution-voice-fixture-private-edge.conf
+    follow: false
+  register: voice_fixture_resolved_hosts_configuration
+  changed_when: false
+
+- name: Require absent or exact metadata for the fixture resolved authority
+  ansible.builtin.assert:
+    that:
+      - >-
+        (not (voice_fixture_resolved_hosts_configuration.stat.exists | default(false))) or
+        (
+          (voice_fixture_resolved_hosts_configuration.stat.isreg | default(false)) and
+          (not (voice_fixture_resolved_hosts_configuration.stat.islnk | default(false))) and
+          (voice_fixture_resolved_hosts_configuration.stat.nlink | int == 1) and
+          (voice_fixture_resolved_hosts_configuration.stat.uid | int == 0) and
+          (voice_fixture_resolved_hosts_configuration.stat.gid | int == 0) and
+          (voice_fixture_resolved_hosts_configuration.stat.mode == '0644')
+        )
+    fail_msg: >-
+      Refusing to remove a linked, multiply linked, non-regular, non-root-owned,
+      or wrong-mode resolved authority.
+
+- name: Read the fixture resolved authority only after metadata validation
+  ansible.builtin.slurp:
+    src: /etc/systemd/resolved.conf.d/99-vivolution-voice-fixture-private-edge.conf
+  when: voice_fixture_resolved_hosts_configuration.stat.exists | default(false)
+  register: voice_fixture_resolved_hosts_configuration_content
+
+- name: Require exact fixture resolved authority content before deletion
+  ansible.builtin.assert:
+    that:
+      - >-
+        (voice_fixture_resolved_hosts_configuration_content.content | b64decode) ==
+        '[Resolve]\nReadEtcHosts=yes\n'
+    fail_msg: >-
+      Refusing to delete divergent content at the fixture resolved authority
+      path.
+  when: voice_fixture_resolved_hosts_configuration.stat.exists | default(false)
+
+- name: Remove the fixture resolved host-synthesis authority
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d/99-vivolution-voice-fixture-private-edge.conf
+    state: absent
+  register: voice_fixture_removed_resolved_hosts_configuration
+
+- name: Synchronously restart systemd-resolved after fixture authority cleanup
+  ansible.builtin.systemd_service:
+    name: systemd-resolved.service
+    state: restarted
+  when: >-
+    (voice_fixture_removed_resolved_hosts_configuration.changed | bool) or
+    (voice_fixture_removed_private_edge_hosts.changed | default(false) | bool)
+
+- name: Flush resolved caches only after private host mappings were removed
+  ansible.builtin.command:
+    argv:
+      - resolvectl
+      - flush-caches
+  when: voice_fixture_removed_private_edge_hosts.changed | default(false) | bool
+  changed_when: false
+
+- name: Prove private Edge host mappings are absent after cleanup
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-verify-private-edge-dns
+      - hosts-absent
+  changed_when: false
+
 - name: Remove fixture executables
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent
   loop:
     - /usr/local/libexec/vivolution-voice-fixture-readiness
+    - /usr/local/libexec/vivolution-verify-private-edge-dns
     - /usr/local/sbin/vivolution-voice-fixture-test
 
 - name: Remove non-secret fixture build and Asterisk configuration

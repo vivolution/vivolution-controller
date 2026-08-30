@@ -44,7 +44,7 @@ voice_fixture_asterisk_version: 22.10.1
 voice_fixture_asterisk_source_sha256: 373c98f4d4a1b923b42def0aee03f4e36aca9d1c244a8eeda646da8a97f89663
 voice_fixture_sipp_version: 3.7.7
 voice_fixture_sipp_source_sha256: e55b15f567760e9febeef366a1ab51a5239d197a132ce931b78c826d22d31e69
-voice_fixture_asterisk_image_tag: localhost/vivolution/voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind4
+voice_fixture_asterisk_image_tag: localhost/vivolution/voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind4-dns1
 voice_fixture_sipp_image_tag: localhost/vivolution/voice-fixture-sipp:3.7.7-sni1-txn1
 
 voice_fixture_ca_days: 30

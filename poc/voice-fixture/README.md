@@ -83,6 +83,20 @@ FQDN-to-private-IP mappings so the test neither hairpins through a public IP nor
 depends on DNS. The mappings are `sbc1.voice.vivolution.ae` -> `10.20.2.4` and
 `sbc2.voice.vivolution.ae` -> `10.20.2.5`.
 
+Asterisk 22 routes PJSIP through its asynchronous DNS record resolver. That
+resolver sends A/AAAA queries to the configured DNS authority and does not use
+the container's libc/NSS `/etc/hosts` lookup, so Quadlet `AddHost` alone cannot
+control the signaling peer. The fixture therefore owns one exact marked block
+in the CP1 host `/etc/hosts` and one resolved drop-in setting
+`ReadEtcHosts=yes`. This is intentionally host-wide but bounded to the two
+reviewed names and private addresses; partial, duplicate, conflicting,
+symlinked, hard-linked, or non-root-owned state is rejected. The role does not
+query or change public DNS. The Asterisk container still addresses each peer by
+its public FQDN, and an in-container raw DNS probe requires `127.0.0.53` to
+return exactly the private A record and no AAAA record. Consequently the socket
+uses the private address while TLS SNI and certificate identity remain the
+exact public FQDN. Teardown removes only this exact marked block and drop-in.
+
 For Edge-to-CP1 calls, each node receives only its matching client-only fixture
 certificate/key, trusts `fixture-ca.crt`, verifies the CP1 leaf and IP SAN, and
 uses these exact routes:
@@ -281,7 +295,8 @@ initializes the optional IPv6 socket to `PJ_INVALID_SOCKET`. IPv6 remains
 excluded by `RestrictAddressFamilies`; no new positive bind is authorized.
 Readiness requires the container resolver authority to remain exactly the
 loopback-only systemd-resolved stub at `127.0.0.53`. The composite
-`nosounds1-tlsbind4` image revision prevents reuse of older variants.
+`nosounds1-tlsbind4-dns1` image revision includes the in-container raw DNS
+probe and prevents reuse of older variants.
 
 ## Readiness and calls
 
@@ -292,6 +307,15 @@ sudo /usr/local/libexec/vivolution-voice-fixture-readiness
 sudo /usr/local/sbin/vivolution-voice-fixture-test sbc1
 sudo /usr/local/sbin/vivolution-voice-fixture-test sbc2
 ```
+
+Readiness proves that both fixture listeners reject clients without the
+generation-pinned fixture certificate. SIPp 3.7.7 treats that intentional
+certificate-less TLS accept as a fatal UAS error, so systemd may restart the
+persistent SIPp container after the negative probe. The readiness command is
+therefore bounded and fail-closed: it does not report `READY` until one SIPp
+service PID has passed three consecutive active-service, exact TCP/UDP
+listener, and authenticated mTLS samples. Failure to recover within the fixed
+twelve-sample window fails readiness.
 
 Each test is serialized and runs both directions:
 

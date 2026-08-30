@@ -120,6 +120,21 @@ RUN set -eux; \
     while IFS= read -r library; do cp --parents --dereference "$library" /runtime-libs; done \
         < /tmp/runtime-libraries
 
+# Keep this fixture-only probe after the expensive, content-pinned Asterisk
+# build so adding or reviewing the small verifier does not invalidate that
+# otherwise reusable build layer.
+COPY private-edge-dns-probe.c /tmp/private-edge-dns-probe.c
+
+RUN set -eux; \
+    mkdir --parents /out/usr/local/libexec; \
+    cc -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie \
+        -Wl,-z,relro,-z,now \
+        -o /out/usr/local/libexec/vivolution-private-edge-dns-probe \
+        /tmp/private-edge-dns-probe.c; \
+    strip --strip-unneeded \
+        /out/usr/local/libexec/vivolution-private-edge-dns-probe; \
+    test -x /out/usr/local/libexec/vivolution-private-edge-dns-probe
+
 FROM ${BASE_IMAGE}
 
 ARG ASTERISK_UID=10001
