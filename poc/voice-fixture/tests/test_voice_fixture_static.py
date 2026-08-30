@@ -689,7 +689,7 @@ require_exact_word_set 'fixture SocketBindAllow' "$normalized_words" \
             "e55b15f567760e9febeef366a1ab51a5239d197a132ce931b78c826d22d31e69",
             defaults,
         )
-        image_tag = "voice-fixture-sipp:3.7.7-sni1"
+        image_tag = "voice-fixture-sipp:3.7.7-sni1-txn1"
         self.assertIn(image_tag, defaults)
         self.assertIn(image_tag, teardown_defaults)
         self.assertIn(
