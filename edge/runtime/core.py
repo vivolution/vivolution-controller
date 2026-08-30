@@ -126,7 +126,7 @@ class RuntimeLayout:
             Path("/var/lib/vivolution-edge/runtime"),
             Path("/var/lib/vivolution-edge/runtime-inbox"),
             Path("/etc/vivolution-edge/node-facts.json"),
-            Path("/etc/vivolution-edge/runtime-authority.json"),
+            Path("/var/lib/vivolution-edge/runtime/runtime-authority.json"),
             Path("/usr/lib/vivolution-edge/config/signing-public-key.json"),
             SecretPaths(
                 tls / "teams-fullchain.pem",

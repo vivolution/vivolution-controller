@@ -166,6 +166,55 @@
     enabled: false
     state: stopped
 
+- name: Inspect protected runtime authority before certificate installation
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /var/lib/vivolution-edge/runtime/state.json
+    - /var/lib/vivolution-edge/runtime/runtime-authority.json
+    - /etc/vivolution-edge/runtime-authority.json
+  register: edge_certificate_runtime_authority_paths
+
+- name: Stop OpenSIPS before bootstrap authority reconciliation
+  ansible.builtin.systemd_service:
+    name: opensips.service
+    state: stopped
+
+- name: Require protected runtime state to have authority and allow exact authority-first resume
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (edge_certificate_runtime_authority_paths.results[0].stat.exists | default(false)) or
+        (edge_certificate_runtime_authority_paths.results[1].stat.exists | default(false))
+      - >-
+        not (edge_certificate_runtime_authority_paths.results[0].stat.exists | default(false)) or
+        (edge_certificate_runtime_authority_paths.results[0].stat.isreg | default(false))
+      - not (edge_certificate_runtime_authority_paths.results[0].stat.islnk | default(false))
+      - >-
+        not (edge_certificate_runtime_authority_paths.results[0].stat.exists | default(false)) or
+        edge_certificate_runtime_authority_paths.results[0].stat.pw_name == 'root'
+      - >-
+        not (edge_certificate_runtime_authority_paths.results[0].stat.exists | default(false)) or
+        edge_certificate_runtime_authority_paths.results[0].stat.mode == '0600'
+      - >-
+        not (edge_certificate_runtime_authority_paths.results[1].stat.exists | default(false)) or
+        (edge_certificate_runtime_authority_paths.results[1].stat.isreg | default(false))
+      - not (edge_certificate_runtime_authority_paths.results[1].stat.islnk | default(false))
+      - >-
+        not (edge_certificate_runtime_authority_paths.results[1].stat.exists | default(false)) or
+        edge_certificate_runtime_authority_paths.results[1].stat.pw_name == 'root'
+      - >-
+        not (edge_certificate_runtime_authority_paths.results[1].stat.exists | default(false)) or
+        edge_certificate_runtime_authority_paths.results[1].stat.mode == '0600'
+      - not (edge_certificate_runtime_authority_paths.results[2].stat.exists | default(false))
+      - not (edge_certificate_runtime_authority_paths.results[2].stat.islnk | default(false))
+    fail_msg: >-
+      Certificate installation found runtime state without its authority, an
+      unsafe protected file, or a forbidden legacy authority path. An exact
+      authority-first bootstrap interruption is resumable; other states require
+      the reviewed recovery workflow before renewal.
+
 - name: Obtain or renew the publicly trusted Edge certificate through Azure DNS
   ansible.builtin.systemd_service:
     name: vivolution-edge-certificate.service

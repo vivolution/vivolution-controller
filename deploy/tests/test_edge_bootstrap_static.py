@@ -240,7 +240,7 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
         self.assertIn("/usr/local/libexec/vivolution-edge/rotate-edge-certificate", helper)
         self.assertNotIn('"/etc/vivolution-edge/tls/teams-fullchain.pem"', helper)
         self.assertIn(
-            "ReadWritePaths=/var/lib/vivolution-edge/acme /var/lib/vivolution-edge/certificate-rotation /var/lib/vivolution-edge/runtime /etc/vivolution-edge/tls -/etc/vivolution-edge/runtime-authority.json",
+            "ReadWritePaths=/var/lib/vivolution-edge/acme /var/lib/vivolution-edge/certificate-rotation /var/lib/vivolution-edge/runtime /etc/vivolution-edge/tls",
             service,
         )
         self.assertIn("TimeoutStartSec=10min", service)

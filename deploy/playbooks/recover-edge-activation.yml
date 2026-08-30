@@ -7,7 +7,7 @@
 
   vars:
     edge_agent_tenant_state_dir: /var/lib/vivolution-edge/agent-state/tenant
-    edge_runtime_authority_file: /etc/vivolution-edge/runtime-authority.json
+    edge_runtime_authority_file: /var/lib/vivolution-edge/runtime/runtime-authority.json
     edge_runtime_node_facts_file: /etc/vivolution-edge/node-facts.json
 
   pre_tasks:

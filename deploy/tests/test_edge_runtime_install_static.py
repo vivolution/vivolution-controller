@@ -204,9 +204,34 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
         hold = tasks.index(
             "Hold certificate scheduling until protected runtime authority is installed"
         )
+        inspect = tasks.index(
+            "Inspect protected runtime authority before certificate installation"
+        )
+        stop_bootstrap = tasks.index(
+            "Stop OpenSIPS before bootstrap authority reconciliation"
+        )
+        authority_resume = tasks.index(
+            "Require protected runtime state to have authority and allow exact authority-first resume"
+        )
         issue = tasks.index("Obtain or renew the publicly trusted Edge certificate")
         self.assertLess(hold, issue)
+        self.assertLess(hold, inspect)
+        self.assertLess(inspect, stop_bootstrap)
+        self.assertLess(stop_bootstrap, authority_resume)
+        self.assertLess(authority_resume, issue)
+        self.assertLess(stop_bootstrap, issue)
         self.assertIn("enabled: false", tasks[hold:issue])
+        self.assertIn(
+            "/var/lib/vivolution-edge/runtime/runtime-authority.json",
+            tasks[inspect:issue],
+        )
+        self.assertIn(
+            "/etc/vivolution-edge/runtime-authority.json",
+            tasks[inspect:issue],
+        )
+        self.assertIn("forbidden legacy authority path", tasks[inspect:issue])
+        self.assertIn("authority-first bootstrap interruption is resumable", tasks[inspect:issue])
+        self.assertIn("state: stopped", tasks[stop_bootstrap:issue])
         self.assertIn("rotation_root=/var/lib/vivolution-edge/certificate-rotation", renew)
         self.assertIn('incoming_root="$rotation_root/incoming"', renew)
         self.assertIn("validate-edge-certificate", renew)
@@ -235,6 +260,19 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
         self.assertIn("paths.as_mapping(authority.profile)", rotate)
         self.assertIn("_atomic_write(AUTHORITY, new_raw, mode=0o600, gid=0)", rotate)
         self.assertIn("_restore_previous(journal, opensips_gid)", rotate)
+        self.assertIn(
+            'raise RotationError("active OpenSIPS lacks protected runtime authority")',
+            rotate,
+        )
+        self.assertLess(
+            rotate.index('raise RotationError("active OpenSIPS lacks protected runtime authority")'),
+            rotate.index('"status": "CERTIFICATE_UNCHANGED"'),
+        )
+        self.assertIn(
+            'raise RotationError("bootstrap recovery found unexpected protected runtime authority")',
+            rotate,
+        )
+        self.assertNotIn("_unlink(AUTHORITY)", rotate)
         transaction_start = rotate.index(
             "        try:\n            if was_active:", rotate.index("def main()")
         )
@@ -243,7 +281,26 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
             rotate.index("_atomic_write(LIVE_CERT", transaction_start),
         )
         self.assertIn("/var/lib/vivolution-edge/runtime", service)
-        self.assertIn("-/etc/vivolution-edge/runtime-authority.json", service)
+        self.assertNotIn("/etc/vivolution-edge/runtime-authority.json", service)
+        self.assertIn("/var/lib/vivolution-edge/runtime", service)
+        self.assertIn('AUTHORITY = RUNTIME_ROOT / "runtime-authority.json"', rotate)
+        self.assertIn(
+            'LEGACY_AUTHORITY = Path("/etc/vivolution-edge/runtime-authority.json")',
+            rotate,
+        )
+        self.assertIn(
+            'raise RotationError("legacy runtime authority path is forbidden")',
+            rotate,
+        )
+        self.assertIn(
+            "(facts.node_id, facts.generation, facts.slot) != expected_identity",
+            rotate,
+        )
+        self.assertIn(
+            "(authority.node_id, authority.generation, authority.slot) != expected_identity",
+            rotate,
+        )
+        self.assertIn("authority.profile != EXPECTED_PROFILE", rotate)
 
         runtime_tasks = self.read("roles/edge_runtime_install/tasks/main.yml")
         enable = runtime_tasks.index(
@@ -262,8 +319,119 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
         ).replace(
             "{{ edge_acme_wildcard_fqdn | to_json }}",
             json.dumps("*.sbc1.voice.vivolution.ae"),
+        ).replace(
+            "{{ inventory_hostname | to_json }}",
+            json.dumps("sbc1"),
+        ).replace(
+            "{{ edge_generation | int }}",
+            "1",
+        ).replace(
+            "{{ edge_slot | to_json }}",
+            json.dumps("A"),
+        ).replace(
+            "{{ edge_runtime_profile | to_json }}",
+            json.dumps("SYNTHETIC_PRIVATE"),
         )
         compile(rendered, "rotate-edge-certificate.py", "exec")
+
+    def test_bootstrap_certificate_recovery_never_restarts_unbound_opensips(self) -> None:
+        source = self.read(
+            "roles/edge_certificate/templates/rotate-edge-certificate.py.j2"
+        )
+        rendered = source.replace(
+            "{{ edge_acme_node_fqdn | to_json }}",
+            json.dumps("sbc1.voice.vivolution.ae"),
+        ).replace(
+            "{{ edge_acme_wildcard_fqdn | to_json }}",
+            json.dumps("*.sbc1.voice.vivolution.ae"),
+        ).replace(
+            "{{ inventory_hostname | to_json }}",
+            json.dumps("sbc1"),
+        ).replace(
+            "{{ edge_generation | int }}",
+            "1",
+        ).replace(
+            "{{ edge_slot | to_json }}",
+            json.dumps("A"),
+        ).replace(
+            "{{ edge_runtime_profile | to_json }}",
+            json.dumps("SYNTHETIC_PRIVATE"),
+        )
+        namespace = {"__name__": "certificate_rotation_test"}
+        exec(compile(rendered, "rotate-edge-certificate.py", "exec"), namespace)
+
+        unlinked = []
+        restarted = []
+        namespace["_service_active"] = lambda: False
+        namespace["_exists_regular"] = lambda _path: False
+        namespace["_unlink"] = unlinked.append
+        namespace["_start_and_check_service"] = restarted.append
+        namespace["_restore_previous"](
+            {
+                "hadAuthority": False,
+                "hadPair": False,
+                "phase": "AUTHORITY_RECONCILED",
+                "wasActive": True,
+            },
+            123,
+        )
+
+        self.assertEqual(restarted, [])
+        self.assertIn(namespace["JOURNAL"], unlinked)
+        self.assertNotIn(namespace["AUTHORITY"], unlinked)
+
+        namespace["_exists_regular"] = (
+            lambda path: path == namespace["AUTHORITY"]
+        )
+        with self.assertRaisesRegex(
+            namespace["RotationError"],
+            "unexpected protected runtime authority",
+        ):
+            namespace["_restore_previous"](
+                {
+                    "hadAuthority": False,
+                    "hadPair": False,
+                    "phase": "AUTHORITY_RECONCILED",
+                    "wasActive": False,
+                },
+                123,
+            )
+
+        stopped = []
+        unlinked.clear()
+        namespace["_exists_regular"] = lambda _path: False
+        namespace["_service_active"] = lambda: True
+        namespace["_stop_service"] = lambda: stopped.append(True)
+        namespace["_restore_previous"](
+            {
+                "hadAuthority": False,
+                "hadPair": True,
+                "phase": "HEALTHY",
+                "wasActive": True,
+            },
+            123,
+        )
+        self.assertEqual(stopped, [True])
+        self.assertEqual(unlinked, [namespace["JOURNAL"]])
+
+        stopped.clear()
+        namespace["_exists_regular"] = (
+            lambda path: path == namespace["AUTHORITY"]
+        )
+        with self.assertRaisesRegex(
+            namespace["RotationError"],
+            "unexpected protected runtime authority",
+        ):
+            namespace["_restore_previous"](
+                {
+                    "hadAuthority": False,
+                    "hadPair": True,
+                    "phase": "HEALTHY",
+                    "wasActive": True,
+                },
+                123,
+            )
+        self.assertEqual(stopped, [True])
 
     def test_no_signing_private_material_is_installed(self) -> None:
         combined = "\n".join(

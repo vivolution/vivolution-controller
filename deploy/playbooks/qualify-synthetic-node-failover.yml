@@ -351,7 +351,7 @@
 
     - name: Read root runtime authority from both Edge nodes
       ansible.builtin.slurp:
-        src: /etc/vivolution-edge/runtime-authority.json
+        src: /var/lib/vivolution-edge/runtime/runtime-authority.json
       loop:
         - sbc1
         - sbc2

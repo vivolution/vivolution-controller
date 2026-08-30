@@ -492,7 +492,7 @@
 - name: Render the root-only runtime authority with profile-specific remote SHA-256 pins
   ansible.builtin.template:
     src: runtime-authority.json.j2
-    dest: /etc/vivolution-edge/runtime-authority.json
+    dest: /var/lib/vivolution-edge/runtime/runtime-authority.json
     owner: root
     group: root
     mode: '0600'
@@ -556,7 +556,7 @@
         from edge.compiler.core import NodeFacts
         from edge.runtime.contracts import RuntimeAuthority, SecretPaths, validate_secret_material
         facts = NodeFacts.from_mapping(json.loads(Path("/etc/vivolution-edge/node-facts.json").read_text()))
-        authority = RuntimeAuthority.from_mapping(json.loads(Path("/etc/vivolution-edge/runtime-authority.json").read_text()))
+        authority = RuntimeAuthority.from_mapping(json.loads(Path("/var/lib/vivolution-edge/runtime/runtime-authority.json").read_text()))
         paths = SecretPaths(
             Path("/etc/vivolution-edge/tls/teams-fullchain.pem"),
             Path("/etc/vivolution-edge/tls/teams-key.pem"),

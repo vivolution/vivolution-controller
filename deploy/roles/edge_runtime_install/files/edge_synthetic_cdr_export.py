@@ -58,7 +58,7 @@ FINAL_RE = re.compile(
     r"\|result=(ACCEPTED|MEDIA_ANCHOR_FAILED|RELAY_FAILED|SIP_FAILURE)\Z"
 )
 NODE_FACTS_PATH = Path("/etc/vivolution-edge/node-facts.json")
-RUNTIME_AUTHORITY_PATH = Path("/etc/vivolution-edge/runtime-authority.json")
+RUNTIME_AUTHORITY_PATH = Path("/var/lib/vivolution-edge/runtime/runtime-authority.json")
 EVIDENCE_ROOT = Path("/var/lib/vivolution-edge/synthetic-cdr-evidence")
 JOURNALCTL = "/usr/bin/journalctl"
 MAX_AUTHORITY_BYTES = 256 * 1024

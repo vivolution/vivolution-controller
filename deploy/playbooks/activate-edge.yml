@@ -9,7 +9,7 @@
     edge_agent_tenant_state_dir: /var/lib/vivolution-edge/agent-state/tenant
     edge_runtime_node_facts_for_compiler: /usr/lib/vivolution-edge/config/node-facts.json
     edge_runtime_pinned_key_file: /usr/lib/vivolution-edge/config/signing-public-key.json
-    edge_runtime_authority_file: /etc/vivolution-edge/runtime-authority.json
+    edge_runtime_authority_file: /var/lib/vivolution-edge/runtime/runtime-authority.json
 
   pre_tasks:
     - name: Require an explicit activation and exact immutable candidate identity

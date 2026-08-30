@@ -41,7 +41,7 @@ The fixed files are:
 
 ```text
 /etc/vivolution-edge/node-facts.json
-/etc/vivolution-edge/runtime-authority.json
+/var/lib/vivolution-edge/runtime/runtime-authority.json
 /usr/lib/vivolution-edge/config/signing-public-key.json
 /etc/vivolution-edge/tls/teams-fullchain.pem
 /etc/vivolution-edge/tls/teams-key.pem

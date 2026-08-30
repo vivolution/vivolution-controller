@@ -86,7 +86,7 @@
 
     - name: Read the preserved predecessor runtime authority without mutation
       ansible.builtin.slurp:
-        src: /etc/vivolution-edge/runtime-authority.json
+        src: /var/lib/vivolution-edge/runtime/runtime-authority.json
       delegate_to: "{{ edge_direct_predecessor_ansible_host }}"
       vars:
         ansible_port: "{{ edge_direct_predecessor_ssh_port | int }}"
@@ -175,7 +175,7 @@
         path: "{{ item }}"
         follow: false
       loop:
-        - /etc/vivolution-edge/runtime-authority.json
+        - /var/lib/vivolution-edge/runtime/runtime-authority.json
         - /var/lib/vivolution-edge/runtime/state.json
         - /var/lib/vivolution-edge/runtime/transaction.json
       register: edge_direct_replacement_existing_state
@@ -191,7 +191,7 @@
 
     - name: Read an existing replacement runtime authority
       ansible.builtin.slurp:
-        src: /etc/vivolution-edge/runtime-authority.json
+        src: /var/lib/vivolution-edge/runtime/runtime-authority.json
       register: edge_direct_replacement_authority_raw
       when: edge_direct_replacement_existing_state.results[0].stat.exists | default(false)
 
@@ -230,7 +230,7 @@
 
     - name: Re-read the preserved predecessor runtime authority after staging
       ansible.builtin.slurp:
-        src: /etc/vivolution-edge/runtime-authority.json
+        src: /var/lib/vivolution-edge/runtime/runtime-authority.json
       delegate_to: "{{ edge_direct_predecessor_ansible_host }}"
       vars:
         ansible_port: "{{ edge_direct_predecessor_ssh_port | int }}"
@@ -311,7 +311,7 @@
 
     - name: Read protected replacement runtime authority
       ansible.builtin.slurp:
-        src: /etc/vivolution-edge/runtime-authority.json
+        src: /var/lib/vivolution-edge/runtime/runtime-authority.json
       register: edge_direct_replacement_runtime_authority
 
     - name: Prove replacement active runtime health without asserting live interop

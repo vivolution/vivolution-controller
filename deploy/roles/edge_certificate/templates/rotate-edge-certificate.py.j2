@@ -19,6 +19,10 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 NODE_FQDN = {{ edge_acme_node_fqdn | to_json }}
 WILDCARD_FQDN = {{ edge_acme_wildcard_fqdn | to_json }}
+EXPECTED_NODE_ID = {{ inventory_hostname | to_json }}
+EXPECTED_GENERATION = {{ edge_generation | int }}
+EXPECTED_SLOT = {{ edge_slot | to_json }}
+EXPECTED_PROFILE = {{ edge_runtime_profile | to_json }}
 ROTATION_ROOT = Path("/var/lib/vivolution-edge/certificate-rotation")
 INCOMING_CERT = ROTATION_ROOT / "incoming" / "teams-fullchain.pem"
 INCOMING_KEY = ROTATION_ROOT / "incoming" / "teams-key.pem"
@@ -32,7 +36,8 @@ RUNTIME_LOCK = RUNTIME_ROOT / "runtime.lock"
 RUNTIME_STATE = RUNTIME_ROOT / "state.json"
 LIVE_CERT = Path("/etc/vivolution-edge/tls/teams-fullchain.pem")
 LIVE_KEY = Path("/etc/vivolution-edge/tls/teams-key.pem")
-AUTHORITY = Path("/etc/vivolution-edge/runtime-authority.json")
+AUTHORITY = RUNTIME_ROOT / "runtime-authority.json"
+LEGACY_AUTHORITY = Path("/etc/vivolution-edge/runtime-authority.json")
 NODE_FACTS = Path("/etc/vivolution-edge/node-facts.json")
 PUBLIC_CA = Path("/etc/ssl/certs/ca-certificates.crt")
 PYTHON_ROOT = "/usr/lib/vivolution-edge/python"
@@ -302,6 +307,13 @@ def _load_runtime_context(opensips_gid: int, *, require_digest_match: bool = Tru
         authority = RuntimeAuthority.from_mapping(authority_value)
     except Exception as exc:
         raise RotationError("installed runtime facts or authority are invalid: {}".format(exc)) from exc
+    expected_identity = (EXPECTED_NODE_ID, EXPECTED_GENERATION, EXPECTED_SLOT)
+    if (facts.node_id, facts.generation, facts.slot) != expected_identity:
+        raise RotationError("installed runtime facts cross the immutable node identity")
+    if (authority.node_id, authority.generation, authority.slot) != expected_identity:
+        raise RotationError("runtime authority crosses the immutable node identity")
+    if authority.profile != EXPECTED_PROFILE:
+        raise RotationError("runtime authority profile differs from installed authority")
     paths = SecretPaths(
         LIVE_CERT,
         LIVE_KEY,
@@ -395,6 +407,11 @@ def _read_journal() -> Optional[Dict[str, Any]]:
 
 def _restore_previous(journal: Mapping[str, Any], opensips_gid: int) -> None:
     if journal["phase"] == "HEALTHY":
+        if not journal["hadAuthority"]:
+            if _service_active():
+                _stop_service()
+            if _exists_regular(AUTHORITY):
+                raise RotationError("bootstrap recovery found unexpected protected runtime authority")
         _unlink(JOURNAL)
         return
     if _service_active():
@@ -410,16 +427,16 @@ def _restore_previous(journal: Mapping[str, Any], opensips_gid: int) -> None:
     if journal["hadAuthority"]:
         previous_authority = _secure_read(BACKUP_AUTHORITY, modes=(0o400,), maximum=MAX_JSON_BYTES)
         _atomic_write(AUTHORITY, previous_authority, mode=0o600, gid=0)
-    else:
-        _unlink(AUTHORITY)
+    elif _exists_regular(AUTHORITY):
+        raise RotationError("bootstrap recovery found unexpected protected runtime authority")
     if journal["wasActive"]:
-        private_ipv4 = ""
+        # A package may have auto-started its vendor configuration before the
+        # protected bootstrap authority existed. Recovery deliberately leaves
+        # that unauthorised instance stopped; only an authority-bound runtime
+        # may be restarted transactionally.
         if journal["hadAuthority"]:
             context = _load_runtime_context(opensips_gid)
-            private_ipv4 = context[0].private_ipv4
-        if not private_ipv4:
-            raise RotationError("cannot restore an active service without protected node facts")
-        _start_and_check_service(private_ipv4)
+            _start_and_check_service(context[0].private_ipv4)
     _unlink(JOURNAL)
 
 
@@ -455,6 +472,8 @@ def _prepare_directories() -> None:
 def main() -> int:
     if os.geteuid() != 0:
         raise RotationError("certificate rotation must execute as root")
+    if _exists_regular(LEGACY_AUTHORITY):
+        raise RotationError("legacy runtime authority path is forbidden")
     opensips_gid = grp.getgrnam("opensips").gr_gid
     _prepare_directories()
     lock_descriptor = os.open(RUNTIME_LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
@@ -488,6 +507,9 @@ def main() -> int:
             current_key = _secure_read(LIVE_KEY, modes=(0o440,), maximum=MAX_PEM_BYTES, gid=opensips_gid)
         if had_authority:
             _load_runtime_context(opensips_gid)
+        was_active = _service_active()
+        if was_active and not had_authority:
+            raise RotationError("active OpenSIPS lacks protected runtime authority")
         if had_pair and current_cert == staged_cert and current_key == staged_key:
             evidence = _write_evidence(
                 {
@@ -504,7 +526,6 @@ def main() -> int:
             sys.stdout.buffer.write(_canonical(evidence))
             return 0
 
-        was_active = _service_active()
         if had_pair:
             _atomic_write(BACKUP_CERT, current_cert, mode=0o400, gid=0)
             _atomic_write(BACKUP_KEY, current_key, mode=0o400, gid=0)

@@ -165,7 +165,7 @@
         path: "{{ item }}"
         follow: false
       loop:
-        - /etc/vivolution-edge/runtime-authority.json
+        - /var/lib/vivolution-edge/runtime/runtime-authority.json
         - /etc/vivolution-edge/tls/fixture-ca.crt
         - /etc/vivolution-edge/tls/fixture-client.crt
         - /etc/vivolution-edge/tls/fixture-client.key
@@ -185,7 +185,7 @@
 
     - name: Read an existing Direct Routing replacement authority
       ansible.builtin.slurp:
-        src: /etc/vivolution-edge/runtime-authority.json
+        src: /var/lib/vivolution-edge/runtime/runtime-authority.json
       register: edge_install_direct_existing_authority
       when:
         - edge_runtime_profile == 'DIRECT_ROUTING'
