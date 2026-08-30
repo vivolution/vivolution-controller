@@ -159,21 +159,33 @@ serials, expiry, and SHA-256 public-certificate fingerprints.
 The runtime images are content-ID pinned in Quadlet after local builds.
 Asterisk 22.10.1 is built from the upstream tag archive whose SHA-256 is fixed
 in the Containerfile because Debian 13 does not ship an Asterisk binary
-package. SIPp uses Debian 13's exact `sip-tester` package version. Runtime
-containers use `Pull=never` and have no allowed path to package mirrors or the
-Internet. The two one-time build commands use an IPv4-only `slirp4netns`
-userspace network with host-loopback access disabled. This gives their pinned
-package/source fetches DNS and HTTPS without weakening the controller's
-default-drop forwarding chain or giving build steps the host network
-namespace; it is not used by either runtime container. Podman 5 reports a
-locally built image's `.Id` as 64 lowercase hexadecimal characters, while
-some supported versions include the `sha256:` prefix. The installer rejects
-every other representation and records the accepted value canonically as
-`sha256:<64-hex>` before using it in Quadlet or evidence. SIPp documents exit
-status `99` as a normal exit without calls, and its `-v` handler uses that
-status. The build check accepts exactly `99`, requires empty standard error,
-and requires the first non-empty output line and sole version banner to be
-`SIPp v3.7.3-TLS-SCTP-PCAP-SHA256.`.
+package. SIPp 3.7.7 is built from its upstream generated release archive whose
+SHA-256 is fixed in the Containerfile. The generated archive is used instead
+of GitHub's automatic tag archive because it carries the release's real
+`version.h`; SIPp deliberately makes the automatic archive's stub fail a
+build. The builder requires exactly one upstream
+`SSL_set_tlsext_host_name(ssl, remote_host)` call before compiling. This fixes
+the Debian 3.7.3 client's missing TLS SNI while keeping each Edge server domain
+on exact FQDN matching: no wildcard or no-SNI TLS domain is introduced. The
+fixture runner supplies only the hard-coded SBC1/SBC2 FQDN after proving its
+static private-IP mapping and the public server certificate.
+
+The SIPp build retains TLS, SCTP, PCAP, GSL, and SHA-256 support. Only the
+stripped executable and its resolved dynamic libraries are copied into the
+runtime stage; build tools and source are excluded. Runtime containers use
+`Pull=never` and have no allowed path to package mirrors or the Internet. The
+two one-time build commands use an IPv4-only `slirp4netns` userspace network
+with host-loopback access disabled. This gives their pinned package/source
+fetches DNS and HTTPS without weakening the controller's default-drop
+forwarding chain or giving build steps the host network namespace; it is not
+used by either runtime container. Podman 5 reports a locally built image's
+`.Id` as 64 lowercase hexadecimal characters, while some supported versions
+include the `sha256:` prefix. The installer rejects every other representation
+and records the accepted value canonically as `sha256:<64-hex>` before using it
+in Quadlet or evidence. SIPp documents exit status `99` as a normal exit
+without calls, and its `-v` handler uses that status. Both the image build and
+the installer require that status, empty standard error, and the exact sole
+version banner `SIPp v3.7.7-TLS-SCTP-PCAP-SHA256.`.
 
 Asterisk's writable library, run, and spool paths are exact bind mounts from
 root-provisioned `0700`, UID/GID `10001` directories below

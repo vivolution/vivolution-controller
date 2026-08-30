@@ -353,6 +353,14 @@ class VoiceFixtureStaticTests(unittest.TestCase):
     def test_runner_has_exact_target_allowlist_and_rtp_evidence(self) -> None:
         runner = self.read("roles/voice_fixture/files/sipp/bin/fixture_sipp.py")
         self.assertIn('EDGE_IPS = {ipaddress.ip_address("10.20.2.4"), ipaddress.ip_address("10.20.2.5")}', runner)
+        self.assertIn(
+            'ipaddress.ip_address("10.20.2.4"): "sbc1.voice.vivolution.ae"',
+            runner,
+        )
+        self.assertIn(
+            'ipaddress.ip_address("10.20.2.5"): "sbc2.voice.vivolution.ae"',
+            runner,
+        )
         self.assertIn("if target not in EDGE_IPS", runner)
         self.assertIn("if args.target_port != 5061", runner)
         self.assertIn('packet[0] >> 6 == 2', runner)
@@ -360,6 +368,11 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertIn("ssl.create_default_context", runner)
         self.assertIn('cafile="/run/fixture-pki/public-ca.crt"', runner)
         self.assertIn("resolved != {expected_ip}", runner)
+        self.assertIn("server_name = EDGE_SERVER_NAMES[target]", runner)
+        self.assertIn(
+            'command.insert(1, f"{server_name}:{args.target_port}")', runner
+        )
+        self.assertIn("server_hostname=server_name", runner)
         self.assertIn('"-bind_local"', runner)
         self.assertIn('"-ci",\n        "127.0.0.1"', runner)
         self.assertIn('"-nostdin"', runner)
@@ -596,6 +609,11 @@ require_exact_word_set 'fixture SocketBindAllow' "$normalized_words" \
     def test_build_inputs_are_pinned(self) -> None:
         asterisk = self.read("roles/voice_fixture/files/asterisk/Containerfile")
         sipp = self.read("roles/voice_fixture/files/sipp/Containerfile")
+        defaults = self.read("roles/voice_fixture/defaults/main.yml")
+        teardown_defaults = self.read(
+            "roles/voice_fixture_teardown/defaults/main.yml"
+        )
+        tasks = self.read("roles/voice_fixture/tasks/main.yml")
         for containerfile in (asterisk, sipp):
             self.assertRegex(containerfile, r"ARG BASE_IMAGE=.*@sha256:[0-9a-f]{64}")
             self.assertNotRegex(containerfile, r"(?m)^FROM\s+[^\n]*:(latest|main|master)(\s|$)")
@@ -615,8 +633,46 @@ require_exact_word_set 'fixture SocketBindAllow' "$normalized_words" \
         self.assertIn("make --jobs=2 DOWNLOAD=:", asterisk)
         self.assertIn("make DESTDIR=/out DOWNLOAD=: install", asterisk)
         self.assertNotIn("make DESTDIR=/out install", asterisk)
-        self.assertIn("SIPP_DEBIAN_VERSION=1:3.7.3-2", sipp)
-        self.assertIn('"sip-tester=${SIPP_DEBIAN_VERSION}"', sipp)
+        self.assertIn("SIPP_VERSION=3.7.7", sipp)
+        self.assertIn(
+            "SIPP_SOURCE_SHA256="
+            "e55b15f567760e9febeef366a1ab51a5239d197a132ce931b78c826d22d31e69",
+            sipp,
+        )
+        self.assertIn(
+            'https://github.com/SIPp/sipp/releases/download/v${SIPP_VERSION}/'
+            'sipp-${SIPP_VERSION}.tar.gz',
+            sipp,
+        )
+        self.assertNotIn("archive/refs/tags", sipp)
+        self.assertIn("sha256sum --check --strict", sipp)
+        self.assertIn("SSL_set_tlsext_host_name(ssl, remote_host);", sipp)
+        self.assertIn("test \"$(grep --fixed-strings --count", sipp)
+        self.assertIn("-DUSE_GSL=1", sipp)
+        self.assertIn("-DUSE_PCAP=1", sipp)
+        self.assertIn("-DUSE_SCTP=1", sipp)
+        self.assertIn("-DUSE_SSL=1", sipp)
+        self.assertNotIn("TLS_KEY_LOGGING", sipp)
+        self.assertNotIn("USE_SYSTEM_PUGIXML", sipp)
+        self.assertIn("COPY --from=builder /runtime-libs/ /", sipp)
+        self.assertNotIn("sip-tester", sipp)
+        self.assertNotIn("SIPP_DEBIAN_VERSION", sipp)
+        self.assertIn("voice_fixture_sipp_version: 3.7.7", defaults)
+        self.assertIn(
+            "voice_fixture_sipp_source_sha256: "
+            "e55b15f567760e9febeef366a1ab51a5239d197a132ce931b78c826d22d31e69",
+            defaults,
+        )
+        image_tag = "voice-fixture-sipp:3.7.7-sni1"
+        self.assertIn(image_tag, defaults)
+        self.assertIn(image_tag, teardown_defaults)
+        self.assertIn(
+            '"SIPP_VERSION={{ voice_fixture_sipp_version }}"', tasks
+        )
+        self.assertIn(
+            '"SIPP_SOURCE_SHA256={{ voice_fixture_sipp_source_sha256 }}"',
+            tasks,
+        )
 
     def test_build_network_bypasses_only_the_blocked_bridge_path(self) -> None:
         tasks = self.read("roles/voice_fixture/tasks/main.yml")
@@ -698,15 +754,21 @@ require_exact_word_set 'fixture SocketBindAllow' "$normalized_words" \
 
     def test_sipp_version_probe_accepts_only_its_documented_no_call_exit(self) -> None:
         tasks = self.read("roles/voice_fixture/tasks/main.yml")
-        expected = "SIPp v3.7.3-TLS-SCTP-PCAP-SHA256."
+        containerfile = self.read(
+            "roles/voice_fixture/files/sipp/Containerfile"
+        )
+        expected = "SIPp v3.7.7-TLS-SCTP-PCAP-SHA256."
         self.assertIn("failed_when: voice_fixture_sipp_version_output.rc != 99", tasks)
         self.assertIn("voice_fixture_sipp_version_output.rc == 99", tasks)
         self.assertIn("voice_fixture_sipp_version_output.stderr | trim == ''", tasks)
         self.assertIn("map('trim') | reject('equalto', '') | list", tasks)
         self.assertEqual(tasks.count(expected), 2)
+        self.assertEqual(containerfile.count(expected), 1)
+        self.assertIn('test "${sipp_version_rc}" -eq 99', containerfile)
+        self.assertIn("test ! -s /tmp/sipp-version.stderr", containerfile)
         self.assertIn("select('match', '^SIPp v') | list", tasks)
         self.assertNotIn(
-            "'v3.7.3' in (voice_fixture_sipp_version_output.stdout",
+            "'v3.7.7' in (voice_fixture_sipp_version_output.stdout",
             tasks,
         )
 
@@ -761,6 +823,9 @@ require_exact_word_set 'fixture SocketBindAllow' "$normalized_words" \
             "does not edit the project IaC",
             "always present their public ACME",
             "must never be installed as an Edge",
+            "SSL_set_tlsext_host_name(ssl, remote_host)",
+            "no wildcard or no-SNI TLS domain",
+            "SIPp v3.7.7-TLS-SCTP-PCAP-SHA256.",
         ]:
             self.assertIn(token, readme)
 

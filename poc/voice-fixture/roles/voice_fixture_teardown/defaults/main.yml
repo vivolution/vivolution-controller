@@ -9,7 +9,7 @@ voice_fixture_pki_generations_root: /etc/vivolution/voice-fixture/pki-generation
 voice_fixture_pki_staging_root: /etc/vivolution/voice-fixture/pki-staging
 voice_fixture_pki_extensions_root: /etc/vivolution/voice-fixture/pki-extensions
 voice_fixture_asterisk_image_tag: localhost/vivolution/voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind4
-voice_fixture_sipp_image_tag: localhost/vivolution/voice-fixture-sipp:3.7.3-2
+voice_fixture_sipp_image_tag: localhost/vivolution/voice-fixture-sipp:3.7.7-sni1
 
 voice_fixture_remove_images: false
 voice_fixture_remove_results: false

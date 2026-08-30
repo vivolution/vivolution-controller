@@ -42,9 +42,10 @@ voice_fixture_base_image: docker.io/library/debian@sha256:d7e12182ce18b85b93007c
 voice_fixture_python_base_image: docker.io/library/python@sha256:7e3a6aca9d74f93cca21a91d86a8dad8c34749afd5b4a98ee481c9c47b9f5ed4
 voice_fixture_asterisk_version: 22.10.1
 voice_fixture_asterisk_source_sha256: 373c98f4d4a1b923b42def0aee03f4e36aca9d1c244a8eeda646da8a97f89663
-voice_fixture_sipp_debian_version: '1:3.7.3-2'
+voice_fixture_sipp_version: 3.7.7
+voice_fixture_sipp_source_sha256: e55b15f567760e9febeef366a1ab51a5239d197a132ce931b78c826d22d31e69
 voice_fixture_asterisk_image_tag: localhost/vivolution/voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind4
-voice_fixture_sipp_image_tag: localhost/vivolution/voice-fixture-sipp:3.7.3-2
+voice_fixture_sipp_image_tag: localhost/vivolution/voice-fixture-sipp:3.7.7-sni1
 
 voice_fixture_ca_days: 30
 voice_fixture_leaf_days: 7

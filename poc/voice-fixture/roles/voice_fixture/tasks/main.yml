@@ -46,6 +46,9 @@
       - voice_fixture_sipp_uas_rtp_port | int == 22000
       - voice_fixture_sipp_uac_rtp_port | int == 22032
       - voice_fixture_runtime_root == '/run/vivolution-voice-fixture'
+      - voice_fixture_sipp_version == '3.7.7'
+      - voice_fixture_sipp_source_sha256 == 'e55b15f567760e9febeef366a1ab51a5239d197a132ce931b78c826d22d31e69'
+      - voice_fixture_sipp_image_tag == 'localhost/vivolution/voice-fixture-sipp:3.7.7-sni1'
       - voice_fixture_asterisk_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061]
       - voice_fixture_sipp_uas_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061, 16061]
       - voice_fixture_sipp_probe_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061, 16061, 25061, 25062]
@@ -1068,7 +1071,7 @@
   when: voice_fixture_existing_images.results[0].rc != 0
   notify: Restart voice fixture services
 
-- name: Build the exact Debian SIPp fixture image once per immutable version tag
+- name: Build the pinned upstream SIPp fixture image once per immutable version tag
   ansible.builtin.command:
     argv:
       - podman
@@ -1078,7 +1081,9 @@
       - --build-arg
       - "BASE_IMAGE={{ voice_fixture_python_base_image }}"
       - --build-arg
-      - "SIPP_DEBIAN_VERSION={{ voice_fixture_sipp_debian_version }}"
+      - "SIPP_VERSION={{ voice_fixture_sipp_version }}"
+      - --build-arg
+      - "SIPP_SOURCE_SHA256={{ voice_fixture_sipp_source_sha256 }}"
       - --tag
       - "{{ voice_fixture_sipp_image_tag }}"
       - "{{ voice_fixture_root }}/build/sipp"
@@ -1187,11 +1192,11 @@
       - voice_fixture_sipp_version_output.stderr | trim == ''
       - >-
         voice_fixture_sipp_version_lines | first | default('') ==
-        'SIPp v3.7.3-TLS-SCTP-PCAP-SHA256.'
+        'SIPp v3.7.7-TLS-SCTP-PCAP-SHA256.'
       - >-
         voice_fixture_sipp_version_lines |
         select('match', '^SIPp v') | list ==
-        ['SIPp v3.7.3-TLS-SCTP-PCAP-SHA256.']
+        ['SIPp v3.7.7-TLS-SCTP-PCAP-SHA256.']
     fail_msg: A built fixture component does not report its pinned version.
 
 - name: Record immutable fixture image IDs

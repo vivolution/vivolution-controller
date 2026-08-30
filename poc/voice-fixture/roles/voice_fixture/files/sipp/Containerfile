@@ -1,23 +1,90 @@
 # syntax=docker/dockerfile:1
 ARG BASE_IMAGE=docker.io/library/python@sha256:7e3a6aca9d74f93cca21a91d86a8dad8c34749afd5b4a98ee481c9c47b9f5ed4
-FROM ${BASE_IMAGE}
+FROM ${BASE_IMAGE} AS builder
 
-ARG SIPP_DEBIAN_VERSION=1:3.7.3-2
-ARG SIPP_UID=10002
-ARG SIPP_GID=10002
+ARG SIPP_VERSION=3.7.7
+ARG SIPP_SOURCE_SHA256=e55b15f567760e9febeef366a1ab51a5239d197a132ce931b78c826d22d31e69
 
 RUN set -eux; \
     apt-get update; \
     apt-get install --yes --no-install-recommends \
-        "sip-tester=${SIPP_DEBIAN_VERSION}"; \
-    test "$(dpkg-query --show --showformat='${Version}' sip-tester)" = "${SIPP_DEBIAN_VERSION}"; \
-    rm -rf /var/lib/apt/lists/*; \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        libgsl-dev \
+        libncurses-dev \
+        libpcap-dev \
+        libpugixml-dev \
+        libsctp-dev \
+        libssl-dev \
+        ninja-build \
+        pkg-config; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src
+
+RUN set -eux; \
+    curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+        --output sipp.tar.gz \
+        "https://github.com/SIPp/sipp/releases/download/v${SIPP_VERSION}/sipp-${SIPP_VERSION}.tar.gz"; \
+    printf '%s  %s\n' "${SIPP_SOURCE_SHA256}" sipp.tar.gz \
+        | sha256sum --check --strict; \
+    tar --extract --gzip --file sipp.tar.gz; \
+    grep --fixed-strings --quiet \
+        'if (strcmp(remote_ip, remote_host)) {' \
+        "sipp-${SIPP_VERSION}/src/sslsocket.cpp"; \
+    grep --fixed-strings --quiet \
+        'SSL_set_tlsext_host_name(ssl, remote_host);' \
+        "sipp-${SIPP_VERSION}/src/sslsocket.cpp"; \
+    test "$(grep --fixed-strings --count \
+        'SSL_set_tlsext_host_name(ssl, remote_host);' \
+        "sipp-${SIPP_VERSION}/src/sslsocket.cpp")" = 1; \
+    cmake \
+        -S "sipp-${SIPP_VERSION}" \
+        -B sipp-build \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DUSE_GSL=1 \
+        -DUSE_PCAP=1 \
+        -DUSE_SCTP=1 \
+        -DUSE_SSL=1; \
+    cmake --build sipp-build --target sipp --parallel 2; \
+    install --directory /out/usr/bin; \
+    install --mode=0755 sipp-build/sipp /out/usr/bin/sipp; \
+    strip --strip-unneeded /out/usr/bin/sipp; \
+    set +e; \
+    /out/usr/bin/sipp -v > /tmp/sipp-version.stdout 2> /tmp/sipp-version.stderr; \
+    sipp_version_rc=$?; \
+    set -e; \
+    test "${sipp_version_rc}" -eq 99; \
+    test ! -s /tmp/sipp-version.stderr; \
+    grep --fixed-strings --line-regexp --quiet \
+        ' SIPp v3.7.7-TLS-SCTP-PCAP-SHA256.' \
+        /tmp/sipp-version.stdout; \
+    ldd /out/usr/bin/sipp \
+        | awk '/=> \/|^\// { for (i=1;i<=NF;i++) if ($i ~ /^\//) print $i }' \
+        | sort --unique > /tmp/runtime-libraries; \
+    mkdir --parents /runtime-libs; \
+    while IFS= read -r library; do \
+        cp --parents --dereference "$library" /runtime-libs; \
+    done < /tmp/runtime-libraries
+
+FROM ${BASE_IMAGE}
+
+ARG SIPP_UID=10002
+ARG SIPP_GID=10002
+ARG SIPP_VERSION=3.7.7
+
+RUN set -eux; \
     groupadd --gid "${SIPP_GID}" fixture-sipp; \
     useradd --uid "${SIPP_UID}" --gid "${SIPP_GID}" \
         --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin fixture-sipp; \
     mkdir --parents /opt/fixture/scenarios /opt/fixture/bin /results; \
     chown --recursive fixture-sipp:fixture-sipp /results
 
+COPY --from=builder /out/usr/ /usr/
+COPY --from=builder /runtime-libs/ /
 COPY scenarios/ /opt/fixture/scenarios/
 COPY bin/ /opt/fixture/bin/
 RUN chmod 0555 /opt/fixture/bin/*.py \
@@ -27,7 +94,8 @@ USER 10002:10002
 EXPOSE 25061/tcp 25062/tcp 25063/tcp 22000/udp 22032/udp
 
 LABEL org.opencontainers.image.title="Vivolution synthetic Teams-side fixture" \
-      org.opencontainers.image.version="3.7.3-2" \
+      org.opencontainers.image.version="${SIPP_VERSION}" \
+      ae.vivolution.fixture.sipp-sni="required" \
       ae.vivolution.fixture.scope="no-pstn"
 
 ENTRYPOINT ["/usr/local/bin/python"]
