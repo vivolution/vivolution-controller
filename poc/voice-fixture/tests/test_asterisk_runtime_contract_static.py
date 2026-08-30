@@ -244,6 +244,10 @@ class AsteriskRuntimeContractStaticTests(unittest.TestCase):
             "+    VIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT == 1",
             patch,
         )
+        self.assertIn(
+            "+    /* Bind upstream, or defer the zero-port bind to the first sendto(). */",
+            patch,
+        )
         self.assertIn("+    resv->udp6_sock = PJ_INVALID_SOCKET;", patch)
         self.assertEqual(
             [
@@ -251,7 +255,11 @@ class AsteriskRuntimeContractStaticTests(unittest.TestCase):
                 for line in patch.splitlines()
                 if line.startswith("-") and not line.startswith("---")
             ],
-            ["-    status = pj_sock_bind_in(resv->udp_sock, 0, 0);"],
+            [
+                "-",
+                "-    /* Bind to any address/port */",
+                "-    status = pj_sock_bind_in(resv->udp_sock, 0, 0);",
+            ],
         )
         self.assertIn(
             "COPY pjproject-dns-kernel-autobind.patch ", containerfile

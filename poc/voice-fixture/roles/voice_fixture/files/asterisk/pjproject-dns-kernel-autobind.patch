@@ -1,8 +1,13 @@
 --- a/pjlib-util/src/pjlib-util/resolver.c
 +++ b/pjlib-util/src/pjlib-util/resolver.c
-@@ -280,4 +280,9 @@
-     /* Bind to any address/port */
+@@ -277,7 +277,12 @@
+     if (status != PJ_SUCCESS)
+         return status;
+-
+-    /* Bind to any address/port */
 -    status = pj_sock_bind_in(resv->udp_sock, 0, 0);
++
++    /* Bind upstream, or defer the zero-port bind to the first sendto(). */
 +#if defined(VIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT) && \
 +    VIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT == 1
 +    status = PJ_SUCCESS;
