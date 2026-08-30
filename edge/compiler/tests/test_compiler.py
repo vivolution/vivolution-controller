@@ -158,14 +158,15 @@ class CompilerTests(unittest.TestCase):
                 # Filled from the reviewed deterministic renderer. Changes are
                 # deliberate review points, never fixture digest inheritance.
                 "nftables-tenant-policy.json": "bb28b3faacacdb0692c684cf7510163d6f83791e24b44f18e07e0adfe8644075",
-                "opensips-tenant.cfg": "e6a47fa4306399f4a79f7860649f1a9655188fd5d8cc1875a92f504d88231c77",
+                "opensips-tenant.cfg": "40898421b0b8b69b52321f4c420c85a3d289b1ef423a40bfedaca07326ba3a13",
                 "rtpengine-tenant.conf": "c83e0cf4baf62d9b6800eac8cdb131d623502ff1ee978c6fc030957d20e5a7ea",
             },
         )
         opensips = bundle.artifacts["opensips-tenant.cfg"].decode("ascii")
         self.assertIn('"udp:127.0.0.1:2223"', opensips)
-        self.assertIn("$Rp != 5061", opensips)
-        self.assertIn("$Rp != 15061", opensips)
+        self.assertIn("$socket_in(port) != 5061", opensips)
+        self.assertIn("$socket_in(port) != 15061", opensips)
+        self.assertNotIn("$Rp", opensips)
         self.assertEqual(opensips.count("#### Signed OPTIONS interval seconds: 60\n"), 1)
         self.assertIn("sip:sip.pstnhub.microsoft.com:5061;transport=tls", opensips)
         self.assertEqual(opensips.count("VIVO_SYNTHETIC_CDR_V1"), 9)

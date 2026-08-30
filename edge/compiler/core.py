@@ -850,7 +850,7 @@ def _render_opensips(effective: _EffectiveTenant, facts: NodeFacts, token: str) 
 modparam("rtpengine", "rtpengine_sock", "udp:{RTPENGINE_NG_HOST}:{RTPENGINE_NG_PORT}")
 
 route[VIVO_{token}_TEAMS_TO_PBX] {{
-    if ($Rp != {TEAMS_TLS_PORT}) {{
+    if ($socket_in(port) != {TEAMS_TLS_PORT}) {{
         send_reply(403, "Wrong ingress");
         exit;
     }}
@@ -887,7 +887,7 @@ route[VIVO_{token}_TEAMS_TO_PBX] {{
 }}
 
 route[VIVO_{token}_PBX_TO_TEAMS] {{
-    if ($Rp != {PBX_TLS_LISTENER_PORT}) {{
+    if ($socket_in(port) != {PBX_TLS_LISTENER_PORT}) {{
         send_reply(403, "Wrong ingress");
         exit;
     }}

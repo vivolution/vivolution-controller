@@ -1477,6 +1477,23 @@ class RuntimeTests(unittest.TestCase):
                 "alias=tls:sbc1.voice.vivolution.ae:15061",
             ],
         )
+        self.assertIn("$socket_in(port) == 5061", synthetic)
+        self.assertIn("$socket_in(port) == 15061", synthetic)
+        self.assertIn("$socket_in(port) != 5061", synthetic)
+        self.assertIn("$socket_in(port) != 15061", synthetic)
+        self.assertNotIn("$Rp", synthetic)
+        self.assertIn(
+            f"route(VIVO_{synthetic_route.token}_TEAMS_TO_PBX);", synthetic
+        )
+        self.assertIn(
+            f"route(VIVO_{synthetic_route.token}_PBX_TO_TEAMS);", synthetic
+        )
+        self.assertNotIn(
+            f"route[VIVO_{synthetic_route.token}_TEAMS_TO_PBX];", synthetic
+        )
+        self.assertNotIn(
+            f"route[VIVO_{synthetic_route.token}_PBX_TO_TEAMS];", synthetic
+        )
         self.assertIn(
             '    $du = "sip:10.20.1.4:16061;transport=tls";\n'
             '    force_send_socket("tls:10.20.2.4:15061");\n'
@@ -1528,6 +1545,23 @@ class RuntimeTests(unittest.TestCase):
                 "alias=tls:sbc1.voice.vivolution.ae:5061",
                 "alias=tls:sbc1.voice.vivolution.ae:15061",
             ],
+        )
+        self.assertIn("$socket_in(port) == 5061", direct)
+        self.assertIn("$socket_in(port) == 15061", direct)
+        self.assertIn("$socket_in(port) != 5061", direct)
+        self.assertIn("$socket_in(port) != 15061", direct)
+        self.assertNotIn("$Rp", direct)
+        self.assertIn(
+            f"route(VIVO_{direct_route.token}_TEAMS_TO_PBX);", direct
+        )
+        self.assertIn(
+            f"route(VIVO_{direct_route.token}_PBX_TO_TEAMS);", direct
+        )
+        self.assertNotIn(
+            f"route[VIVO_{direct_route.token}_TEAMS_TO_PBX];", direct
+        )
+        self.assertNotIn(
+            f"route[VIVO_{direct_route.token}_PBX_TO_TEAMS];", direct
         )
 
         self.assertEqual(direct_route.options_interval_seconds, 60)

@@ -922,7 +922,7 @@ def _compiler_fragment(route: TenantRouteSpec) -> bytes:
 modparam("rtpengine", "rtpengine_sock", "udp:127.0.0.1:2223")
 
 route[VIVO_{route.token}_TEAMS_TO_PBX] {{
-    if ($Rp != 5061) {{
+    if ($socket_in(port) != 5061) {{
         send_reply(403, "Wrong ingress");
         exit;
     }}
@@ -959,7 +959,7 @@ route[VIVO_{route.token}_TEAMS_TO_PBX] {{
 }}
 
 route[VIVO_{route.token}_PBX_TO_TEAMS] {{
-    if ($Rp != 15061) {{
+    if ($socket_in(port) != 15061) {{
         send_reply(403, "Wrong ingress");
         exit;
     }}
@@ -1792,19 +1792,19 @@ route {{
         send_reply(403, "Verified mutual TLS required");
         exit;
     }}
-    if ($Rp == 5061) {{
+    if ($socket_in(port) == 5061) {{
         if (!({_source_match(microsoft_sources)})) {{
             send_reply(403, "Unauthorized Teams source");
             exit;
         }}
-        route[VIVO_{route.token}_TEAMS_TO_PBX];
+        route(VIVO_{route.token}_TEAMS_TO_PBX);
     }}
-    if ($Rp == 15061) {{
+    if ($socket_in(port) == 15061) {{
         if (!({_source_match(facts.authorized_pbx_source_ipv4_cidrs)})) {{
             send_reply(403, "Unauthorized PBX source");
             exit;
         }}
-        route[VIVO_{route.token}_PBX_TO_TEAMS];
+        route(VIVO_{route.token}_PBX_TO_TEAMS);
     }}
     send_reply(403, "Unknown ingress");
     exit;
