@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -64,6 +65,47 @@ print(environment.from_string(expression).render(**variables).strip())
             msg=f"{completed.stdout}\n{completed.stderr}",
         )
         return completed.stdout.strip()
+
+    def run_local_assertions(
+        self,
+        assertions: list[str],
+        variables: dict[str, object],
+        *,
+        inventory_host: str = "sbc1",
+    ) -> subprocess.CompletedProcess[str]:
+        executable = shutil.which("ansible-playbook")
+        if executable is None:
+            self.skipTest("ansible-playbook is unavailable")
+        playbook = [
+            {
+                "name": "Exercise the recovery identity boundary",
+                "hosts": "all",
+                "gather_facts": False,
+                "vars": variables,
+                "tasks": [
+                    {
+                        "name": "Evaluate the production recovery assertions",
+                        "ansible.builtin.assert": {"that": assertions},
+                    }
+                ],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "identity.yml"
+            path.write_text(json.dumps(playbook), encoding="utf-8")
+            return subprocess.run(
+                [
+                    executable,
+                    "--inventory",
+                    f"{inventory_host},",
+                    "--connection",
+                    "local",
+                    str(path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
 
     def test_runtime_health_is_locked_journal_free_and_baseline_only(self) -> None:
         core = self.read_root("edge/runtime/core.py")
@@ -129,6 +171,14 @@ print(environment.from_string(expression).render(**variables).strip())
         ):
             self.assertIn(token, playbook)
         self.assertIn("edge_activation_recovery_node_id == inventory_hostname", playbook)
+        self.assertNotIn(
+            "edge_activation_recovery_node_id == edge_expected_hostname", playbook
+        )
+        self.assertIn(
+            "edge_recovery_os_hostname.stdout | trim == edge_expected_hostname",
+            playbook,
+        )
+        self.assertIn("/usr/bin/hostnamectl, --static", playbook)
         self.assertIn("edge_activation_recovery_profile == edge_runtime_profile", playbook)
         self.assertIn(
             "edge_activation_recovery_manifest_digest == edge_activation_manifest_digest",
@@ -147,6 +197,36 @@ print(environment.from_string(expression).render(**variables).strip())
         self.assertIn("COMMITTED_TRANSACTION_RECOVERY_FINALIZED", playbook)
         self.assertIn("CRASH_RECOVERED_TO_PRIOR_LKG", playbook)
         self.assertIn("edge_recovery_runtime_recover.keys()", playbook)
+
+    def test_recovery_identity_accepts_distinct_logical_and_os_hostnames(self) -> None:
+        assertions = [
+            "edge_activation_recovery_node_id == inventory_hostname",
+            "edge_expected_hostname is match('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')",
+            "edge_recovery_os_hostname.stdout | trim == edge_expected_hostname",
+        ]
+        playbook = self.read_deploy("playbooks/recover-edge-activation.yml")
+        for expression in assertions:
+            self.assertIn(f"- {expression}", playbook)
+        variables = {
+            "edge_activation_recovery_node_id": "sbc1",
+            "edge_expected_hostname": "viv-sbc-poc-sbc1",
+            "edge_recovery_os_hostname": {"stdout": "viv-sbc-poc-sbc1\n"},
+        }
+        accepted = self.run_local_assertions(assertions, variables)
+        self.assertEqual(
+            accepted.returncode,
+            0,
+            msg=f"{accepted.stdout}\n{accepted.stderr}",
+        )
+
+        mismatched = self.run_local_assertions(
+            assertions,
+            {
+                **variables,
+                "edge_recovery_os_hostname": {"stdout": "sbc1\n"},
+            },
+        )
+        self.assertNotEqual(mismatched.returncode, 0)
 
     def test_only_five_identity_proven_reconciliation_outcomes_are_accepted(self) -> None:
         playbook = self.read_deploy("playbooks/recover-edge-activation.yml")

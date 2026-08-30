@@ -11,12 +11,19 @@
     edge_runtime_node_facts_file: /etc/vivolution-edge/node-facts.json
 
   pre_tasks:
+    - name: Inspect the recovery target operating-system hostname
+      ansible.builtin.command:
+        argv: [/usr/bin/hostnamectl, --static]
+      register: edge_recovery_os_hostname
+      changed_when: false
+
     - name: Require explicit recovery and a second copy of the exact candidate identity
       ansible.builtin.assert:
         that:
           - edge_activation_recovery_acknowledgement == 'RECOVER_EXACT_EDGE_ACTIVATION'
           - edge_activation_recovery_node_id == inventory_hostname
-          - edge_activation_recovery_node_id == edge_expected_hostname
+          - edge_expected_hostname is match('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+          - edge_recovery_os_hostname.stdout | trim == edge_expected_hostname
           - edge_activation_recovery_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING']
           - edge_activation_recovery_profile == edge_runtime_profile
           - edge_activation_recovery_generation is number
@@ -37,8 +44,10 @@
             (edge_activation_recovery_profile == 'DIRECT_ROUTING' and
              edge_activation_recovery_generation | int >= 2)
         fail_msg: >-
-          Recovery requires an explicit acknowledgement and a second exact copy
-          of the node, profile, generation, sequence, and manifest digest.
+          Recovery requires an explicit acknowledgement, the exact logical node
+          identity, the separately pinned operating-system hostname, and a
+          second exact copy of the profile, generation, sequence, and manifest
+          digest.
 
     - name: Define only candidate-specific recovery and cleanup paths
       ansible.builtin.set_fact:

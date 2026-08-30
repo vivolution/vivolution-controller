@@ -1,4 +1,8 @@
+import json
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 
@@ -8,6 +12,80 @@ DEPLOY = Path(__file__).resolve().parents[1]
 class EdgeBootstrapStaticTests(unittest.TestCase):
     def read(self, relative_path: str) -> str:
         return (DEPLOY / relative_path).read_text(encoding="utf-8")
+
+    def run_local_assertions(
+        self, assertions: list[str], variables: dict[str, object]
+    ) -> subprocess.CompletedProcess[str]:
+        executable = shutil.which("ansible-playbook")
+        if executable is None:
+            self.skipTest("ansible-playbook is unavailable")
+        playbook = [
+            {
+                "name": "Exercise the Edge bootstrap identity boundary",
+                "hosts": "all",
+                "gather_facts": False,
+                "vars": variables,
+                "tasks": [
+                    {
+                        "name": "Evaluate the production preflight assertions",
+                        "ansible.builtin.assert": {"that": assertions},
+                    }
+                ],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "identity.yml"
+            path.write_text(json.dumps(playbook), encoding="utf-8")
+            return subprocess.run(
+                [
+                    executable,
+                    "--inventory",
+                    "sbc1,",
+                    "--connection",
+                    "local",
+                    str(path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+    def test_preflight_keeps_logical_os_and_acme_identities_distinct(self) -> None:
+        assertions = [
+            "inventory_hostname in ['sbc1', 'sbc2']",
+            "edge_expected_hostname is match('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')",
+            "edge_acme_node_fqdn is match('^' ~ inventory_hostname ~ '\\\\.[a-z0-9.-]+$')",
+            "edge_acme_wildcard_fqdn == '*.' ~ edge_acme_node_fqdn",
+        ]
+        preflight = self.read("roles/edge_preflight/tasks/main.yml")
+        for expression in assertions:
+            self.assertIn(f"- {expression}", preflight)
+        self.assertNotIn(
+            "edge_acme_node_fqdn is match('^' ~ edge_expected_hostname ~ '\\\\.[a-z0-9.-]+$')",
+            preflight,
+        )
+
+        variables = {
+            "edge_expected_hostname": "viv-sbc-poc-sbc1",
+            "edge_acme_node_fqdn": "sbc1.voice.vivolution.ae",
+            "edge_acme_wildcard_fqdn": "*.sbc1.voice.vivolution.ae",
+        }
+        accepted = self.run_local_assertions(assertions, variables)
+        self.assertEqual(
+            accepted.returncode,
+            0,
+            msg=f"{accepted.stdout}\n{accepted.stderr}",
+        )
+
+        conflated = self.run_local_assertions(
+            assertions,
+            {
+                **variables,
+                "edge_acme_node_fqdn": "viv-sbc-poc-sbc1.voice.vivolution.ae",
+                "edge_acme_wildcard_fqdn": "*.viv-sbc-poc-sbc1.voice.vivolution.ae",
+            },
+        )
+        self.assertNotEqual(conflated.returncode, 0)
 
     def test_playbook_is_edge_only_except_shared_ssh_hardening(self) -> None:
         playbook = self.read("playbooks/install-edge.yml")
