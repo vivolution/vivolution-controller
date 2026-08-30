@@ -819,6 +819,25 @@ class SyntheticFailoverPlaybookStaticTests(unittest.TestCase):
             "changed_when: edge_failover_deadman_disarm.rc == 0",
             normal_disarm,
         )
+        inactive_proofs = (
+            source[
+                source.index("Require safe-rerun deadman inactive before marker removal") :
+                source.index("Remove exact prior recovery payloads after successful disarm")
+            ],
+            source[
+                source.index("Require the node-local deadman inactive before marker removal") :
+                source.index("Remove exact recovery payloads only after successful disarm")
+            ],
+        )
+        for inactive_proof in inactive_proofs:
+            self.assertIn(
+                "map(attribute='stdout') | list == ['inactive', 'inactive']",
+                inactive_proof,
+            )
+            self.assertIn(
+                "map(attribute='rc') | list | difference([3, 4]) | length == 0",
+                inactive_proof,
+            )
         final_gate = source[
             source.index("Require accepted failover and exact healthy primary restoration") :
             source.index("Select alternate and restored fixture test identities")
@@ -828,7 +847,15 @@ class SyntheticFailoverPlaybookStaticTests(unittest.TestCase):
             final_gate,
         )
         self.assertIn(
-            "edge_failover_deadman_inactive.results | default([])",
+            "edge_failover_deadman_inactive.results | default([]) |",
+            final_gate,
+        )
+        self.assertIn(
+            "map(attribute='stdout') | list == ['inactive', 'inactive']",
+            final_gate,
+        )
+        self.assertIn(
+            "map(attribute='rc') | list | difference([3, 4]) | length == 0",
             final_gate,
         )
 

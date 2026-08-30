@@ -466,8 +466,9 @@ disarms the timer and removes only the exact recovery directory. The normal
 unconditional recovery uses the same checks. Neither path disarms or removes
 the marker before the post-restore call passes. Disarm also accepts systemd's
 "unit not loaded" result when a completed transient service has already been
-garbage-collected, but cleanup still requires both units to prove inactive
-before removing any recovery payload or marker.
+garbage-collected. Cleanup still requires exactly two `inactive` results and
+permits only systemd's loaded-inactive or not-found status codes before
+removing any recovery payload or marker.
 
 The offline compiler `scripts/synthetic_failover_evidence.py` verifies the
 complete bounded contents of all three fixture SHA-256 manifests, rejects

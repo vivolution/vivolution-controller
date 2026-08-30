@@ -326,10 +326,10 @@
         that:
           - >-
             edge_failover_safe_rerun_deadman_inactive.results |
-            map(attribute='stdout') | unique | list == ['inactive']
+            map(attribute='stdout') | list == ['inactive', 'inactive']
           - >-
             edge_failover_safe_rerun_deadman_inactive.results |
-            map(attribute='rc') | unique | list == [3]
+            map(attribute='rc') | list | difference([3, 4]) | length == 0
         fail_msg: The prior deadman is not inactive; retaining its recovery marker.
       when: edge_failover_existing_lock.stat.exists | bool
 
@@ -972,10 +972,10 @@
             that:
               - >-
                 edge_failover_deadman_inactive.results |
-                map(attribute='stdout') | unique | list == ['inactive']
+                map(attribute='stdout') | list == ['inactive', 'inactive']
               - >-
                 edge_failover_deadman_inactive.results |
-                map(attribute='rc') | unique | list == [3]
+                map(attribute='rc') | list | difference([3, 4]) | length == 0
             fail_msg: The deadman is not inactive; retaining its recovery marker.
           when: edge_failover_recovery_required | bool
 
@@ -1043,7 +1043,10 @@
           - (edge_failover_deadman_disarm.rc | default(1)) in [0, 5]
           - >-
             edge_failover_deadman_inactive.results | default([]) |
-            map(attribute='stdout') | unique | list == ['inactive']
+            map(attribute='stdout') | list == ['inactive', 'inactive']
+          - >-
+            edge_failover_deadman_inactive.results | default([]) |
+            map(attribute='rc') | list | difference([3, 4]) | length == 0
           - >-
             edge_failover_recovery_payload_removal.results | default([]) |
             map(attribute='rc') | unique | list == [0]
