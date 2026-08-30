@@ -20,6 +20,26 @@
       /usr/local/libexec/vivolution-voice-fixture-forced-leaf-rotation
     fixture_rotation_evidence_compiler: >-
       {{ playbook_dir }}/../scripts/forced_fixture_leaf_rotation_evidence.py
+    fixture_rotation_phase_normalizer: >-
+      {{ playbook_dir }}/../scripts/normalize_forced_fixture_leaf_rotation_phases.py
+    fixture_rotation_complete_evidence_names:
+      - active-server-leaves.json
+      - state.json
+      - credential-digests.json
+      - fleet-pre.json
+      - sbc1-pre.json
+      - sbc1-post.json
+      - sbc2-pre.json
+      - sbc2-post.json
+      - post-calls.json
+      - sbc1-edge.json
+      - sbc2-edge.json
+      - sbc1-bundle.json
+      - sbc2-bundle.json
+      - sbc1-edge-cdr.json
+      - sbc2-edge-cdr.json
+      - sbc1-cdr-reconciliation.json
+      - sbc2-cdr-reconciliation.json
     fixture_rotation_edge_snapshot_source: >-
       {{ playbook_dir }}/../scripts/forced_fixture_leaf_rotation_edge_snapshot.py
     fixture_rotation_edge_snapshot_remote: >-
@@ -68,7 +88,62 @@
       delegate_to: localhost
       become: false
 
-    - name: Inspect an immutable acceptance from this exact prior request
+    - name: Inspect an initial immutable acceptance from this exact prior request
+      ansible.builtin.stat:
+        path: "{{ fixture_rotation_local_root }}/acceptance.json"
+        follow: false
+        get_checksum: true
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      register: fixture_rotation_initial_acceptance
+
+    - name: Inspect every complete unfinished acceptance input before live work
+      ansible.builtin.stat:
+        path: "{{ fixture_rotation_local_root }}/{{ item }}"
+        follow: false
+      loop: "{{ fixture_rotation_complete_evidence_names }}"
+      delegate_to: localhost
+      become: false
+      register: fixture_rotation_completion_input_stats
+      when: not (fixture_rotation_initial_acceptance.stat.exists | default(false) | bool)
+
+    - name: Canonicalize a complete legacy request before any live work
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ fixture_rotation_phase_normalizer }}"
+          - --evidence-dir
+          - "{{ fixture_rotation_local_root }}"
+          - --request-id
+          - "{{ fixture_rotation_request_id }}"
+      delegate_to: localhost
+      become: false
+      changed_when: >-
+        fixture_rotation_resume_phase_normalization.stdout !=
+        'FORCED_FIXTURE_PHASES_CANONICAL changed=0'
+      register: fixture_rotation_resume_phase_normalization
+      when:
+        - not (fixture_rotation_initial_acceptance.stat.exists | default(false) | bool)
+        - >-
+          (fixture_rotation_completion_input_stats.results |
+           selectattr('stat.exists', 'defined') |
+           selectattr('stat.exists') | list | length) ==
+          (fixture_rotation_complete_evidence_names | length)
+
+    - name: Strictly compile a complete unfinished request before any live work
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ fixture_rotation_evidence_compiler }}"
+          - --evidence-dir
+          - "{{ fixture_rotation_local_root }}"
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      when: fixture_rotation_resume_phase_normalization is not skipped
+
+    - name: Inspect the immutable acceptance after bounded offline recovery
       ansible.builtin.stat:
         path: "{{ fixture_rotation_local_root }}/acceptance.json"
         follow: false
@@ -532,7 +607,7 @@
                'sbc1': (fixture_rotation_fleet_pre_snapshots.results[0].stdout | from_json),
                'sbc2': (fixture_rotation_fleet_pre_snapshots.results[1].stdout | from_json)
              }
-          } | to_json(sort_keys=True, separators=(',', ':')) }}
+          } | to_json(sort_keys=True, separators=(',', ':')) ~ '\n' }}
         dest: "{{ fixture_rotation_local_root }}/fleet-pre.json"
         mode: '0600'
         force: false
@@ -599,7 +674,7 @@
                inventory_hostname: (fixture_rotation_serial_pre_snapshots.results[0].stdout | from_json),
                fixture_rotation_peer: (fixture_rotation_serial_pre_snapshots.results[1].stdout | from_json)
              }
-          } | to_json(sort_keys=True, separators=(',', ':')) }}
+          } | to_json(sort_keys=True, separators=(',', ':')) ~ '\n' }}
         dest: "{{ fixture_rotation_local_root }}/{{ inventory_hostname }}-pre.json"
         mode: '0600'
         force: false
@@ -636,7 +711,7 @@
                inventory_hostname: (fixture_rotation_serial_post_snapshots.results[0].stdout | from_json),
                fixture_rotation_peer: (fixture_rotation_serial_post_snapshots.results[1].stdout | from_json)
              }
-          } | to_json(sort_keys=True, separators=(',', ':')) }}
+          } | to_json(sort_keys=True, separators=(',', ':')) ~ '\n' }}
         dest: "{{ fixture_rotation_local_root }}/{{ inventory_hostname }}-post.json"
         mode: '0600'
         force: false
@@ -671,6 +746,8 @@
       /run/lock/vivolution-forced-fixture-rotation-collector.py
     fixture_rotation_evidence_compiler: >-
       {{ playbook_dir }}/../scripts/forced_fixture_leaf_rotation_evidence.py
+    fixture_rotation_phase_normalizer: >-
+      {{ playbook_dir }}/../scripts/normalize_forced_fixture_leaf_rotation_phases.py
     fixture_rotation_cdr_reconciler: >-
       {{ playbook_dir }}/../../poc/voice-fixture/roles/voice_fixture/files/bin/synthetic_cdr_evidence.py
     fixture_rotation_edge_snapshot_remote: >-
@@ -958,9 +1035,10 @@
                'sbc1': (fixture_rotation_post_call_snapshots.results[0].stdout | from_json),
                'sbc2': (fixture_rotation_post_call_snapshots.results[1].stdout | from_json)
              }
-          } | to_json(sort_keys=True, separators=(',', ':')) }}
+          } | to_json(sort_keys=True, separators=(',', ':')) ~ '\n' }}
         dest: "{{ fixture_rotation_local_root }}/post-calls.json"
         mode: '0600'
+        force: false
       delegate_to: localhost
       become: false
 
@@ -992,6 +1070,22 @@
         mode: '0600'
       delegate_to: localhost
       become: false
+
+    - name: Canonicalize only exact legacy no-newline fleet phases
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ fixture_rotation_phase_normalizer }}"
+          - --evidence-dir
+          - "{{ fixture_rotation_local_root }}"
+          - --request-id
+          - "{{ fixture_rotation_request_id }}"
+      delegate_to: localhost
+      become: false
+      changed_when: >-
+        fixture_rotation_phase_normalization.stdout !=
+        'FORCED_FIXTURE_PHASES_CANONICAL changed=0'
+      register: fixture_rotation_phase_normalization
 
     - name: Compile strict forced leaf-rotation acceptance evidence offline
       ansible.builtin.command:

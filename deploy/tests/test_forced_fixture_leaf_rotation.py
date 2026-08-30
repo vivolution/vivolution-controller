@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[2]
 REQUEST_ID = "20260831T010203Z-123456abcdef"
 STATE_SCRIPT = ROOT / "deploy" / "scripts" / "forced_fixture_leaf_rotation_state.py"
 EVIDENCE_SCRIPT = ROOT / "deploy" / "scripts" / "forced_fixture_leaf_rotation_evidence.py"
+PHASE_NORMALIZER_SCRIPT = (
+    ROOT / "deploy" / "scripts" / "normalize_forced_fixture_leaf_rotation_phases.py"
+)
 PLAYBOOK = (
     ROOT
     / "deploy"
@@ -53,6 +56,9 @@ def load(name: str, path: Path):
 
 state = load("forced_fixture_leaf_rotation_state_test", STATE_SCRIPT)
 evidence = load("forced_fixture_leaf_rotation_evidence_test", EVIDENCE_SCRIPT)
+phase_normalizer = load(
+    "normalize_forced_fixture_leaf_rotation_phases_test", PHASE_NORMALIZER_SCRIPT
+)
 
 
 def certificate(character: str, serial: str) -> dict[str, str]:
@@ -684,6 +690,109 @@ class ForcedFixtureLeafRotationEvidenceTests(unittest.TestCase):
         ):
             evidence._atomic_write(path, raw.replace(b"NOT_ASSERTED", b"NOT-ASSERTED", 1))
 
+    def make_phase_boundaries_legacy(self, phases: tuple[str, ...] = evidence.PHASES) -> None:
+        for phase in phases:
+            path = self.directory / f"{phase}.json"
+            raw = path.read_bytes()
+            self.assertTrue(raw.endswith(b"\n"))
+            path.write_bytes(raw[:-1])
+
+    def test_phase_migration_validates_complete_evidence_and_is_idempotent(self) -> None:
+        self.make_phase_boundaries_legacy()
+        stale = self.directory.parent / (
+            f".{REQUEST_ID}.phase-migration-write.fleet-pre.json.{'a' * 24}"
+        )
+        stale.write_bytes(b"partial")
+        stale.chmod(0o600)
+        self.assertEqual(
+            phase_normalizer.normalize_directory(self.directory, REQUEST_ID), 6
+        )
+        self.assertFalse(stale.exists())
+        self.assertEqual(
+            phase_normalizer.normalize_directory(self.directory, REQUEST_ID), 0
+        )
+        evidence.compile_evidence(self.directory)
+        for phase in evidence.PHASES:
+            self.assertTrue((self.directory / f"{phase}.json").read_bytes().endswith(b"\n"))
+
+    def test_phase_migration_accepts_a_crash_recovery_mixture(self) -> None:
+        legacy = evidence.PHASES[::2]
+        self.make_phase_boundaries_legacy(legacy)
+        self.assertEqual(
+            phase_normalizer.normalize_directory(self.directory, REQUEST_ID),
+            len(legacy),
+        )
+        evidence.compile_evidence(self.directory)
+
+    def test_phase_migration_rejects_duplicate_and_noncanonical_bytes(self) -> None:
+        self.make_phase_boundaries_legacy()
+        path = self.directory / "fleet-pre.json"
+        original = path.read_bytes()
+        duplicate = original.replace(
+            b'"phase":"fleet-pre"',
+            b'"phase":"fleet-pre","phase":"divergent"',
+            1,
+        )
+        path.write_bytes(duplicate)
+        with self.assertRaisesRegex(
+            phase_normalizer.PhaseNormalizationError, "duplicate members"
+        ):
+            phase_normalizer.normalize_directory(self.directory, REQUEST_ID)
+        self.assertEqual(path.read_bytes(), duplicate)
+
+        path.write_bytes(original + b"\r\n")
+        with self.assertRaisesRegex(
+            phase_normalizer.PhaseNormalizationError, "exact legacy"
+        ):
+            phase_normalizer.normalize_directory(self.directory, REQUEST_ID)
+        self.assertEqual(path.read_bytes(), original + b"\r\n")
+
+    def test_phase_migration_rejects_wrong_request_or_semantic_drift_before_mutation(self) -> None:
+        self.make_phase_boundaries_legacy()
+        baseline = {
+            phase: (self.directory / f"{phase}.json").read_bytes()
+            for phase in evidence.PHASES
+        }
+        with self.assertRaisesRegex(
+            phase_normalizer.PhaseNormalizationError, "exact migration request"
+        ):
+            phase_normalizer.normalize_directory(
+                self.directory, "20260831T010204Z-abcdef123456"
+            )
+        self.assertEqual(
+            baseline,
+            {
+                phase: (self.directory / f"{phase}.json").read_bytes()
+                for phase in evidence.PHASES
+            },
+        )
+
+        fleet_pre = json.loads(baseline["fleet-pre"])
+        fleet_pre["phase"] = "sbc1-post"
+        self.write(
+            "sbc1-post.json",
+            evidence.canonical_bytes(fleet_pre).rstrip(b"\n"),
+        )
+        with self.assertRaisesRegex(
+            phase_normalizer.PhaseNormalizationError,
+            "complete canonical migration snapshot is invalid",
+        ):
+            phase_normalizer.normalize_directory(self.directory, REQUEST_ID)
+        self.assertEqual(
+            (self.directory / "fleet-pre.json").read_bytes(), baseline["fleet-pre"]
+        )
+
+    def test_phase_migration_rejects_multilink_phase(self) -> None:
+        self.make_phase_boundaries_legacy()
+        path = self.directory / "fleet-pre.json"
+        os.link(path, self.directory.parent / "fleet-pre-hardlink.json")
+        self.addCleanup((self.directory.parent / "fleet-pre-hardlink.json").unlink)
+        with self.assertRaisesRegex(
+            phase_normalizer.contract.ForcedFixtureRotationEvidenceError,
+            "unsafe evidence file",
+        ):
+            phase_normalizer.normalize_directory(self.directory, REQUEST_ID)
+
 
 class ForcedFixtureLeafRotationStaticTests(unittest.TestCase):
     def test_playbook_is_explicit_serial_resumable_and_synthetic_only(self) -> None:
@@ -713,6 +822,21 @@ class ForcedFixtureLeafRotationStaticTests(unittest.TestCase):
         self.assertIn("Refuse to overwrite divergent selected credential digest evidence", playbook)
         self.assertIn("force: false", playbook)
         self.assertIn("fixture_rotation_request_already_accepted", playbook)
+        self.assertIn("normalize_forced_fixture_leaf_rotation_phases.py", playbook)
+        self.assertIn("Canonicalize only exact legacy no-newline fleet phases", playbook)
+        self.assertGreaterEqual(playbook.count("~ '\\n' }}"), 4)
+        self.assertIn("Canonicalize a complete legacy request before any live work", playbook)
+        self.assertIn("Strictly compile a complete unfinished request before any live work", playbook)
+        self.assertLess(
+            playbook.index("Canonicalize a complete legacy request before any live work"),
+            playbook.index("Install the fixed forced-rotation state helper"),
+        )
+        post_calls_producer = playbook[
+            playbook.index("Preserve canonical post-call fleet continuity phase") :
+            playbook.index("Revalidate the selected CP1 request after calls")
+        ]
+        self.assertIn("~ '\\n' }}", post_calls_producer)
+        self.assertIn("force: false", post_calls_producer)
         active_leaf_probe = playbook[
             playbook.index("Read the actively served fixture leaves over mutual TLS") :
             playbook.index("Calculate actively served fixture leaf fingerprints")
@@ -766,6 +890,22 @@ class ForcedFixtureLeafRotationStaticTests(unittest.TestCase):
             "O_NOFOLLOW",
         ):
             self.assertIn(value, collector)
+
+    def test_phase_normalizer_is_narrow_locked_and_full_contract_validated(self) -> None:
+        normalizer = PHASE_NORMALIZER_SCRIPT.read_text(encoding="utf-8")
+        for value in (
+            "--request-id",
+            "LOCK_EX | fcntl.LOCK_NB",
+            "object_pairs_hook=_pairs",
+            "raw not in (canonical, canonical[:-1])",
+            "contract._validate_layout(root)",
+            "contract.compile_evidence(workspace)",
+            "current_raw != expected_raw",
+            "os.replace(temporary, path)",
+            "os.fsync",
+            "accepted evidence must never be migrated",
+        ):
+            self.assertIn(value, normalizer)
 
     def test_fixture_role_force_is_leaf_only_and_acknowledged(self) -> None:
         defaults = ROLE_DEFAULTS.read_text(encoding="utf-8")
