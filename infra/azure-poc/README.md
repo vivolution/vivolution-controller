@@ -34,7 +34,9 @@ post-compute template. Outbound access uses each VM's public IP.
   tagged, budgeted POC resource group and preserved existing CP1.
 - `lockdown_os_disks.py` is the fail-closed, idempotent post-create step that
   disables disk public network access and reconciles exact ownership tags on
-  the three marketplace-image OS disks before host configuration.
+  the three marketplace-image OS disks before host configuration. It resolves
+  the current disk IDs from the exact CP1/SBC1/SBC2 VM attachments, including
+  bounded names Azure derives when a VM is reimaged.
 - `teardown_core_poc.py` is the plan-first, digest-confirmed deletion gate for
   only the exact quiesced core POC resource group.
 - `modules/network.bicep` creates the single VNet and two subnets.
@@ -151,7 +153,8 @@ Linux `osProfile`, but its `storageProfile.osDisk.managedDisk` contract does not
 expose the disk resource's `publicNetworkAccess` or `networkAccessPolicy`
 properties. Immediately after the group deployment returns—and before copying
 secrets, restoring data, installing services, or running qualification—apply
-the exact idempotent disk control:
+the exact idempotent disk control. Run it again after any Azure VM reimage and
+before reinstalling that node:
 
 ```bash
 python3 lockdown_os_disks.py \
@@ -159,8 +162,21 @@ python3 lockdown_os_disks.py \
 ```
 
 The helper refuses the wrong subscription, resource group, region, missing or
-extra disks, wrong VM attachment, or a failed postcondition. It updates only
-`viv-sbc-poc-{cp1,sbc1,sbc2}-osdisk`, then requires
+extra disks, an unattached disk, a cross-owned attachment, an arbitrary renamed
+disk, an attachment change during the operation, or a failed postcondition. It
+first requires each exact `viv-sbc-poc-{cp1,sbc1,sbc2}` VM's logical
+`storageProfile.osDisk.name` to remain its original node-specific base. The
+VM must have completed provisioning. The actual managed-disk resource is then
+parsed from that VM's exact
+`storageProfile.osDisk.managedDisk.id`; its resource name must be the original
+`viv-sbc-poc-{cp1,sbc1,sbc2}-osdisk` identity or that exact base followed by one
+or more lowercase 32-hex Azure reimage suffixes. This distinction is required
+because Azure reimage keeps the logical name but replaces the attached resource
+with a suffixed disk ID. The complete resource-group disk inventory must contain
+exactly those three attached IDs; the attachment and inventory checks are
+repeated after mutation. Only those resolved IDs are updated and tagged. Every
+disk is checked immediately after its update and read again in the final stable
+snapshot. The helper then requires
 `publicNetworkAccess=Disabled`, `networkAccessPolicy=DenyAll`, and
 `provisioningState=Succeeded` plus the exact common/node ownership tags on all
 three. Do not treat the infrastructure as qualified between VM creation and
