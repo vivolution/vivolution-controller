@@ -706,6 +706,11 @@ class ForcedFixtureLeafRotationStaticTests(unittest.TestCase):
         self.assertIn("synthetic_cdr_evidence.py", playbook)
         self.assertIn("forced_fixture_leaf_rotation_edge_snapshot.py", playbook)
         self.assertIn("credential-digests.json", playbook)
+        self.assertIn("fixture_rotation_credential_digests_json ~ '\\n'", playbook)
+        self.assertIn(
+            'content: "{{ fixture_rotation_credential_digests_json }}\\n"', playbook
+        )
+        self.assertIn("Refuse to overwrite divergent selected credential digest evidence", playbook)
         self.assertIn("force: false", playbook)
         self.assertIn("fixture_rotation_request_already_accepted", playbook)
         active_leaf_probe = playbook[
@@ -719,6 +724,11 @@ class ForcedFixtureLeafRotationStaticTests(unittest.TestCase):
         self.assertIn("stdin_add_newline: true", active_leaf_probe)
         self.assertIn("Require exact OpenSSL SHA-256 fingerprint output", playbook)
         self.assertIn("(?i)^sha256 fingerprint=", playbook)
+        fingerprint_assertion = playbook[
+            playbook.index("Require exact OpenSSL SHA-256 fingerprint output") :
+            playbook.index("Initialize the active fixture server fingerprint map")
+        ]
+        self.assertIn("no_log: true", fingerprint_assertion)
         self.assertLess(
             playbook.index("Revalidate an existing exact-request acceptance before any mutation"),
             playbook.index("Prepare or reconcile the durable forced-rotation request"),

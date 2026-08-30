@@ -318,6 +318,7 @@
       loop: "{{ fixture_rotation_active_server_fingerprint_results.results }}"
       loop_control:
         label: "{{ item.item.item.name }}"
+      no_log: true
 
     - name: Initialize the active fixture server fingerprint map
       ansible.builtin.set_fact:
@@ -427,9 +428,9 @@
       loop: "{{ fixture_rotation_export_stats.results }}"
       no_log: true
 
-    - name: Preserve exact non-secret selected credential digests
-      ansible.builtin.copy:
-        content: >-
+    - name: Define exact canonical non-secret selected credential digests
+      ansible.builtin.set_fact:
+        fixture_rotation_credential_digests_json: >-
           {{ {
              'fixtureCaCrt': 'sha256:' ~ fixture_rotation_export_checksums['fixture-ca.crt'],
              'sbc1': {
@@ -441,11 +442,49 @@
                'fixtureClientKey': 'sha256:' ~ fixture_rotation_export_checksums['sbc2.key']
              }
           } | to_json(sort_keys=True, separators=(',', ':')) }}
-        dest: "{{ fixture_rotation_local_root }}/credential-digests.json"
-        mode: '0600'
-        force: false
+      no_log: true
+
+    - name: Inspect a resumable selected credential digest file
+      ansible.builtin.stat:
+        path: "{{ fixture_rotation_local_root }}/credential-digests.json"
+        follow: false
       delegate_to: localhost
       become: false
+      register: fixture_rotation_credential_digests_stat
+
+    - name: Read an existing resumable selected credential digest file
+      ansible.builtin.slurp:
+        src: "{{ fixture_rotation_local_root }}/credential-digests.json"
+      delegate_to: localhost
+      become: false
+      register: fixture_rotation_credential_digests_existing
+      no_log: true
+      when: fixture_rotation_credential_digests_stat.stat.exists | default(false) | bool
+
+    - name: Refuse to overwrite divergent selected credential digest evidence
+      ansible.builtin.assert:
+        that:
+          - not (fixture_rotation_credential_digests_stat.stat.islnk | default(false))
+          - fixture_rotation_credential_digests_stat.stat.isreg | default(false)
+          - fixture_rotation_credential_digests_stat.stat.nlink | int == 1
+          - fixture_rotation_credential_digests_stat.stat.mode == '0600'
+          - >-
+            (fixture_rotation_credential_digests_existing.content | b64decode) in
+            [fixture_rotation_credential_digests_json,
+             fixture_rotation_credential_digests_json ~ '\n']
+        fail_msg: Existing selected credential digest evidence is divergent or unsafe.
+      no_log: true
+      when: fixture_rotation_credential_digests_stat.stat.exists | default(false) | bool
+
+    - name: Preserve exact canonical non-secret selected credential digests
+      ansible.builtin.copy:
+        content: "{{ fixture_rotation_credential_digests_json }}\n"
+        dest: "{{ fixture_rotation_local_root }}/credential-digests.json"
+        mode: '0600'
+        force: true
+      delegate_to: localhost
+      become: false
+      no_log: true
 
     - name: Install the fixed transient Edge snapshot collector on both nodes
       ansible.builtin.copy:
