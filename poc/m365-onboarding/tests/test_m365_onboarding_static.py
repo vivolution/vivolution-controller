@@ -13,15 +13,16 @@ class Microsoft365OnboardingStaticTests(unittest.TestCase):
     def test_contract_is_locked_to_expected_tenant_fqdns_and_uae_route(self):
         for value in (
             "151cd01a-1e81-40a9-b898-d8646e1a8760",
-            "voice.vivolution.ae",
-            "sbc1.voice.vivolution.ae",
-            "sbc2.voice.vivolution.ae",
+            "vivolution.ae",
+            "sbc1.vivolution.ae",
+            "sbc2.vivolution.ae",
             "SipSignalingPort = 5061",
             "^\\+971[1-9][0-9]{7,8}$",
         ):
             self.assertIn(value, MODULE + CONFIG)
         self.assertIn("Exactly two test users must be supplied", MODULE)
-        self.assertIn("must be in the verified voice.vivolution.ae domain", MODULE)
+        self.assertIn("must be in the verified vivolution.ae domain", MODULE)
+        self.assertNotIn("@voice\\.vivolution\\.ae", MODULE)
 
     def test_preflight_checks_tenant_domain_and_user_readiness(self):
         for value in (

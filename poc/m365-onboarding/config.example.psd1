@@ -1,11 +1,11 @@
 @{
     SchemaVersion    = 1
     ExpectedTenantId = '151cd01a-1e81-40a9-b898-d8646e1a8760'
-    VerifiedDomain   = 'voice.vivolution.ae'
+    VerifiedDomain   = 'vivolution.ae'
 
     Gateways = @(
-        'sbc1.voice.vivolution.ae'
-        'sbc2.voice.vivolution.ae'
+        'sbc1.vivolution.ae'
+        'sbc2.vivolution.ae'
     )
     SipSignalingPort = 5061
 
@@ -15,14 +15,14 @@
     NumberPattern     = '^\+971[1-9][0-9]{7,8}$'
 
     # Replace all four values. The scripts reject placeholders, duplicate
-    # identities/numbers, non-voice.vivolution.ae UPNs, and non-UAE numbers.
+    # identities/numbers, non-vivolution.ae UPNs, and non-UAE numbers.
     Users = @(
         @{
-            Upn             = 'REPLACE_USER1@voice.vivolution.ae'
+            Upn             = 'REPLACE_USER1@vivolution.ae'
             TelephoneNumber = '+971000000001'
         }
         @{
-            Upn             = 'REPLACE_USER2@voice.vivolution.ae'
+            Upn             = 'REPLACE_USER2@vivolution.ae'
             TelephoneNumber = '+971000000002'
         }
     )

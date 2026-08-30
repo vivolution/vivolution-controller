@@ -1,10 +1,10 @@
 Set-StrictMode -Version Latest
 
 $script:ExpectedTenantId = '151cd01a-1e81-40a9-b898-d8646e1a8760'
-$script:VerifiedDomain = 'voice.vivolution.ae'
+$script:VerifiedDomain = 'vivolution.ae'
 $script:Gateways = @(
-    'sbc1.voice.vivolution.ae'
-    'sbc2.voice.vivolution.ae'
+    'sbc1.vivolution.ae'
+    'sbc2.vivolution.ae'
 )
 $script:SipSignalingPort = 5061
 $script:PstnUsage = 'Vivolution-POC-UAE'
@@ -207,8 +207,8 @@ function Assert-VivolutionConfiguration {
         if ($upn -match '(?i)replace|example|<|>') {
             throw "User UPN '$upn' is still a placeholder."
         }
-        if ($upn -notmatch '^[a-z0-9.!#$%&''*+/=?^_`{|}~-]+@voice\.vivolution\.ae$') {
-            throw "User UPN '$upn' must be in the verified voice.vivolution.ae domain."
+        if ($upn -notmatch '^[a-z0-9.!#$%&''*+/=?^_`{|}~-]+@vivolution\.ae$') {
+            throw "User UPN '$upn' must be in the verified vivolution.ae domain."
         }
         if ($number -notmatch $script:NumberPattern) {
             throw "Telephone number '$number' is not an allowed +971 Direct Routing number."

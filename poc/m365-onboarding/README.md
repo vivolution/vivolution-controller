@@ -3,8 +3,8 @@
 This package is a reviewable, single-tenant Microsoft Teams Direct Routing POC
 configuration. It pairs these two gateways with the one expected Entra tenant:
 
-- `sbc1.voice.vivolution.ae:5061`
-- `sbc2.voice.vivolution.ae:5061`
+- `sbc1.vivolution.ae:5061`
+- `sbc2.vivolution.ae:5061`
 - tenant `151cd01a-1e81-40a9-b898-d8646e1a8760`
 
 The only outbound voice route matches `^\+971[1-9][0-9]{7,8}$`. It therefore
@@ -36,7 +36,7 @@ Azure subscription login.
 | Global PSTN usage member | `Vivolution-POC-UAE` |
 | Voice route | `Vivolution-POC-UAE-Plus971` |
 | Voice routing policy | `Vivolution-POC-UAE` |
-| Gateways, in failover order | `sbc1.voice.vivolution.ae`, `sbc2.voice.vivolution.ae` |
+| Gateways, in failover order | `sbc1.vivolution.ae`, `sbc2.vivolution.ae` |
 | User numbers | two distinct, explicitly supplied `+971` E.164 numbers |
 
 The scripts never replace the tenant's global PSTN usage list. They call
@@ -52,9 +52,11 @@ codes so an unavailable first node can advance to the second configured trunk.
 1. PowerShell 7.2 or later and MicrosoftTeams PowerShell 7.0 or later.
 2. An operator authorized to read the tenant and manage Direct Routing, voice
    routing, phone-number assignments, and per-user policy grants.
-3. The exact `voice.vivolution.ae` subdomain registered in the expected tenant.
-   A parent `vivolution.ae` registration alone is intentionally insufficient.
-4. Two enabled users in that subdomain with `Teams` and `PhoneSystem` feature
+3. The exact `vivolution.ae` domain registered in the expected tenant. The SBC
+   FQDNs deliberately use this domain so a licensed `@vivolution.ae` user can
+   satisfy Microsoft's domain-activation requirement without changing UPNs or
+   consuming a separate license only for a nested subdomain.
+4. Two enabled users in that domain with `Teams` and `PhoneSystem` feature
    types, `TeamsUpgradeEffectiveMode=TeamsOnly`, an `infra.lync.com` registrar,
    and no on-premises LineURI.
 5. Two distinct test Direct Routing numbers matching the fixed `+971` pattern.
