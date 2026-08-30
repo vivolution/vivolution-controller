@@ -16,9 +16,10 @@ the complete fixture manifest digest.
 
 The signed tenant fragment contains guarded accounting hooks. The privileged
 runtime renderer enables them only for `SYNTHETIC_PRIVATE`; the
-`DIRECT_ROUTING` renderer does not define the guard and does not load the
-OpenSIPS `xlog` module. A marker is emitted only when both fixed headers are
-present:
+`DIRECT_ROUTING` renderer does not define the guard, so the hooks are
+preprocessed out. OpenSIPS 3.6 provides `xlog` from its pinned core binary;
+there is no separate `xlog.so` module to load. A marker is emitted only when
+both fixed headers are present:
 
 - `X-Vivolution-Fixture: no-pstn`
 - `X-Vivolution-Test-ID: YYYYMMDDTHHMMSSZ-sbc1|sbc2-<pid>`

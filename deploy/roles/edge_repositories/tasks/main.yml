@@ -260,39 +260,61 @@
         edge_installed_package_metadata.stdout_lines
     fail_msg: An installed OpenSIPS, TLS, or RTPengine package does not match the exact AMD64 contract.
 
-- name: Inspect the package-pinned OpenSIPS xlog module
+- name: Inspect the package-pinned OpenSIPS core binary
   ansible.builtin.stat:
-    path: /usr/lib/x86_64-linux-gnu/opensips/modules/xlog.so
+    path: /usr/sbin/opensips
     follow: false
     get_checksum: true
     checksum_algorithm: sha256
-  register: edge_opensips_xlog_module
+  register: edge_opensips_core_binary
 
-- name: Resolve the package owning the OpenSIPS xlog module
+- name: Resolve the package owning the OpenSIPS core binary
   ansible.builtin.command:
     argv:
       - dpkg-query
       - --search
-      - /usr/lib/x86_64-linux-gnu/opensips/modules/xlog.so
-  register: edge_opensips_xlog_owner
+      - /usr/sbin/opensips
+  register: edge_opensips_core_owner
   changed_when: false
 
-- name: Require the synthetic CDR logger to come only from the pinned OpenSIPS DEB
+- name: Require the OpenSIPS core to match the independently pinned DEB
   ansible.builtin.assert:
     that:
-      - edge_opensips_xlog_module.stat.exists
-      - edge_opensips_xlog_module.stat.isreg | default(false)
-      - not (edge_opensips_xlog_module.stat.islnk | default(false))
-      - edge_opensips_xlog_module.stat.nlink | int == 1
-      - edge_opensips_xlog_module.stat.pw_name == 'root'
-      - edge_opensips_xlog_module.stat.gr_name == 'root'
-      - edge_opensips_xlog_module.stat.mode == '0644'
-      - edge_opensips_xlog_module.stat.size | int > 0
-      - edge_opensips_xlog_module.stat.checksum is match('^[0-9a-f]{64}$')
+      - edge_opensips_core_binary.stat.exists
+      - edge_opensips_core_binary.stat.isreg | default(false)
+      - not (edge_opensips_core_binary.stat.islnk | default(false))
+      - edge_opensips_core_binary.stat.nlink | int == 1
+      - edge_opensips_core_binary.stat.pw_name == 'root'
+      - edge_opensips_core_binary.stat.gr_name == 'root'
+      - edge_opensips_core_binary.stat.mode == '0755'
+      - edge_opensips_core_binary.stat.size | int > 0
+      - edge_opensips_core_binary.stat.checksum == edge_opensips_binary_sha256
       - >-
-        edge_opensips_xlog_owner.stdout | trim ==
-        'opensips: /usr/lib/x86_64-linux-gnu/opensips/modules/xlog.so'
-    fail_msg: The synthetic CDR xlog module is absent, linked, permissive, or not owned by the pinned OpenSIPS package.
+        edge_opensips_core_owner.stdout | trim ==
+        'opensips: /usr/sbin/opensips'
+    fail_msg: The OpenSIPS core binary is linked, permissive, altered, or not owned by the pinned OpenSIPS package.
+
+- name: Prove the pinned OpenSIPS core exposes the xlog parser facility
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/opensips
+      - -C
+      - -f
+      - /dev/stdin
+    stdin: |
+      log_level=3
+      xlog_level=3
+      stderror_enabled=no
+      syslog_enabled=no
+      udp_workers=1
+      socket=udp:127.0.0.1:5060
+      mpath="/usr/lib/x86_64-linux-gnu/opensips/modules/"
+      loadmodule "proto_udp.so"
+      route {
+          xlog("L_NOTICE", "VIVO_XLOG_CORE_PROBE\n");
+          exit;
+      }
+  changed_when: false
 
 - name: Inspect prohibited meta, kernel, and container packages
   ansible.builtin.command:

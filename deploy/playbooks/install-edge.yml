@@ -6,6 +6,9 @@
   vars:
     # These are qualification inputs, not floating package selections.
     edge_opensips_version_required: 3.6.8-1
+    # SHA-256 of /usr/sbin/opensips inside the independently pinned DEB.
+    # OpenSIPS 3.6 provides xlog from this core binary, not from xlog.so.
+    edge_opensips_binary_sha256: bdab0bf76361369a46a5e4763533a555a91a6ccc92a4b9a5a6e0c223792675d1
     edge_rtpengine_version_required: 26.0.1.22-1~bpo13+1
     edge_opensips_keyring_sha256: ff596e24d67187fce2d6634a727a97693000d6a1acb3dd1615e89b76b06ae26d
     edge_rtpengine_keyring_deb_sha256: 78fe26f0251138f4e3c749c88dc4df29666c8efe0823858d3a4ab49d2fa2e088

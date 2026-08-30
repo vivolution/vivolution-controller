@@ -140,6 +140,11 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
 
         self.assertIn("edge_opensips_version_required: 3.6.8-1", playbook)
         self.assertIn(
+            "edge_opensips_binary_sha256: "
+            "bdab0bf76361369a46a5e4763533a555a91a6ccc92a4b9a5a6e0c223792675d1",
+            playbook,
+        )
+        self.assertIn(
             "edge_rtpengine_version_required: 26.0.1.22-1~bpo13+1", playbook
         )
         for package in (
@@ -157,6 +162,9 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
         self.assertIn("edge_native_debs:", playbook)
         self.assertIn("checksum: \"sha256:{{ item.sha256 }}\"", repositories)
         self.assertIn("dpkg-deb", repositories)
+        self.assertIn("opensips: /usr/sbin/opensips", repositories)
+        self.assertIn("VIVO_XLOG_CORE_PROBE", repositories)
+        self.assertNotIn("xlog.so", repositories)
         self.assertNotIn("name:\n      - \"opensips=", repositories)
         for digest in (
             "29a2be1811bb70d9ab759fa1ec3e787207054558ed4c58646fdfa31923bc0f72",

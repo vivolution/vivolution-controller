@@ -297,8 +297,10 @@ class SyntheticCdrEvidenceTests(unittest.TestCase):
         self.assertIn("vivolution-edge-synthetic-cdr-export", runtime_tasks)
         self.assertIn("mode: '0500'", runtime_tasks)
         self.assertIn("vivolution-synthetic-cdr-evidence", fixture_tasks)
-        self.assertIn("xlog.so", repositories)
-        self.assertIn("opensips: /usr/lib/x86_64-linux-gnu/opensips/modules/xlog.so", repositories)
+        self.assertIn("/usr/sbin/opensips", repositories)
+        self.assertIn("opensips: /usr/sbin/opensips", repositories)
+        self.assertIn("VIVO_XLOG_CORE_PROBE", repositories)
+        self.assertNotIn("xlog.so", repositories)
 
     def test_operator_contract_does_not_expand_synthetic_cdr_claims(self) -> None:
         contract = (ROOT / "poc/synthetic-cdr-evidence.md").read_text()
