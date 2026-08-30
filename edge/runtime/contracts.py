@@ -47,6 +47,12 @@ SYNTHETIC_CDR_TEST_ID_REGEX = (
 MICROSOFT_TLS12_CIPHER_LIST = (
     "ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256"
 )
+# In TLS 1.2 the ECDSA token selects the remote server's authentication key;
+# the Edge's independently required mutual-TLS client certificate may also be
+# EC without broadening this exact fixture-server allowlist.
+SYNTHETIC_FIXTURE_TLS12_CIPHER_LIST = (
+    "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256"
+)
 MICROSOFT_MEDIA_PROCESSOR_REMOTE_PORT_SET = "{ 3478-3481, 49152-53247 }"
 AZURE_IMDS_IPV4 = "169.254.169.254"
 CONTROL_PLANE_IPV4_CIDRS = ("10.20.1.4/32",)
@@ -1491,10 +1497,16 @@ def _tls_domain(
     certificate: Path,
     private_key: Path,
     ca_bundle: Path,
+    cipher_list: str,
 ) -> str:
     for path in (certificate, private_key, ca_bundle):
         if _SAFE_PATH_RE.fullmatch(str(path)) is None:
             _fail("fixed TLS path contains unsafe characters")
+    if cipher_list not in {
+        MICROSOFT_TLS12_CIPHER_LIST,
+        SYNTHETIC_FIXTURE_TLS12_CIPHER_LIST,
+    }:
+        _fail("fixed TLS domain selected an unreviewed cipher list")
     return f"""modparam("tls_mgm", "{kind}_domain", "{name}")
 modparam("tls_mgm", "match_ip_address", "[{name}]{match_address}")
 modparam("tls_mgm", "match_sip_domain", "[{name}]{match_domain}")
@@ -1502,7 +1514,7 @@ modparam("tls_mgm", "certificate", "[{name}]{certificate}")
 modparam("tls_mgm", "private_key", "[{name}]{private_key}")
 modparam("tls_mgm", "ca_list", "[{name}]{ca_bundle}")
 modparam("tls_mgm", "tls_method", "[{name}]TLSv1_2")
-modparam("tls_mgm", "ciphers_list", "[{name}]{MICROSOFT_TLS12_CIPHER_LIST}")
+modparam("tls_mgm", "ciphers_list", "[{name}]{cipher_list}")
 modparam("tls_mgm", "verify_cert", "[{name}]1")
 modparam("tls_mgm", "require_cert", "[{name}]1")
 """
@@ -1678,6 +1690,7 @@ def render_opensips(
         secrets.edge_certificate_chain_pem,
         secrets.edge_private_key_pem,
         peer_ca,
+        MICROSOFT_TLS12_CIPHER_LIST,
     )
     pbx_server = _tls_domain(
         "server",
@@ -1687,6 +1700,7 @@ def render_opensips(
         secrets.edge_certificate_chain_pem,
         secrets.edge_private_key_pem,
         secrets.fixture_ca_crt if authority.profile == "SYNTHETIC_PRIVATE" else secrets.pbx_ca_bundle_pem,
+        MICROSOFT_TLS12_CIPHER_LIST,
     )
     if authority.profile == "SYNTHETIC_PRIVATE":
         teams_clients = _tls_domain(
@@ -1697,6 +1711,7 @@ def render_opensips(
             secrets.fixture_client_crt,
             secrets.fixture_client_key,
             secrets.fixture_ca_crt,
+            SYNTHETIC_FIXTURE_TLS12_CIPHER_LIST,
         )
     else:
         teams_clients = "\n".join(
@@ -1708,6 +1723,7 @@ def render_opensips(
                 secrets.edge_certificate_chain_pem,
                 secrets.edge_private_key_pem,
                 secrets.microsoft_ca_bundle_pem,
+                MICROSOFT_TLS12_CIPHER_LIST,
             )
             for index, hub in enumerate(TEAMS_HUBS, 1)
         )
@@ -1719,6 +1735,9 @@ def render_opensips(
         secrets.fixture_client_crt if authority.profile == "SYNTHETIC_PRIVATE" else secrets.edge_certificate_chain_pem,
         secrets.fixture_client_key if authority.profile == "SYNTHETIC_PRIVATE" else secrets.edge_private_key_pem,
         secrets.fixture_ca_crt if authority.profile == "SYNTHETIC_PRIVATE" else secrets.pbx_ca_bundle_pem,
+        SYNTHETIC_FIXTURE_TLS12_CIPHER_LIST
+        if authority.profile == "SYNTHETIC_PRIVATE"
+        else MICROSOFT_TLS12_CIPHER_LIST,
     )
     microsoft_sources = (
         facts.authorized_pbx_source_ipv4_cidrs

@@ -356,6 +356,7 @@ def secret_material() -> dict[str, bytes]:
         dns="sbc1-fixture.invalid",
         ip="10.20.2.4",
         eku=ExtendedKeyUsageOID.CLIENT_AUTH,
+        rsa_key=False,
     )
     public_pem = public_ca.public_bytes(serialization.Encoding.PEM)
     fixture_pem = fixture_ca.public_bytes(serialization.Encoding.PEM)
@@ -730,7 +731,22 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("[pbx-inbound]" + str(self.harness.layout.secrets.fixture_client_crt), config)
         self.assertIn("[teams-fixture-outbound]" + str(self.harness.layout.secrets.fixture_client_crt), config)
         self.assertIn("[pbx-outbound]" + str(self.harness.layout.secrets.fixture_client_crt), config)
-        self.assertEqual(config.count(contracts.MICROSOFT_TLS12_CIPHER_LIST), 4)
+        self.assertEqual(config.count(contracts.MICROSOFT_TLS12_CIPHER_LIST), 2)
+        self.assertEqual(
+            config.count(contracts.SYNTHETIC_FIXTURE_TLS12_CIPHER_LIST), 2
+        )
+        for domain in ("teams-inbound", "pbx-inbound"):
+            self.assertIn(
+                'modparam("tls_mgm", "ciphers_list", '
+                f'"[{domain}]{contracts.MICROSOFT_TLS12_CIPHER_LIST}")',
+                config,
+            )
+        for domain in ("teams-fixture-outbound", "pbx-outbound"):
+            self.assertIn(
+                'modparam("tls_mgm", "ciphers_list", '
+                f'"[{domain}]{contracts.SYNTHETIC_FIXTURE_TLS12_CIPHER_LIST}")',
+                config,
+            )
         evidence_files = list(self.harness.layout.evidence_dir.iterdir())
         self.assertEqual(len(evidence_files), 1)
         evidence_stat = evidence_files[0].stat()
@@ -1684,7 +1700,20 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("TEAMS_FAILOVER", config)
         self.assertNotIn("[teams-inbound]" + str(self.harness.layout.secrets.fixture_client_crt), config)
         self.assertEqual(config.count(contracts.MICROSOFT_TLS12_CIPHER_LIST), 6)
-        self.assertNotIn("ECDHE-ECDSA", config)
+        self.assertNotIn(contracts.SYNTHETIC_FIXTURE_TLS12_CIPHER_LIST, config)
+        for domain in (
+            "teams-inbound",
+            "pbx-inbound",
+            "teams-outbound-1",
+            "teams-outbound-2",
+            "teams-outbound-3",
+            "pbx-outbound",
+        ):
+            self.assertIn(
+                'modparam("tls_mgm", "ciphers_list", '
+                f'"[{domain}]{contracts.MICROSOFT_TLS12_CIPHER_LIST}")',
+                config,
+            )
         nft = contracts.render_nftables(facts, authority, route).decode("ascii")
         self.assertIn(
             "udp sport { 3478-3481, 49152-53247 } udp dport 20000-20255 accept",
@@ -1753,6 +1782,23 @@ class RuntimeTests(unittest.TestCase):
             "interface = 10.20.2.4!20.74.155.72\n",
             self.harness.layout.live_rtpengine.read_text(encoding="ascii"),
         )
+
+    def test_tls_domain_rejects_unreviewed_or_default_cipher_lists(self) -> None:
+        for cipher_list in ("", "DEFAULT", "HIGH", "ALL"):
+            with self.subTest(cipher_list=cipher_list):
+                with self.assertRaisesRegex(
+                    RuntimeContractError, "unreviewed cipher list"
+                ):
+                    contracts._tls_domain(
+                        "client",
+                        "test-outbound",
+                        "*",
+                        "fixture.invalid",
+                        Path("/fixed/client.crt"),
+                        Path("/fixed/client.key"),
+                        Path("/fixed/ca.crt"),
+                        cipher_list,
+                    )
 
     def test_direct_routing_authority_rejects_synthetic_secret_digests(self) -> None:
         authority_record = json.loads(self.harness.layout.runtime_authority.read_bytes())

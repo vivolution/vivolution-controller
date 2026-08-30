@@ -203,11 +203,18 @@ playbook records `DIRECT_ROUTING_REPLACEMENT_STAGED_NO_CUTOVER` evidence and
 refuses a reused synthetic authority, a same-host predecessor, missing exact
 acknowledgements, or an unpreserved predecessor contract.
 
-Every rendered TLS domain is fixed to TLS 1.2 and only the documented RSA
-forward-secret AEAD suites
+Every rendered TLS domain is fixed to TLS 1.2 and an exact profile-selected
+forward-secret AEAD list. Both public server domains and every Direct Routing
+client domain use only
 `ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256`. The public listener
 certificate therefore remains RSA even though ECDHE provides ephemeral key
-agreement. Microsoft media arrives from the reviewed CIDRs with remote source
+agreement. Only the two synthetic outbound client domains use
+`ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256`, because the CP1
+fixture servers present P-256 ECDSA leaves. In TLS 1.2 that ECDSA suite suffix
+selects the server-authentication key type; it does not weaken the independent
+mutual-authentication requirement for the Edge fixture client certificate.
+No domain receives a combined, broad, or default cipher list. Microsoft media
+arrives from the reviewed CIDRs with remote source
 ports `3478-3481` or `49152-53247` and is accepted only into the tenant-local
 RTPengine allocation (`20000-20255` here). Those Microsoft ranges are never
 used as RTPengine bind ports. Both Azure and the runtime-owned host table use
