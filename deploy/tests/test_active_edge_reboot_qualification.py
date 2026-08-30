@@ -742,6 +742,11 @@ class ActiveEdgeRebootPlaybookStaticTests(unittest.TestCase):
         self.assertIn("order: sorted", self.source)
         self.assertIn("serial: 1", self.source)
         self.assertIn("ansible_play_hosts_all == ['sbc1', 'sbc2']", self.source)
+        self.assertIn("edge_active_reboot_evidence_root_path", self.source)
+        self.assertNotIn(
+            "hostvars['localhost'].edge_active_reboot_evidence_root }}",
+            self.source,
+        )
 
     def test_observes_bounded_ssh_loss_reconnect_and_boot_id_change(self) -> None:
         self.assertIn("state: stopped", self.source)
