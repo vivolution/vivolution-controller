@@ -378,8 +378,11 @@ require_asterisk_cdr_contract() {
             backend_count=$((backend_count + 1))
         done <<<"$parsed_backends"
     fi
+    # Asterisk stores a CDR backend name in char name[20], including its NUL.
+    # The upstream cdr_custom identity is therefore exposed canonically by the
+    # runtime CLI as this exact 19-character prefix.
     if (( backend_count != 1 )) ||
-       [[ ${backends[0]:-} != 'CDR File custom backend' ]]; then
+       [[ ${backends[0]:-} != 'CDR File custom bac' ]]; then
         asterisk_contract_error 'registered CDR backend is not exactly the custom file backend'
     fi
 }
@@ -387,8 +390,7 @@ require_asterisk_cdr_contract() {
 require_exact_pjsip_transport_table() {
     local output=$1
     local expected_ip=$2
-    local server_port=$3
-    local client_port=$4
+    local expected_port=$3
     local parsed_transports
     local actual_sorted
     local expected_sorted
@@ -396,17 +398,15 @@ require_exact_pjsip_transport_table() {
     local transport_count=0
     local -a transports=()
     local -a expected_transports=(
-        "fixture-mtls-server|tls|$expected_ip:$server_port"
-        "fixture-public-client|tls|$expected_ip:$client_port"
+        "fixture-mutual-tls|tls|$expected_ip:$expected_port"
     )
 
     if [[ -z $output || $output == *$'\r'* ||
           ! $expected_ip =~ ^[0-9]+([.][0-9]+){3}$ ||
-          ! $server_port =~ ^[1-9][0-9]{0,4}$ ||
-          ! $client_port =~ ^[1-9][0-9]{0,4}$ ]]; then
+          ! $expected_port =~ ^[1-9][0-9]{0,4}$ ]]; then
         asterisk_contract_error 'PJSIP transport table inputs are malformed'
     fi
-    if (( 10#$server_port > 65535 || 10#$client_port > 65535 )); then
+    if (( 10#$expected_port > 65535 )); then
         asterisk_contract_error 'PJSIP transport port is out of range'
     fi
 
@@ -441,8 +441,8 @@ require_exact_pjsip_transport_table() {
             transport_count=$((transport_count + 1))
         done <<<"$parsed_transports"
     fi
-    if (( transport_count != 2 )); then
-        asterisk_contract_error 'PJSIP transport table does not contain exactly two objects'
+    if (( transport_count != 1 )); then
+        asterisk_contract_error 'PJSIP transport table does not contain exactly one object'
     fi
 
     actual_sorted=$(printf '%s\n' "${transports[@]}" | LC_ALL=C sort)
@@ -573,10 +573,9 @@ for unit in "${units[@]}"; do
 
     case "$unit" in
         vivolution-voice-fixture-asterisk.service)
-            expected_socket_bind_count=3
+            expected_socket_bind_count=2
             expected_socket_binds=(
                 'ipv4:tcp:{{ voice_fixture_asterisk_tls_port }}'
-                'ipv4:tcp:{{ voice_fixture_asterisk_uac_tls_port }}'
                 'ipv4:udp:{{ voice_fixture_asterisk_rtp_start }}-{{ voice_fixture_asterisk_rtp_end }}'
             )
             ;;
@@ -644,53 +643,33 @@ asterisk_transport_status=$(asterisk_cli 'pjsip show transports')
 require_exact_pjsip_transport_table \
     "$asterisk_transport_status" \
     "$controller_ip" \
-    '{{ voice_fixture_asterisk_tls_port }}' \
-    '{{ voice_fixture_asterisk_uac_tls_port }}'
+    '{{ voice_fixture_asterisk_tls_port }}'
 
-asterisk_server_transport=$(
-    asterisk_cli 'pjsip show transport fixture-mtls-server'
+asterisk_mutual_transport=$(
+    asterisk_cli 'pjsip show transport fixture-mutual-tls'
 )
 require_exact_pjsip_transport_detail \
-    "$asterisk_server_transport" \
-    fixture-mtls-server \
+    "$asterisk_mutual_transport" \
+    fixture-mutual-tls \
     "$controller_ip:{{ voice_fixture_asterisk_tls_port }}" \
     protocol tls \
     bind "$controller_ip:{{ voice_fixture_asterisk_tls_port }}" \
     method tlsv1_2 \
     cert_file /run/fixture-pki/asterisk.crt \
     priv_key_file /run/fixture-pki/asterisk.key \
-    ca_list_file /run/fixture-pki/ca.crt \
+    ca_list_file /run/fixture-pki/combined-ca.crt \
     local_net 10.20.0.0/255.255.0.0 \
     verify_client Yes \
     require_client_cert Yes \
-    verify_server No \
-    allow_reload false
-
-asterisk_client_transport=$(
-    asterisk_cli 'pjsip show transport fixture-public-client'
-)
-require_exact_pjsip_transport_detail \
-    "$asterisk_client_transport" \
-    fixture-public-client \
-    "$controller_ip:{{ voice_fixture_asterisk_uac_tls_port }}" \
-    protocol tls \
-    bind "$controller_ip:{{ voice_fixture_asterisk_uac_tls_port }}" \
-    method tlsv1_2 \
-    cert_file /run/fixture-pki/asterisk.crt \
-    priv_key_file /run/fixture-pki/asterisk.key \
-    ca_list_file /run/fixture-pki/public-ca.crt \
-    local_net 10.20.0.0/255.255.0.0 \
-    verify_client No \
-    require_client_cert No \
     verify_server Yes \
     allow_reload false
 
 mapfile -t tcp_listeners < <(ss -H -lnt4 | awk '{print $4}')
-for endpoint in "$controller_ip:{{ voice_fixture_asterisk_tls_port }}" "$controller_ip:{{ voice_fixture_asterisk_uac_tls_port }}" "$controller_ip:{{ voice_fixture_sipp_uas_tls_port }}"; do
+for endpoint in "$controller_ip:{{ voice_fixture_asterisk_tls_port }}" "$controller_ip:{{ voice_fixture_sipp_uas_tls_port }}"; do
     printf '%s\n' "${tcp_listeners[@]}" | grep -Fxq "$endpoint"
 done
 if printf '%s\n' "${tcp_listeners[@]}" \
-    | grep -Eq '^(0\.0\.0\.0|\*):({{ voice_fixture_asterisk_tls_port }}|{{ voice_fixture_asterisk_uac_tls_port }}|{{ voice_fixture_sipp_uas_tls_port }})$'; then
+    | grep -Eq '^(0\.0\.0\.0|\*):({{ voice_fixture_asterisk_tls_port }}|{{ voice_fixture_sipp_uas_tls_port }})$'; then
     printf 'a fixture TLS listener is public/wildcard-bound\n' >&2
     exit 4
 fi
@@ -710,6 +689,21 @@ for certificate in ca asterisk sipp sbc1 sbc2; do
 done
 test -s "$pki_root/public-ca.crt"
 grep -Fq -- '-----BEGIN CERTIFICATE-----' "$pki_root/public-ca.crt"
+test -s "$pki_root/combined-ca.crt"
+grep -Fq -- '-----BEGIN CERTIFICATE-----' "$pki_root/combined-ca.crt"
+expected_combined_ca_sha256=$(
+    /bin/cat /etc/ssl/certs/ca-certificates.crt "$pki_root/ca.crt" \
+        | /usr/bin/sha256sum | /usr/bin/awk '{print $1}'
+)
+actual_combined_ca_sha256=$(
+    /usr/bin/sha256sum "$pki_root/combined-ca.crt" \
+        | /usr/bin/awk '{print $1}'
+)
+if [[ ! $expected_combined_ca_sha256 =~ ^[0-9a-f]{64}$ ||
+      $actual_combined_ca_sha256 != "$expected_combined_ca_sha256" ]]; then
+    printf 'fixture combined TLS trust bundle does not match its exact inputs\n' >&2
+    exit 6
+fi
 
 asterisk_tls_check=$(timeout 8 openssl s_client \
     -connect "$controller_ip:{{ voice_fixture_asterisk_tls_port }}" \

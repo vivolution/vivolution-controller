@@ -204,7 +204,7 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         config = self.read("roles/voice_fixture/templates/asterisk.conf.j2")
         tasks = self.read("roles/voice_fixture/tasks/main.yml")
         image_tag = (
-            "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind1"
+            "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind2"
         )
         self.assertIn(image_tag, defaults)
         self.assertIn(image_tag, teardown_defaults)
@@ -225,14 +225,20 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertIn("--security-opt=no-new-privileges", tasks)
         self.assertIn("      - '10001:10001'", tasks)
 
-    def test_public_edge_server_and_private_client_trust_are_separated(self) -> None:
+    def test_single_supported_transport_uses_exact_combined_trust(self) -> None:
         pjsip = self.read("roles/voice_fixture/templates/pjsip.conf.j2")
         leaf_profile = self.read("roles/voice_fixture/templates/leaf-extensions.cnf.j2")
         tasks = self.read("roles/voice_fixture/tasks/main.yml")
-        self.assertIn("[fixture-mtls-server]", pjsip)
-        self.assertIn("ca_list_file=/run/fixture-pki/ca.crt", pjsip)
-        self.assertIn("[fixture-public-client]", pjsip)
-        self.assertIn("ca_list_file=/run/fixture-pki/public-ca.crt", pjsip)
+        self.assertIn("[fixture-mutual-tls]", pjsip)
+        self.assertEqual(pjsip.count("type=transport\n"), 1)
+        self.assertEqual(pjsip.count("transport=fixture-mutual-tls\n"), 3)
+        self.assertIn("ca_list_file=/run/fixture-pki/combined-ca.crt", pjsip)
+        self.assertIn("verify_client=yes", pjsip)
+        self.assertIn("require_client_cert=yes", pjsip)
+        self.assertIn("verify_server=yes", pjsip)
+        self.assertIn("Stage the exact combined public and fixture TLS trust bundle", tasks)
+        self.assertIn("voice_fixture_generation_combined_ca.stat.checksum", tasks)
+        self.assertIn("combined-ca.crt", tasks)
         self.assertIn("contact=sips:{{ voice_fixture_sbc1_server_name }}", pjsip)
         self.assertIn("contact=sips:{{ voice_fixture_sbc2_server_name }}", pjsip)
         self.assertIn("extendedKeyUsage={{ item.extended_key_usage }}", leaf_profile)
@@ -415,20 +421,18 @@ read_systemd_property fixture.service RestrictAddressFamilies
 
         current_socket_list = (
             "ipv4:udp21000-21127\n"
-            "ipv4:tcp16062\n"
             "ipv4:tcp16061"
         )
         legacy_socket_list = (
-            "ipv4:udp21000-21127 ipv4:tcp16062 ipv4:tcp16061"
+            "ipv4:udp21000-21127 ipv4:tcp16061"
         )
         list_reader_call = """
 rendered=$1
 systemctl() { printf '%s\n' "$rendered"; }
-read_systemd_socket_bind_list fixture.service SocketBindAllow 3
+read_systemd_socket_bind_list fixture.service SocketBindAllow 2
 """
         expected_socket_list = (
             "ipv4:udp:21000-21127\n"
-            "ipv4:tcp:16062\n"
             "ipv4:tcp:16061"
         )
         for rendered_list in (current_socket_list, legacy_socket_list):
@@ -442,10 +446,10 @@ read_systemd_socket_bind_list fixture.service SocketBindAllow 3
         exact_socket_list_call = """
 rendered=$1
 systemctl() { printf '%s\n' "$rendered"; }
-normalized=$(read_systemd_socket_bind_list fixture.service SocketBindAllow 3)
+normalized=$(read_systemd_socket_bind_list fixture.service SocketBindAllow 2)
 normalized_words=${normalized//$'\n'/ }
 require_exact_word_set 'fixture SocketBindAllow' "$normalized_words" \
-    ipv4:udp:21000-21127 ipv4:tcp:16062 ipv4:tcp:16061
+    ipv4:udp:21000-21127 ipv4:tcp:16061
 """
         for rendered_list in (current_socket_list, legacy_socket_list):
             exact_result = self.run_systemd_policy_helper(
@@ -456,24 +460,22 @@ require_exact_word_set 'fixture SocketBindAllow' "$normalized_words" \
         rejected_lists = {
             "duplicate": (
                 "ipv4:udp21000-21127\n"
-                "ipv4:tcp16061\n"
-                "ipv4:tcp16061"
+                "ipv4:udp21000-21127"
             ),
             "extra": (
                 f"{current_socket_list}\nipv4:tcp16063"
             ),
-            "missing": "ipv4:udp21000-21127\nipv4:tcp16061",
+            "missing": "ipv4:tcp16061",
             "blank-internal": (
-                "ipv4:udp21000-21127\n\nipv4:tcp16062\nipv4:tcp16061"
+                "ipv4:udp21000-21127\n\nipv4:tcp16061"
             ),
             "blank-trailing": f"{current_socket_list}\n",
             "malformed": (
                 "ipv4:udp21000-21127\n"
-                "ipv4:sctp16062\n"
-                "ipv4:tcp16061"
+                "ipv4:sctp16061"
             ),
             "ambiguous-spaces": (
-                "ipv4:udp21000-21127  ipv4:tcp16062 ipv4:tcp16061"
+                "ipv4:udp21000-21127  ipv4:tcp16061"
             ),
         }
         for reason, rendered_list in rejected_lists.items():

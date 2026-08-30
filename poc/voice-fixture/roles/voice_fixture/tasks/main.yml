@@ -34,7 +34,6 @@
       - voice_fixture_edge_rtp_start | int == 20000
       - voice_fixture_edge_rtp_end | int == 20255
       - voice_fixture_asterisk_tls_port | int == 16061
-      - voice_fixture_asterisk_uac_tls_port | int == 16062
       - voice_fixture_asterisk_rtp_start | int == 21000
       - voice_fixture_asterisk_rtp_end | int == 21127
       - voice_fixture_sipp_uas_tls_port | int == 25061
@@ -46,9 +45,8 @@
       - voice_fixture_sipp_uac_rtp_port | int == 22032
       - voice_fixture_runtime_root == '/run/vivolution-voice-fixture'
       - voice_fixture_asterisk_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061]
-      - voice_fixture_asterisk_uac_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061, 16061]
-      - voice_fixture_sipp_uas_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061, 16061, 16062]
-      - voice_fixture_sipp_probe_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061, 16061, 16062, 25061, 25062]
+      - voice_fixture_sipp_uas_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061, 16061]
+      - voice_fixture_sipp_probe_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061, 16061, 25061, 25062]
       - voice_fixture_asterisk_rtp_end | int < voice_fixture_sipp_rtp_start | int
     fail_msg: A fixture address/port drifted from the reviewed isolated allocation.
 
@@ -408,6 +406,12 @@
     checksum_algorithm: sha256
   register: voice_fixture_system_public_ca
 
+- name: Read the Debian public trust input for exact combination
+  ansible.builtin.slurp:
+    src: /etc/ssl/certs/ca-certificates.crt
+  register: voice_fixture_system_public_ca_content
+  no_log: true
+
 - name: Hash the generation-pinned public trust bundle
   ansible.builtin.stat:
     path: "{{ voice_fixture_pki_root }}/public-ca.crt"
@@ -415,6 +419,22 @@
     get_checksum: true
     checksum_algorithm: sha256
   register: voice_fixture_generation_public_ca
+  when: voice_fixture_current_pki_link.stat.exists | default(false)
+
+- name: Hash the generation-pinned combined TLS trust bundle
+  ansible.builtin.stat:
+    path: "{{ voice_fixture_pki_root }}/combined-ca.crt"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: voice_fixture_generation_combined_ca
+  when: voice_fixture_current_pki_link.stat.exists | default(false)
+
+- name: Read the current fixture CA for exact trust combination
+  ansible.builtin.slurp:
+    src: "{{ voice_fixture_pki_root }}/ca.crt"
+  register: voice_fixture_current_ca_content
+  no_log: true
   when: voice_fixture_current_pki_link.stat.exists | default(false)
 
 - name: Decide whether a complete fixture PKI generation is required
@@ -425,7 +445,11 @@
          ((voice_fixture_current_leaf_validity.results | default([]) |
            selectattr('rc', 'ne', 0) | list | length) > 0) or
          (voice_fixture_generation_public_ca.stat.checksum | default('') !=
-          voice_fixture_system_public_ca.stat.checksum) }}
+          voice_fixture_system_public_ca.stat.checksum) or
+         (voice_fixture_generation_combined_ca.stat.checksum | default('') !=
+          (((voice_fixture_system_public_ca_content.content | b64decode) ~
+            (voice_fixture_current_ca_content.content | default('') | b64decode)) |
+           hash('sha256'))) }}
     voice_fixture_ca_rotation_required: >-
       {{ not (voice_fixture_current_pki_link.stat.exists | default(false)) or
          (voice_fixture_current_ca_validity.rc | default(1) | int != 0) }}
@@ -644,6 +668,22 @@
         group: root
         mode: '0644'
 
+    - name: Read the staged fixture CA for exact trust combination
+      ansible.builtin.slurp:
+        src: "{{ voice_fixture_pki_staging_root }}/ca.crt"
+      register: voice_fixture_staged_ca_content
+      no_log: true
+
+    - name: Stage the exact combined public and fixture TLS trust bundle
+      ansible.builtin.copy:
+        content: >-
+          {{ (voice_fixture_system_public_ca_content.content | b64decode) ~
+             (voice_fixture_staged_ca_content.content | b64decode) }}
+        dest: "{{ voice_fixture_pki_staging_root }}/combined-ca.crt"
+        owner: root
+        group: root
+        mode: '0644'
+
     - name: Verify staged fixture leaves before selection
       ansible.builtin.command:
         argv:
@@ -686,6 +726,7 @@
         - sbc1.crt
         - sbc2.crt
         - public-ca.crt
+        - combined-ca.crt
       register: voice_fixture_staged_public_digests
 
     - name: Derive the immutable generation path from all public certificates
@@ -814,6 +855,13 @@
 - name: Protect the generation-pinned Debian public CA bundle
   ansible.builtin.file:
     path: "{{ voice_fixture_pki_root }}/public-ca.crt"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Protect the generation-pinned combined TLS trust bundle
+  ansible.builtin.file:
+    path: "{{ voice_fixture_pki_root }}/combined-ca.crt"
     owner: root
     group: root
     mode: '0644'

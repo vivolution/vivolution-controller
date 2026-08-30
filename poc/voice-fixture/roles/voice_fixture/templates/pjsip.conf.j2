@@ -3,37 +3,23 @@ type=global
 user_agent=Vivolution-No-PSTN-Fixture/0.1
 max_forwards=20
 
-[fixture-mtls-server]
+[fixture-mutual-tls]
 type=transport
 protocol=tls
 bind={{ voice_fixture_controller_ipv4 }}:{{ voice_fixture_asterisk_tls_port }}
 method=tlsv1_2
 cert_file=/run/fixture-pki/asterisk.crt
 priv_key_file=/run/fixture-pki/asterisk.key
-ca_list_file=/run/fixture-pki/ca.crt
+ca_list_file=/run/fixture-pki/combined-ca.crt
 verify_client=yes
 require_client_cert=yes
-verify_server=no
-allow_reload=no
-local_net=10.20.0.0/16
-
-[fixture-public-client]
-type=transport
-protocol=tls
-bind={{ voice_fixture_controller_ipv4 }}:{{ voice_fixture_asterisk_uac_tls_port }}
-method=tlsv1_2
-cert_file=/run/fixture-pki/asterisk.crt
-priv_key_file=/run/fixture-pki/asterisk.key
-ca_list_file=/run/fixture-pki/public-ca.crt
-verify_client=no
-require_client_cert=no
 verify_server=yes
 allow_reload=no
 local_net=10.20.0.0/16
 
 [edge-inbound]
 type=endpoint
-transport=fixture-mtls-server
+transport=fixture-mutual-tls
 context=from-edge
 disallow=all
 allow=ulaw
@@ -63,7 +49,7 @@ qualify_frequency=0
 
 [sbc1]
 type=endpoint
-transport=fixture-public-client
+transport=fixture-mutual-tls
 aors=sbc1-aor
 context=reject-all
 disallow=all
@@ -83,7 +69,7 @@ qualify_frequency=0
 
 [sbc2]
 type=endpoint
-transport=fixture-public-client
+transport=fixture-mutual-tls
 aors=sbc2-aor
 context=reject-all
 disallow=all

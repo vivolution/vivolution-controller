@@ -21,7 +21,7 @@ that unneeded socket, so no SIPp remote-control listener is created.
 
 | Purpose | CP1 fixture endpoint | Edge contract |
 | --- | --- | --- |
-| PBX signaling | Asterisk mTLS server `10.20.1.4:16061`; outbound source `16062` | Edge mTLS TCP `15061` |
+| PBX signaling | Asterisk mutual-TLS transport `10.20.1.4:16061` for both directions | Edge mTLS TCP `15061` |
 | PBX media | UDP `21000-21127` | Tenant RTP UDP `20000-20255` |
 | Teams signaling | SIPp TLS `10.20.1.4:25061`; transient UAC source `25062`; certificate probe source `25063` | Edge TLS TCP `5061` |
 | Teams media | UAS UDP `22000`; transient UAC UDP `22032`, reserved `22000-22063` | Tenant RTP UDP `20000-20255` |
@@ -42,7 +42,7 @@ CP1 NSG and host input policy, source `10.20.2.0/24` only:
 
 - TCP destination `16061` and `25061` to `10.20.1.4`.
 - UDP destination `21000-21127` and `22000-22063` to `10.20.1.4`.
-- Do not add input rules for outbound source ports `16062`, `25062`, or `25063`.
+- Do not add input rules for outbound-only SIPp source ports `25062` or `25063`.
 
 Each Edge NSG and host input policy, source `10.20.1.4/32` only:
 
@@ -218,18 +218,32 @@ CDR file uses Asterisk 22's native advanced DSV mapping with an exact ordered
 the fixture evidence backend deterministic. Before installing the Quadlet, the
 role refuses symlinks or non-directories in the host CDR path and creates the
 bind-mounted `asterisk-log/cdr-custom` directory for UID/GID `10001` with mode
-`0750`; readiness revalidates the complete path and registered backend.
+`0750`; readiness revalidates the complete path and registered backend. Asterisk
+stores backend names in a 20-byte field including the terminating NUL, so its
+runtime CLI canonically exposes the upstream `CDR File custom backend` identity
+as the exact 19-character prefix `CDR File custom bac`; readiness combines that
+identity with the exact running `cdr_custom.so` module and immutable config.
+
+Asterisk/PJSIP does not support two TCP or TLS transports of the same IP
+version in one process. The fixture therefore uses one supported IPv4 TLS
+transport for both directions instead of configuring a second object that can
+exist in the CLI while silently replacing the first listener. Its
+generation-pinned `combined-ca.crt` is the byte-exact concatenation of Debian's
+public trust bundle and the private fixture CA: outbound calls verify the Edge
+public certificate, while inbound calls still require a client certificate.
+The CP1 host policy admits the listener only from the fixed Edge subnet and
+PJSIP identifies only the two fixed Edge addresses.
 
 The pinned PJProject 2.17 source has one narrowly scoped build-time patch for
 TLS listener startup. Upstream `pjsip_tls_transport_lis_start()` overwrites a
 failed `pj_ssl_sock_start_accept2()` result while updating the advertised
 address, so Asterisk can retain a configured transport object even though no
 socket is listening. The patch preserves the accept/bind and socket-info error
-statuses. A failed `16061` or `16062` listener startup is therefore rejected by
+statuses. A failed `16061` listener startup is therefore rejected by
 Asterisk's transport configuration instead of appearing healthy. Asterisk
 logs `Transport '<id>' could not be started: <PJProject
 error>` and the exact transport/listener readiness contract blocks fixture
-acceptance. The composite `nosounds1-tlsbind1` image revision prevents reuse
+acceptance. The composite `nosounds1-tlsbind2` image revision prevents reuse
 of either older variant.
 
 ## Readiness and calls

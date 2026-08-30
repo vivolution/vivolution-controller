@@ -164,7 +164,7 @@ class AsteriskRuntimeContractStaticTests(unittest.TestCase):
             "third-party/pjproject/source/pjsip/src/pjsip/sip_transport_tls.c",
             containerfile,
         )
-        tag = "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind1"
+        tag = "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind2"
         self.assertIn(tag, defaults)
         self.assertIn(tag, teardown_defaults)
 
@@ -187,8 +187,7 @@ class AsteriskRuntimeContractStaticTests(unittest.TestCase):
             "asterisk_cli 'module show'",
             "asterisk_cli 'cdr show status'",
             "asterisk_cli 'pjsip show transports'",
-            "asterisk_cli 'pjsip show transport fixture-mtls-server'",
-            "asterisk_cli 'pjsip show transport fixture-public-client'",
+            "asterisk_cli 'pjsip show transport fixture-mutual-tls'",
         ):
             self.assertIn(command, readiness)
         self.assertIn("require_exact_asterisk_modules", readiness)
@@ -196,7 +195,7 @@ class AsteriskRuntimeContractStaticTests(unittest.TestCase):
         self.assertIn("require_exact_pjsip_transport_table", readiness)
         self.assertEqual(
             readiness.count("require_exact_pjsip_transport_detail \\"),
-            2,
+            1,
         )
 
     def test_readiness_renders_with_ansible_and_is_valid_bash(self) -> None:
@@ -300,7 +299,7 @@ require_exact_asterisk_modules "$output" "$@"
 
 * Registered Backends
   -------------------
-    CDR File custom backend
+    CDR File custom bac
 """
         call = 'require_asterisk_cdr_contract "$1"'
         result = self.run_asterisk_contract_helper(call, valid)
@@ -309,14 +308,14 @@ require_exact_asterisk_modules "$output" "$@"
         invalid_outputs = {
             "disabled": valid.replace("Logging:                    Enabled", "Logging:                    Disabled"),
             "batch-mode": valid.replace("Mode:                       Simple", "Mode:                       Batch"),
-            "missing": valid.replace("    CDR File custom backend\n", ""),
+            "missing": valid.replace("    CDR File custom bac\n", ""),
             "extra": valid.replace(
-                "    CDR File custom backend\n",
-                "    CDR File custom backend\n    CDR SQL backend\n",
+                "    CDR File custom bac\n",
+                "    CDR File custom bac\n    CDR SQL backend\n",
             ),
             "duplicate": valid.replace(
-                "    CDR File custom backend\n",
-                "    CDR File custom backend\n    CDR File custom backend\n",
+                "    CDR File custom bac\n",
+                "    CDR File custom bac\n    CDR File custom bac\n",
             ),
         }
         for reason, invalid in invalid_outputs.items():
@@ -327,47 +326,46 @@ require_exact_asterisk_modules "$output" "$@"
     def test_pjsip_transport_table_is_exact_tls_contract(self) -> None:
         valid = """Transport:  <TransportId........>  <Type>  <cos>  <tos>  <BindAddress....................>
 ==========================================================================================
-Transport:  fixture-mtls-server      tls      0      0  10.20.1.4:16061
-Transport:  fixture-public-client    tls      0      0  10.20.1.4:16062
+Transport:  fixture-mutual-tls      tls      0      0  10.20.1.4:16061
 
-Objects found: 2
+Objects found: 1
 """
-        call = 'require_exact_pjsip_transport_table "$1" "$2" "$3" "$4"'
+        call = 'require_exact_pjsip_transport_table "$1" "$2" "$3"'
         result = self.run_asterisk_contract_helper(
-            call, valid, "10.20.1.4", "16061", "16062"
+            call, valid, "10.20.1.4", "16061"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
         invalid_outputs = {
-            "wrong-protocol": valid.replace("fixture-mtls-server      tls", "fixture-mtls-server      udp"),
+            "wrong-protocol": valid.replace("fixture-mutual-tls      tls", "fixture-mutual-tls      udp"),
             "wrong-port": valid.replace("10.20.1.4:16061", "10.20.1.4:5061"),
             "missing": valid.replace(
-                "Transport:  fixture-public-client    tls      0      0  10.20.1.4:16062\n",
+                "Transport:  fixture-mutual-tls      tls      0      0  10.20.1.4:16061\n",
                 "",
-            ).replace("Objects found: 2", "Objects found: 1"),
+            ).replace("Objects found: 1", "Objects found: 0"),
             "extra": valid.replace(
-                "Objects found: 2",
-                "Transport:  fixture-extra            tls      0      0  10.20.1.4:16063\n\nObjects found: 3",
+                "Objects found: 1",
+                "Transport:  fixture-extra            tls      0      0  10.20.1.4:16063\n\nObjects found: 2",
             ),
-            "count-mismatch": valid.replace("Objects found: 2", "Objects found: 1"),
+            "count-mismatch": valid.replace("Objects found: 1", "Objects found: 2"),
         }
         for reason, invalid in invalid_outputs.items():
             with self.subTest(reason=reason):
                 result = self.run_asterisk_contract_helper(
-                    call, invalid, "10.20.1.4", "16061", "16062"
+                    call, invalid, "10.20.1.4", "16061"
                 )
                 self.assertNotEqual(result.returncode, 0)
 
-    def test_pjsip_transport_details_enforce_mtls_and_public_trust(self) -> None:
+    def test_pjsip_transport_details_enforce_mutual_tls_and_combined_trust(self) -> None:
         valid = """Transport:  <TransportId........>  <Type>  <cos>  <tos>  <BindAddress....................>
 ==========================================================================================
-Transport:  fixture-mtls-server      tls      0      0  10.20.1.4:16061
+Transport:  fixture-mutual-tls      tls      0      0  10.20.1.4:16061
 
  ParameterName                              : ParameterValue
  ================================================================
  allow_reload                               : false
  bind                                       : 10.20.1.4:16061
- ca_list_file                               : /run/fixture-pki/ca.crt
+ ca_list_file                               : /run/fixture-pki/combined-ca.crt
  cert_file                                  : /run/fixture-pki/asterisk.crt
  local_net                                  : 10.20.0.0/255.255.0.0
  method                                     : tlsv1_2
@@ -375,82 +373,33 @@ Transport:  fixture-mtls-server      tls      0      0  10.20.1.4:16061
  protocol                                   : tls
  require_client_cert                        : Yes
  verify_client                              : Yes
- verify_server                              : No
+ verify_server                              : Yes
 """
         call = """
-require_exact_pjsip_transport_detail "$1" fixture-mtls-server \
+require_exact_pjsip_transport_detail "$1" fixture-mutual-tls \
     10.20.1.4:16061 \
     protocol tls \
     bind 10.20.1.4:16061 \
     method tlsv1_2 \
     cert_file /run/fixture-pki/asterisk.crt \
     priv_key_file /run/fixture-pki/asterisk.key \
-    ca_list_file /run/fixture-pki/ca.crt \
+    ca_list_file /run/fixture-pki/combined-ca.crt \
     local_net 10.20.0.0/255.255.0.0 \
     verify_client Yes \
     require_client_cert Yes \
-    verify_server No \
+    verify_server Yes \
     allow_reload false
 """
         result = self.run_asterisk_contract_helper(call, valid)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-        client_valid = (
-            valid.replace("fixture-mtls-server", "fixture-public-client")
-            .replace("10.20.1.4:16061", "10.20.1.4:16062")
-            .replace("/run/fixture-pki/ca.crt", "/run/fixture-pki/public-ca.crt")
-            .replace(
-                "require_client_cert                        : Yes",
-                "require_client_cert                        : No",
-            )
-            .replace(
-                "verify_client                              : Yes",
-                "verify_client                              : No",
-            )
-            .replace(
-                "verify_server                              : No",
-                "verify_server                              : Yes",
-            )
-        )
-        client_call = """
-require_exact_pjsip_transport_detail "$1" fixture-public-client \
-    10.20.1.4:16062 \
-    protocol tls \
-    bind 10.20.1.4:16062 \
-    method tlsv1_2 \
-    cert_file /run/fixture-pki/asterisk.crt \
-    priv_key_file /run/fixture-pki/asterisk.key \
-    ca_list_file /run/fixture-pki/public-ca.crt \
-    local_net 10.20.0.0/255.255.0.0 \
-    verify_client No \
-    require_client_cert No \
-    verify_server Yes \
-    allow_reload false
-"""
-        result = self.run_asterisk_contract_helper(client_call, client_valid)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        for reason, invalid in {
-            "private-ca": client_valid.replace(
-                "/run/fixture-pki/public-ca.crt", "/run/fixture-pki/ca.crt"
-            ),
-            "client-verification": client_valid.replace(
-                "verify_client                              : No",
-                "verify_client                              : Yes",
-            ),
-            "no-server-verification": client_valid.replace(
-                "verify_server                              : Yes",
-                "verify_server                              : No",
-            ),
-        }.items():
-            with self.subTest(reason=f"client-{reason}"):
-                result = self.run_asterisk_contract_helper(client_call, invalid)
-                self.assertNotEqual(result.returncode, 0)
-
         invalid_outputs = {
             "wrong-bind": valid.replace("10.20.1.4:16061", "0.0.0.0:16061"),
-            "wrong-ca": valid.replace("/run/fixture-pki/ca.crt", "/etc/ssl/ca.crt"),
+            "wrong-ca": valid.replace("/run/fixture-pki/combined-ca.crt", "/run/fixture-pki/ca.crt"),
             "wrong-local-net": valid.replace("10.20.0.0/255.255.0.0", "10.20.0.0/24"),
             "no-client-verification": valid.replace("verify_client                              : Yes", "verify_client                              : No"),
+            "no-client-certificate": valid.replace("require_client_cert                        : Yes", "require_client_cert                        : No"),
+            "no-server-verification": valid.replace("verify_server                              : Yes", "verify_server                              : No"),
             "missing-parameter": valid.replace(" allow_reload                               : false\n", ""),
             "duplicate-parameter": valid.replace(
                 " allow_reload                               : false\n",
