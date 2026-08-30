@@ -708,6 +708,15 @@ class ForcedFixtureLeafRotationStaticTests(unittest.TestCase):
         self.assertIn("credential-digests.json", playbook)
         self.assertIn("force: false", playbook)
         self.assertIn("fixture_rotation_request_already_accepted", playbook)
+        active_leaf_probe = playbook[
+            playbook.index("Read the actively served fixture leaves over mutual TLS") :
+            playbook.index("Calculate actively served fixture leaf fingerprints")
+        ]
+        self.assertIn("- /usr/bin/timeout", active_leaf_probe)
+        self.assertIn("- --signal=TERM", active_leaf_probe)
+        self.assertIn("- 15s", active_leaf_probe)
+        self.assertIn("stdin: 'Q'", active_leaf_probe)
+        self.assertIn("stdin_add_newline: true", active_leaf_probe)
         self.assertLess(
             playbook.index("Revalidate an existing exact-request acceptance before any mutation"),
             playbook.index("Prepare or reconcile the durable forced-rotation request"),
