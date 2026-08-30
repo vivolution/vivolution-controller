@@ -165,6 +165,10 @@ _FIXTURE_OWNED_ARTIFACTS = {
     "teams-to-pbx-summary.json",
 }
 _EMPTY_PERMITTED_ARTIFACTS = {
+    # Asterisk's successful asynchronous ``channel originate`` CLI produces
+    # no stdout. The zero-byte file is still an exact manifested result; the
+    # subsequent RTP and CDR artifacts are the positive call proof.
+    "asterisk-originate.log",
     "fixture-cdr-normalization.log",
     "fixture-journal.log",
     "pbx-to-teams-sipp-errors.log",

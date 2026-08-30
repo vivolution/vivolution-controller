@@ -566,6 +566,12 @@ class SyntheticFailoverRemoteCollectionTests(unittest.TestCase):
         bundle = self.collect()
         self.assertEqual(bundle["artifacts"]["teams-to-pbx-sipp-errors.log"], "")
 
+    def test_collector_accepts_manifested_empty_successful_originate_log(self) -> None:
+        self.artifacts["asterisk-originate.log"] = b""
+        self.write_source()
+        bundle = self.collect()
+        self.assertEqual(bundle["artifacts"]["asterisk-originate.log"], "")
+
     def test_collector_uses_distinct_real_fixture_ownership_classes(self) -> None:
         fixture_identity = evidence._expected_artifact_identity(
             "teams-to-pbx-summary.json",
