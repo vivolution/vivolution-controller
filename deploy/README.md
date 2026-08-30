@@ -333,6 +333,91 @@ staging, then runs locked runtime health on the replacement. Its evidence keeps
 `replacementLiveInteroperability=NOT_ASSERTED`; only the separate Microsoft
 365/PBX call gate may change that conclusion.
 
+### Reviewed active-runtime source refresh
+
+`playbooks/refresh-active-edge-runtime-source.yml` is a narrowly bounded POC
+maintenance workflow for replacing only the installed
+`edge/runtime/contracts.py` bytes on an already committed
+`SYNTHETIC_PRIVATE` node. It exists so a reviewed renderer/validation fix can
+be installed before the next signed candidate is materialized without
+reimaging a healthy node. It does not render or change the currently active
+OpenSIPS, RTPengine, or nftables configuration. `DIRECT_ROUTING`, bootstrap
+nodes, pending Agent candidates, runtime transactions, and uncommitted runtime
+identity are refused.
+
+Prepare a protected JSON extra-vars file. Its target keys must exactly equal
+the play hosts selected by `--limit`; this makes one-host maintenance and a
+serialized two-host refresh equally explicit. SHA-256 values are lowercase raw
+hex (without the `sha256:` prefix):
+
+```json
+{
+  "edge_runtime_source_refresh_acknowledgement": "REFRESH_ACTIVE_SYNTHETIC_RUNTIME_CONTRACTS_SOURCE",
+  "edge_runtime_source_refresh_expected_new_sha256": "REPLACE_WITH_REVIEWED_CONTROLLER_SOURCE_SHA256",
+  "edge_runtime_source_refresh_expected_old_sha256": "REPLACE_WITH_EXACT_INSTALLED_SOURCE_SHA256",
+  "edge_runtime_source_refresh_single_operator_acknowledgement": "NO_CONCURRENT_EDGE_ACTIVATION_OR_RECOVERY",
+  "edge_runtime_source_refresh_targets": {
+    "sbc1": {
+      "activeSequence": 1,
+      "generation": 2,
+      "lastEvidenceDigest": "sha256:REPLACE_WITH_64_LOWERCASE_HEX",
+      "manifestDigest": "sha256:REPLACE_WITH_64_LOWERCASE_HEX",
+      "nodeId": "sbc1",
+      "profile": "SYNTHETIC_PRIVATE",
+      "runtimeReleaseDigest": "sha256:REPLACE_WITH_64_LOWERCASE_HEX"
+    }
+  }
+}
+```
+
+Run the exact limited workflow:
+
+```bash
+chmod 600 /absolute/private/runtime-source-refresh.json
+ANSIBLE_ROLES_PATH=deploy/roles ansible-playbook \
+  -i /absolute/private/poc-edge/hosts.yml \
+  --limit sbc1 \
+  -e @/absolute/private/runtime-source-refresh.json \
+  deploy/playbooks/refresh-active-edge-runtime-source.yml
+```
+
+The playbook binds the requested host/profile/generation to both installed
+node-facts copies and the root runtime authority; requires a journal-free
+healthy active candidate and an exact committed Agent LKG with no pending
+candidate; and verifies the controller and installed source digests before
+creating any transaction file. The new bytes and exact old-byte backup are
+single-link root-owned `0444` files in the installed source directory, so
+`os.replace` is same-filesystem atomic. The installed source is compiled and
+imported with isolated Python and locked runtime health must pass through it.
+Any later Ansible or validation task failure atomically restores the
+digest-pinned original bytes, reimports them, and reproves runtime health and
+unchanged protected state.
+
+This is a serialized single-operator POC maintenance boundary. The second
+literal acknowledgement means no activation, activation recovery, rollback,
+fixture credential rotation, or other root Edge workflow may run concurrently.
+The runtime/Agent tools do not share a durable lock across a multi-command
+Ansible transaction, so this operator exclusion is required rather than
+implied. Before mutation, the target also pins the exact active sequence,
+manifest, runtime release, and last runtime evidence digest; observing a
+different healthy candidate fails closed.
+
+A runner, SSH, or host loss is not auto-recovered by this one-time POC
+workflow. Same-directory stage/backup names include the reviewed digests, and
+a retry refuses their presence rather than guessing whether to finalize or
+restore. Inspect the installed target and retained backup against the reviewed
+hashes and restore the exact old bytes before retrying. No success evidence is
+written until the new source has passed every state and health postcondition.
+
+Success requires the complete runtime status—including active sequence,
+manifest, release and evidence digests—and the complete Agent status—including
+high-water, LKG, abort tombstone and empty pending slot—to equal their captured
+pre-refresh values. The source remains root:root `0444`; every installed Python
+parent remains root:root `0555`. Deterministic non-secret evidence is written
+under the ignored private inventory's `generated/runtime-source-refresh/`
+directory. A prior transaction artifact or evidence leaf is never overwritten;
+inspect and recover it instead of deleting it blindly.
+
 ## Private synthetic node-failover gate
 
 `playbooks/qualify-synthetic-node-failover.yml` is the bounded disruptive POC

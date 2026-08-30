@@ -1,0 +1,925 @@
+---
+- name: Refresh one reviewed source file on committed private Edge nodes
+  hosts: edge_nodes
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  order: sorted
+  serial: 1
+
+  vars:
+    edge_runtime_source_refresh_controller_source: >-
+      {{ playbook_dir }}/../../edge/runtime/contracts.py
+    edge_runtime_source_refresh_remote_source: >-
+      /usr/lib/vivolution-edge/python/edge/runtime/contracts.py
+    edge_runtime_source_refresh_remote_parent: >-
+      /usr/lib/vivolution-edge/python/edge/runtime
+    edge_runtime_source_refresh_evidence_root: >-
+      {{ inventory_dir }}/generated/runtime-source-refresh
+    edge_runtime_source_refresh_agent_state_dir: >-
+      /var/lib/vivolution-edge/agent-state/tenant
+
+  pre_tasks:
+    - name: Select the explicit per-node refresh contract
+      ansible.builtin.set_fact:
+        edge_runtime_source_refresh_target: >-
+          {{ (edge_runtime_source_refresh_targets | default({})).get(inventory_hostname, {}) }}
+
+    - name: Inspect the operating-system hostname before accepting refresh authority
+      ansible.builtin.command:
+        argv: [/usr/bin/hostnamectl, --static]
+      register: edge_runtime_source_refresh_hostname
+      changed_when: false
+
+    - name: Require explicit bounded fleet and digest authority
+      ansible.builtin.assert:
+        that:
+          - edge_runtime_source_refresh_acknowledgement == 'REFRESH_ACTIVE_SYNTHETIC_RUNTIME_CONTRACTS_SOURCE'
+          - edge_runtime_source_refresh_single_operator_acknowledgement == 'NO_CONCURRENT_EDGE_ACTIVATION_OR_RECOVERY'
+          - edge_runtime_source_refresh_targets is mapping
+          - edge_runtime_source_refresh_targets.keys() | list | sort == ansible_play_hosts_all | sort
+          - edge_runtime_source_refresh_target == edge_runtime_source_refresh_targets[inventory_hostname]
+          - (edge_runtime_source_refresh_target.keys() | list | sort) == ['activeSequence', 'generation', 'lastEvidenceDigest', 'manifestDigest', 'nodeId', 'profile', 'runtimeReleaseDigest']
+          - edge_runtime_source_refresh_target.nodeId == inventory_hostname
+          - edge_runtime_source_refresh_target.profile == 'SYNTHETIC_PRIVATE'
+          - edge_runtime_source_refresh_target.profile == edge_runtime_profile
+          - edge_runtime_source_refresh_target.generation is number
+          - edge_runtime_source_refresh_target.generation | int >= 1
+          - edge_runtime_source_refresh_target.generation | int == edge_generation | int
+          - edge_runtime_source_refresh_target.activeSequence is number
+          - edge_runtime_source_refresh_target.activeSequence | int >= 1
+          - edge_runtime_source_refresh_target.activeSequence | int <= 9007199254740991
+          - edge_runtime_source_refresh_target.manifestDigest is match('^sha256:[0-9a-f]{64}$')
+          - edge_runtime_source_refresh_target.runtimeReleaseDigest is match('^sha256:[0-9a-f]{64}$')
+          - edge_runtime_source_refresh_target.lastEvidenceDigest is match('^sha256:[0-9a-f]{64}$')
+          - edge_runtime_source_refresh_expected_old_sha256 is match('^[0-9a-f]{64}$')
+          - edge_runtime_source_refresh_expected_new_sha256 is match('^[0-9a-f]{64}$')
+          - edge_runtime_source_refresh_expected_old_sha256 != edge_runtime_source_refresh_expected_new_sha256
+          - edge_expected_hostname is match('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+          - edge_runtime_source_refresh_hostname.stdout | trim == edge_expected_hostname
+          - edge_runtime_source_refresh_controller_source == playbook_dir ~ '/../../edge/runtime/contracts.py'
+          - edge_runtime_source_refresh_remote_source == '/usr/lib/vivolution-edge/python/edge/runtime/contracts.py'
+          - edge_runtime_source_refresh_remote_parent == '/usr/lib/vivolution-edge/python/edge/runtime'
+          - edge_runtime_source_refresh_evidence_root == inventory_dir ~ '/generated/runtime-source-refresh'
+          - edge_runtime_source_refresh_agent_state_dir == '/var/lib/vivolution-edge/agent-state/tenant'
+        fail_msg: >-
+          Runtime source refresh requires the exact play host set, a complete
+          per-node SYNTHETIC_PRIVATE generation contract, distinct reviewed
+          old/new SHA-256 values, the installed hostname, and the explicit
+          one-time and no-concurrent-operator acknowledgements.
+
+    - name: Define fixed same-directory transaction paths
+      ansible.builtin.set_fact:
+        edge_runtime_source_refresh_stage: >-
+          {{ edge_runtime_source_refresh_remote_parent }}/.contracts.py.refresh-{{ edge_runtime_source_refresh_expected_new_sha256 }}.stage
+        edge_runtime_source_refresh_backup: >-
+          {{ edge_runtime_source_refresh_remote_parent }}/.contracts.py.refresh-{{ edge_runtime_source_refresh_expected_old_sha256 }}.backup
+        edge_runtime_source_refresh_evidence_file: >-
+          {{ edge_runtime_source_refresh_evidence_root }}/{{ inventory_hostname }}-{{ edge_runtime_source_refresh_expected_new_sha256 }}.json
+
+    - name: Require exact derived transaction and evidence paths
+      ansible.builtin.assert:
+        that:
+          - >-
+            edge_runtime_source_refresh_stage ==
+            '/usr/lib/vivolution-edge/python/edge/runtime/.contracts.py.refresh-' ~
+            edge_runtime_source_refresh_expected_new_sha256 ~ '.stage'
+          - >-
+            edge_runtime_source_refresh_backup ==
+            '/usr/lib/vivolution-edge/python/edge/runtime/.contracts.py.refresh-' ~
+            edge_runtime_source_refresh_expected_old_sha256 ~ '.backup'
+          - >-
+            edge_runtime_source_refresh_evidence_file ==
+            inventory_dir ~ '/generated/runtime-source-refresh/' ~ inventory_hostname ~ '-' ~
+            edge_runtime_source_refresh_expected_new_sha256 ~ '.json'
+        fail_msg: Derived source transaction or evidence paths were overridden.
+
+    - name: Inspect the reviewed controller source
+      ansible.builtin.stat:
+        path: "{{ edge_runtime_source_refresh_controller_source }}"
+        follow: false
+        get_checksum: true
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      register: edge_runtime_source_refresh_controller_source_stat
+
+    - name: Require exact bounded single-link controller source bytes
+      ansible.builtin.assert:
+        that:
+          - edge_runtime_source_refresh_controller_source_stat.stat.exists
+          - edge_runtime_source_refresh_controller_source_stat.stat.isreg | default(false)
+          - not (edge_runtime_source_refresh_controller_source_stat.stat.islnk | default(false))
+          - edge_runtime_source_refresh_controller_source_stat.stat.nlink | int == 1
+          - edge_runtime_source_refresh_controller_source_stat.stat.size | int > 0
+          - edge_runtime_source_refresh_controller_source_stat.stat.size | int <= 1048576
+          - edge_runtime_source_refresh_controller_source_stat.stat.mode in ['0400', '0440', '0444', '0600', '0640', '0644']
+          - edge_runtime_source_refresh_controller_source_stat.stat.checksum == edge_runtime_source_refresh_expected_new_sha256
+        fail_msg: >-
+          The reviewed controller contracts.py is missing, linked, writable by
+          untrusted users, oversized, or differs from the pinned new digest.
+
+    - name: Read installed immutable runtime identity inputs
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - /var/lib/vivolution-edge/runtime/runtime-authority.json
+        - /etc/vivolution-edge/node-facts.json
+        - /usr/lib/vivolution-edge/config/node-facts.json
+      register: edge_runtime_source_refresh_identity_raw
+
+    - name: Decode installed runtime identity inputs
+      ansible.builtin.set_fact:
+        edge_runtime_source_refresh_authority: >-
+          {{ edge_runtime_source_refresh_identity_raw.results[0].content | b64decode | from_json }}
+        edge_runtime_source_refresh_root_facts: >-
+          {{ edge_runtime_source_refresh_identity_raw.results[1].content | b64decode | from_json }}
+        edge_runtime_source_refresh_compiler_facts: >-
+          {{ edge_runtime_source_refresh_identity_raw.results[2].content | b64decode | from_json }}
+
+    - name: Bind refresh to the exact installed synthetic node authority
+      ansible.builtin.assert:
+        that:
+          - (edge_runtime_source_refresh_authority.keys() | list | sort) == ['administratorSourceIpv4Cidrs', 'apiVersion', 'azureDhcpServerIpv4', 'generation', 'nodeId', 'profile', 'secretDigests', 'slot']
+          - edge_runtime_source_refresh_authority.apiVersion == 'edge.vivolution.ae/runtime-authority/v0.1'
+          - edge_runtime_source_refresh_authority.nodeId == inventory_hostname
+          - edge_runtime_source_refresh_authority.profile == edge_runtime_source_refresh_target.profile
+          - edge_runtime_source_refresh_authority.generation | int == edge_runtime_source_refresh_target.generation | int
+          - edge_runtime_source_refresh_authority.slot == edge_slot
+          - (edge_runtime_source_refresh_authority.secretDigests.keys() | list | sort) == ['edgeCertificateChainPem', 'edgePrivateKeyPem', 'fixtureCaCrt', 'fixtureClientCrt', 'fixtureClientKey', 'microsoftCaBundlePem', 'pbxCaBundlePem', 'publicCaBundlePem']
+          - edge_runtime_source_refresh_identity_raw.results[1].content == edge_runtime_source_refresh_identity_raw.results[2].content
+          - edge_runtime_source_refresh_root_facts == edge_runtime_source_refresh_compiler_facts
+          - edge_runtime_source_refresh_root_facts.nodeId == inventory_hostname
+          - edge_runtime_source_refresh_root_facts.generation | int == edge_runtime_source_refresh_target.generation | int
+          - edge_runtime_source_refresh_root_facts.slot == edge_slot
+          - edge_runtime_source_refresh_root_facts.clusterId == edge_cluster_id
+          - edge_runtime_source_refresh_root_facts.customerAccountId == edge_customer_account_id
+          - edge_runtime_source_refresh_root_facts.m365TenantId == edge_m365_tenant_id
+          - edge_runtime_source_refresh_root_facts.tenantContextId == edge_tenant_context_id
+          - edge_runtime_source_refresh_root_facts.serviceInstanceId == edge_service_instance_id
+          - edge_runtime_source_refresh_root_facts.allocationId == edge_allocation_id
+          - edge_runtime_source_refresh_root_facts.publicIpv4 == edge_public_ipv4
+          - edge_runtime_source_refresh_root_facts.privateIpv4 == edge_private_ipv4
+          - edge_runtime_source_refresh_root_facts.authorizedPbxSourceIpv4Cidrs == edge_pbx_source_ipv4_cidrs
+          - edge_runtime_source_refresh_root_facts.syntheticTeamsSourceIpv4Cidrs == []
+          - edge_runtime_source_refresh_root_facts.tenantListenerPort | int == 15061
+          - edge_runtime_source_refresh_root_facts.tenantMediaPortStart | int == 20000
+          - edge_runtime_source_refresh_root_facts.tenantMediaPortEnd | int == 20255
+          - edge_runtime_source_refresh_root_facts.pbxMediaDestinationPortStart | int == edge_pbx_media_destination_port_start | int
+          - edge_runtime_source_refresh_root_facts.pbxMediaDestinationPortEnd | int == edge_pbx_media_destination_port_end | int
+          - edge_runtime_source_refresh_root_facts.clusterMediaPortStart | int == 20000
+          - edge_runtime_source_refresh_root_facts.clusterMediaPortEnd | int == 29999
+        fail_msg: >-
+          Installed authority or node facts differ from the exact positive-
+          generation private node selected for source refresh.
+
+    - name: Inspect installed source hierarchy and runtime journal
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+        get_checksum: "{{ item == edge_runtime_source_refresh_remote_source }}"
+        checksum_algorithm: sha256
+      loop:
+        - /usr/lib/vivolution-edge
+        - /usr/lib/vivolution-edge/python
+        - /usr/lib/vivolution-edge/python/edge
+        - "{{ edge_runtime_source_refresh_remote_parent }}"
+        - "{{ edge_runtime_source_refresh_remote_source }}"
+        - /var/lib/vivolution-edge/runtime/transaction.json
+      register: edge_runtime_source_refresh_path_stats
+
+    - name: Require exact immutable hierarchy old source and no runtime journal
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isdir | default(false)
+          - not (item.stat.islnk | default(false))
+          - item.stat.pw_name == 'root'
+          - item.stat.gr_name == 'root'
+          - item.stat.mode == '0555'
+        fail_msg: An installed runtime source parent is replaced, linked, writable, or has unexpected ownership.
+      loop: "{{ edge_runtime_source_refresh_path_stats.results[0:4] }}"
+
+    - name: Require exact installed source bytes and an absent runtime transaction
+      ansible.builtin.assert:
+        that:
+          - edge_runtime_source_refresh_path_stats.results[4].stat.exists
+          - edge_runtime_source_refresh_path_stats.results[4].stat.isreg | default(false)
+          - not (edge_runtime_source_refresh_path_stats.results[4].stat.islnk | default(false))
+          - edge_runtime_source_refresh_path_stats.results[4].stat.nlink | int == 1
+          - edge_runtime_source_refresh_path_stats.results[4].stat.pw_name == 'root'
+          - edge_runtime_source_refresh_path_stats.results[4].stat.gr_name == 'root'
+          - edge_runtime_source_refresh_path_stats.results[4].stat.mode == '0444'
+          - edge_runtime_source_refresh_path_stats.results[4].stat.size | int > 0
+          - edge_runtime_source_refresh_path_stats.results[4].stat.size | int <= 1048576
+          - edge_runtime_source_refresh_path_stats.results[4].stat.checksum == edge_runtime_source_refresh_expected_old_sha256
+          - not (edge_runtime_source_refresh_path_stats.results[5].stat.exists | default(false))
+          - not (edge_runtime_source_refresh_path_stats.results[5].stat.islnk | default(false))
+        fail_msg: >-
+          Installed contracts.py does not equal the reviewed old digest or a
+          runtime activation transaction is present.
+
+    - name: Find any abandoned runtime source refresh transaction files
+      ansible.builtin.find:
+        paths: "{{ edge_runtime_source_refresh_remote_parent }}"
+        patterns: '.contracts.py.refresh-*'
+        hidden: true
+        recurse: false
+        file_type: any
+        follow: false
+      register: edge_runtime_source_refresh_debris
+
+    - name: Refuse to merge with an abandoned source refresh transaction
+      ansible.builtin.assert:
+        that:
+          - edge_runtime_source_refresh_debris.matched | int == 0
+          - edge_runtime_source_refresh_debris.files | length == 0
+        fail_msg: >-
+          A prior source refresh left transaction material. Do not delete it;
+          recover and verify the exact old digest before retrying.
+
+    - name: Read exact protected runtime status before source mutation
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+      register: edge_runtime_source_refresh_runtime_before_raw
+      changed_when: false
+
+    - name: Prove locked runtime health before source mutation
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+      register: edge_runtime_source_refresh_health_before_raw
+      changed_when: false
+
+    - name: Parse protected runtime preconditions
+      ansible.builtin.set_fact:
+        edge_runtime_source_refresh_runtime_before: >-
+          {{ edge_runtime_source_refresh_runtime_before_raw.stdout | from_json }}
+        edge_runtime_source_refresh_health_before: >-
+          {{ edge_runtime_source_refresh_health_before_raw.stdout | from_json }}
+
+    - name: Require one committed healthy candidate and no runtime transaction
+      ansible.builtin.assert:
+        that:
+          - (edge_runtime_source_refresh_runtime_before.keys() | list | sort) == ['active', 'apiVersion', 'highestSeenSequence', 'journalPresent', 'kind', 'lastEvidenceDigest', 'previous']
+          - edge_runtime_source_refresh_runtime_before.apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+          - edge_runtime_source_refresh_runtime_before.kind == 'EdgeRuntimeStatus'
+          - not (edge_runtime_source_refresh_runtime_before.journalPresent | bool)
+          - (edge_runtime_source_refresh_runtime_before.active.keys() | list | sort) == ['kind', 'manifestDigest', 'relativePath', 'releaseDigest', 'sequence', 'slot']
+          - edge_runtime_source_refresh_runtime_before.active.kind == 'CANDIDATE'
+          - edge_runtime_source_refresh_runtime_before.active.sequence | int == edge_runtime_source_refresh_target.activeSequence | int
+          - edge_runtime_source_refresh_runtime_before.active.sequence | int == edge_runtime_source_refresh_runtime_before.highestSeenSequence | int
+          - edge_runtime_source_refresh_runtime_before.active.manifestDigest == edge_runtime_source_refresh_target.manifestDigest
+          - edge_runtime_source_refresh_runtime_before.active.releaseDigest == edge_runtime_source_refresh_target.runtimeReleaseDigest
+          - edge_runtime_source_refresh_runtime_before.lastEvidenceDigest == edge_runtime_source_refresh_target.lastEvidenceDigest
+          - (edge_runtime_source_refresh_health_before.keys() | list | sort) == ['active', 'apiVersion', 'highestSeenSequence', 'kind', 'runtimeChecks']
+          - edge_runtime_source_refresh_health_before.apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+          - edge_runtime_source_refresh_health_before.kind == 'EdgeRuntimeHealth'
+          - edge_runtime_source_refresh_health_before.active == edge_runtime_source_refresh_runtime_before.active
+          - edge_runtime_source_refresh_health_before.highestSeenSequence | int == edge_runtime_source_refresh_runtime_before.highestSeenSequence | int
+          - edge_runtime_source_refresh_health_before.runtimeChecks | length > 0
+          - edge_runtime_source_refresh_health_before.runtimeChecks | rejectattr('status', 'equalto', 'PASSED') | list | length == 0
+        fail_msg: Only a transaction-free, committed, healthy candidate may receive a reviewed source refresh.
+
+    - name: Build the exact tenant Agent status context
+      ansible.builtin.set_fact:
+        edge_runtime_source_refresh_agent_context_argv:
+          - --state-dir
+          - /var/lib/vivolution-edge/agent-state/tenant
+          - --scope
+          - TENANT
+          - --cluster-id
+          - "{{ edge_cluster_id }}"
+          - --node-id
+          - "{{ inventory_hostname }}"
+          - --generation
+          - "{{ edge_generation | string }}"
+          - --slot
+          - "{{ edge_slot }}"
+          - --customer-account-id
+          - "{{ edge_customer_account_id }}"
+          - --m365-tenant-id
+          - "{{ edge_m365_tenant_id }}"
+          - --tenant-context-id
+          - "{{ edge_tenant_context_id }}"
+          - --service-instance-id
+          - "{{ edge_service_instance_id }}"
+          - --allocation-id
+          - "{{ edge_allocation_id }}"
+          - --tenant-listener-port
+          - '15061'
+          - --tenant-media-port-start
+          - '20000'
+          - --tenant-media-port-end
+          - '20255'
+          - --pbx-media-destination-port-start
+          - "{{ edge_pbx_media_destination_port_start | string }}"
+          - --pbx-media-destination-port-end
+          - "{{ edge_pbx_media_destination_port_end | string }}"
+          - --cluster-media-port-start
+          - '20000'
+          - --cluster-media-port-end
+          - '29999'
+          - --expected-advertised-public-ip
+          - "{{ edge_public_ipv4 }}"
+
+    - name: Add every exact PBX source authority to Agent context
+      ansible.builtin.set_fact:
+        edge_runtime_source_refresh_agent_context_argv: >-
+          {{ edge_runtime_source_refresh_agent_context_argv + ['--authorized-pbx-source-cidr', item] }}
+      loop: "{{ edge_pbx_source_ipv4_cidrs }}"
+
+    - name: Inspect protected Agent state generations
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+        get_checksum: true
+        checksum_algorithm: sha256
+      loop:
+        - /var/lib/vivolution-edge/agent-state/tenant/edge-state-v3.json
+        - /var/lib/vivolution-edge/agent-state/tenant/edge-state-v2.json
+        - /var/lib/vivolution-edge/agent-state/tenant/accepted-state-v1.json
+      register: edge_runtime_source_refresh_agent_state_paths
+
+    - name: Require one exact current protected Agent state file
+      ansible.builtin.assert:
+        that:
+          - edge_runtime_source_refresh_agent_state_paths.results[0].stat.exists
+          - edge_runtime_source_refresh_agent_state_paths.results[0].stat.isreg | default(false)
+          - not (edge_runtime_source_refresh_agent_state_paths.results[0].stat.islnk | default(false))
+          - edge_runtime_source_refresh_agent_state_paths.results[0].stat.nlink | int == 1
+          - edge_runtime_source_refresh_agent_state_paths.results[0].stat.pw_name == 'vivolution-edge-agent'
+          - edge_runtime_source_refresh_agent_state_paths.results[0].stat.gr_name == 'vivolution-edge-agent'
+          - edge_runtime_source_refresh_agent_state_paths.results[0].stat.mode == '0600'
+          - edge_runtime_source_refresh_agent_state_paths.results[0].stat.checksum is match('^[0-9a-f]{64}$')
+          - not (edge_runtime_source_refresh_agent_state_paths.results[1].stat.exists | default(false))
+          - not (edge_runtime_source_refresh_agent_state_paths.results[1].stat.islnk | default(false))
+          - not (edge_runtime_source_refresh_agent_state_paths.results[2].stat.exists | default(false))
+          - not (edge_runtime_source_refresh_agent_state_paths.results[2].stat.islnk | default(false))
+        fail_msg: Source refresh requires one securely installed Agent v3 state and no legacy state.
+
+    - name: Read fully validated protected Agent state before source mutation
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/local/bin/vivolution-edge-agent', 'status'] +
+             edge_runtime_source_refresh_agent_context_argv }}
+      become_user: vivolution-edge-agent
+      register: edge_runtime_source_refresh_agent_before_raw
+      changed_when: false
+
+    - name: Parse protected Agent precondition
+      ansible.builtin.set_fact:
+        edge_runtime_source_refresh_agent_before: >-
+          {{ edge_runtime_source_refresh_agent_before_raw.stdout | from_json }}
+
+    - name: Require exact committed Agent LKG with no pending candidate
+      ansible.builtin.assert:
+        that:
+          - edge_runtime_source_refresh_agent_before_raw.stderr | trim == ''
+          - (edge_runtime_source_refresh_agent_before.keys() | list | sort) == ['activeLastKnownGood', 'apiVersion', 'highestSeenSequence', 'kind', 'lastAbortedCandidate', 'pendingCandidate']
+          - edge_runtime_source_refresh_agent_before.apiVersion == 'edge.vivolution.ae/agent-state/v0.1'
+          - edge_runtime_source_refresh_agent_before.kind == 'EdgeAgentProtectedStateStatus'
+          - edge_runtime_source_refresh_agent_before.pendingCandidate is none
+          - >-
+            edge_runtime_source_refresh_agent_before.activeLastKnownGood ==
+            {'manifestDigest': edge_runtime_source_refresh_runtime_before.active.manifestDigest,
+             'sequence': edge_runtime_source_refresh_runtime_before.active.sequence}
+          - edge_runtime_source_refresh_agent_before.highestSeenSequence | int == edge_runtime_source_refresh_runtime_before.highestSeenSequence | int
+        fail_msg: >-
+          Agent state is pending, uncommitted, or differs from the protected
+          runtime candidate; source refresh is prohibited.
+
+    - name: Inspect deterministic controller evidence paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ edge_runtime_source_refresh_evidence_root }}"
+        - "{{ edge_runtime_source_refresh_evidence_file }}"
+      delegate_to: localhost
+      become: false
+      register: edge_runtime_source_refresh_existing_evidence
+
+    - name: Require protected evidence root and a brand-new deterministic leaf
+      ansible.builtin.assert:
+        that:
+          - >-
+            not (edge_runtime_source_refresh_existing_evidence.results[0].stat.exists | default(false)) or
+            (edge_runtime_source_refresh_existing_evidence.results[0].stat.isdir | default(false) and
+             not (edge_runtime_source_refresh_existing_evidence.results[0].stat.islnk | default(false)) and
+             edge_runtime_source_refresh_existing_evidence.results[0].stat.mode == '0700')
+          - not (edge_runtime_source_refresh_existing_evidence.results[1].stat.exists | default(false))
+          - not (edge_runtime_source_refresh_existing_evidence.results[1].stat.islnk | default(false))
+        fail_msg: Refusing to replace an existing runtime source refresh evidence record.
+
+  tasks:
+    - name: Transactionally replace and validate the exact runtime source
+      block:
+        - name: Stage reviewed source beside the installed source
+          ansible.builtin.copy:
+            src: "{{ edge_runtime_source_refresh_controller_source }}"
+            dest: "{{ edge_runtime_source_refresh_stage }}"
+            owner: root
+            group: root
+            mode: '0444'
+            force: true
+
+        - name: Preserve exact old source bytes beside the installed source
+          ansible.builtin.copy:
+            src: "{{ edge_runtime_source_refresh_remote_source }}"
+            dest: "{{ edge_runtime_source_refresh_backup }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: '0444'
+            force: false
+
+        - name: Inspect same-directory stage and backup
+          ansible.builtin.stat:
+            path: "{{ item.path }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          loop:
+            - path: "{{ edge_runtime_source_refresh_stage }}"
+              sha256: "{{ edge_runtime_source_refresh_expected_new_sha256 }}"
+            - path: "{{ edge_runtime_source_refresh_backup }}"
+              sha256: "{{ edge_runtime_source_refresh_expected_old_sha256 }}"
+          register: edge_runtime_source_refresh_transaction_stats
+
+        - name: Require exact protected same-directory transaction bytes
+          ansible.builtin.assert:
+            that:
+              - item.stat.exists
+              - item.stat.isreg | default(false)
+              - not (item.stat.islnk | default(false))
+              - item.stat.nlink | int == 1
+              - item.stat.pw_name == 'root'
+              - item.stat.gr_name == 'root'
+              - item.stat.mode == '0444'
+              - item.stat.size | int > 0
+              - item.stat.size | int <= 1048576
+              - item.stat.checksum == item.item.sha256
+            fail_msg: A staged or backup source violates the exact digest/type/ownership boundary.
+          loop: "{{ edge_runtime_source_refresh_transaction_stats.results }}"
+
+        - name: Atomically install reviewed source on the same filesystem
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - -c
+              - |
+                import hashlib, os, stat, sys
+                target, stage, old_digest, new_digest = sys.argv[1:]
+                parent = os.path.dirname(target)
+                if os.path.dirname(stage) != parent:
+                    raise SystemExit("stage is not beside target")
+                for path, expected in ((target, old_digest), (stage, new_digest)):
+                    value = os.lstat(path)
+                    if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+                        raise SystemExit("source transaction leaf is not a single-link regular file")
+                    if value.st_uid != 0 or value.st_gid != 0 or stat.S_IMODE(value.st_mode) != 0o444:
+                        raise SystemExit("source transaction leaf ownership or mode changed")
+                    with open(path, "rb", buffering=0) as handle:
+                        actual = hashlib.sha256(handle.read(1048577)).hexdigest()
+                    if actual != expected:
+                        raise SystemExit("source transaction digest changed")
+                os.replace(stage, target)
+                directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+              - "{{ edge_runtime_source_refresh_remote_source }}"
+              - "{{ edge_runtime_source_refresh_stage }}"
+              - "{{ edge_runtime_source_refresh_expected_old_sha256 }}"
+              - "{{ edge_runtime_source_refresh_expected_new_sha256 }}"
+          register: edge_runtime_source_refresh_atomic_swap
+          changed_when: true
+
+        - name: Inspect atomically replaced source
+          ansible.builtin.stat:
+            path: "{{ edge_runtime_source_refresh_remote_source }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          register: edge_runtime_source_refresh_new_source_stat
+
+        - name: Require exact installed new source protection
+          ansible.builtin.assert:
+            that:
+              - edge_runtime_source_refresh_new_source_stat.stat.exists
+              - edge_runtime_source_refresh_new_source_stat.stat.isreg | default(false)
+              - not (edge_runtime_source_refresh_new_source_stat.stat.islnk | default(false))
+              - edge_runtime_source_refresh_new_source_stat.stat.nlink | int == 1
+              - edge_runtime_source_refresh_new_source_stat.stat.pw_name == 'root'
+              - edge_runtime_source_refresh_new_source_stat.stat.gr_name == 'root'
+              - edge_runtime_source_refresh_new_source_stat.stat.mode == '0444'
+              - edge_runtime_source_refresh_new_source_stat.stat.checksum == edge_runtime_source_refresh_expected_new_sha256
+            fail_msg: Atomic source replacement did not install the exact protected new bytes.
+
+        - name: Compile and import the installed source in an isolated interpreter
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - -c
+              - |
+                import hashlib, importlib, pathlib, sys
+                source = pathlib.Path(sys.argv[1])
+                expected = sys.argv[2]
+                raw = source.read_bytes()
+                if hashlib.sha256(raw).hexdigest() != expected:
+                    raise SystemExit("installed source digest changed before import")
+                compile(raw, str(source), "exec")
+                sys.path.insert(0, "/usr/lib/vivolution-edge/python")
+                module = importlib.import_module("edge.runtime.contracts")
+                if pathlib.Path(module.__file__).resolve() != source.resolve():
+                    raise SystemExit("isolated import resolved an unexpected contracts module")
+              - "{{ edge_runtime_source_refresh_remote_source }}"
+              - "{{ edge_runtime_source_refresh_expected_new_sha256 }}"
+          changed_when: false
+
+        - name: Reprove locked runtime health through the refreshed source
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+          register: edge_runtime_source_refresh_health_after_raw
+          changed_when: false
+
+        - name: Re-read protected runtime status after refreshed-source health
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+          register: edge_runtime_source_refresh_runtime_after_raw
+          changed_when: false
+
+        - name: Re-read fully validated protected Agent state after source refresh
+          ansible.builtin.command:
+            argv: >-
+              {{ ['/usr/local/bin/vivolution-edge-agent', 'status'] +
+                 edge_runtime_source_refresh_agent_context_argv }}
+          become_user: vivolution-edge-agent
+          register: edge_runtime_source_refresh_agent_after_raw
+          changed_when: false
+
+        - name: Reinspect complete protected Agent state bytes after source refresh
+          ansible.builtin.stat:
+            path: /var/lib/vivolution-edge/agent-state/tenant/edge-state-v3.json
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          register: edge_runtime_source_refresh_agent_state_after
+
+        - name: Parse exact post-refresh protected state
+          ansible.builtin.set_fact:
+            edge_runtime_source_refresh_health_after: >-
+              {{ edge_runtime_source_refresh_health_after_raw.stdout | from_json }}
+            edge_runtime_source_refresh_runtime_after: >-
+              {{ edge_runtime_source_refresh_runtime_after_raw.stdout | from_json }}
+            edge_runtime_source_refresh_agent_after: >-
+              {{ edge_runtime_source_refresh_agent_after_raw.stdout | from_json }}
+
+        - name: Require healthy runtime and byte-for-byte protected state identity
+          ansible.builtin.assert:
+            that:
+              - edge_runtime_source_refresh_runtime_after == edge_runtime_source_refresh_runtime_before
+              - edge_runtime_source_refresh_agent_after_raw.stderr | trim == ''
+              - edge_runtime_source_refresh_agent_after == edge_runtime_source_refresh_agent_before
+              - edge_runtime_source_refresh_agent_state_after.stat.exists
+              - edge_runtime_source_refresh_agent_state_after.stat.isreg | default(false)
+              - not (edge_runtime_source_refresh_agent_state_after.stat.islnk | default(false))
+              - edge_runtime_source_refresh_agent_state_after.stat.nlink | int == 1
+              - edge_runtime_source_refresh_agent_state_after.stat.pw_name == 'vivolution-edge-agent'
+              - edge_runtime_source_refresh_agent_state_after.stat.gr_name == 'vivolution-edge-agent'
+              - edge_runtime_source_refresh_agent_state_after.stat.mode == '0600'
+              - edge_runtime_source_refresh_agent_state_after.stat.checksum == edge_runtime_source_refresh_agent_state_paths.results[0].stat.checksum
+              - (edge_runtime_source_refresh_health_after.keys() | list | sort) == ['active', 'apiVersion', 'highestSeenSequence', 'kind', 'runtimeChecks']
+              - edge_runtime_source_refresh_health_after.apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+              - edge_runtime_source_refresh_health_after.kind == 'EdgeRuntimeHealth'
+              - edge_runtime_source_refresh_health_after.active == edge_runtime_source_refresh_runtime_before.active
+              - edge_runtime_source_refresh_health_after.highestSeenSequence | int == edge_runtime_source_refresh_runtime_before.highestSeenSequence | int
+              - edge_runtime_source_refresh_health_after.runtimeChecks | length > 0
+              - edge_runtime_source_refresh_health_after.runtimeChecks | rejectattr('status', 'equalto', 'PASSED') | list | length == 0
+              - edge_runtime_source_refresh_agent_after.pendingCandidate is none
+              - >-
+                edge_runtime_source_refresh_agent_after.activeLastKnownGood ==
+                {'manifestDigest': edge_runtime_source_refresh_runtime_before.active.manifestDigest,
+                 'sequence': edge_runtime_source_refresh_runtime_before.active.sequence}
+            fail_msg: >-
+              Refreshed source did not preserve exact runtime active/release/
+              evidence identity, Agent high-water/LKG identity, or locked health.
+
+        - name: Reinspect immutable source parent hierarchy after refresh
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            follow: false
+          loop:
+            - /usr/lib/vivolution-edge
+            - /usr/lib/vivolution-edge/python
+            - /usr/lib/vivolution-edge/python/edge
+            - "{{ edge_runtime_source_refresh_remote_parent }}"
+          register: edge_runtime_source_refresh_final_parent_stats
+
+        - name: Require immutable parent modes after source refresh
+          ansible.builtin.assert:
+            that:
+              - item.stat.exists
+              - item.stat.isdir | default(false)
+              - not (item.stat.islnk | default(false))
+              - item.stat.pw_name == 'root'
+              - item.stat.gr_name == 'root'
+              - item.stat.mode == '0555'
+            fail_msg: Runtime source parent immutability changed during refresh.
+          loop: "{{ edge_runtime_source_refresh_final_parent_stats.results }}"
+
+        - name: Build deterministic non-secret source refresh evidence
+          ansible.builtin.set_fact:
+            edge_runtime_source_refresh_evidence:
+              active: "{{ edge_runtime_source_refresh_runtime_after.active }}"
+              agentActiveLastKnownGood: "{{ edge_runtime_source_refresh_agent_after.activeLastKnownGood }}"
+              agentHighestSeenSequence: "{{ edge_runtime_source_refresh_agent_after.highestSeenSequence | int }}"
+              agentStateSha256: "sha256:{{ edge_runtime_source_refresh_agent_state_after.stat.checksum }}"
+              agentStateUnchanged: true
+              apiVersion: edge.vivolution.ae/runtime-source-refresh/v0.1
+              generation: "{{ edge_runtime_source_refresh_target.generation | int }}"
+              kind: EdgeRuntimeSourceRefreshEvidence
+              lastEvidenceDigest: "{{ edge_runtime_source_refresh_runtime_after.lastEvidenceDigest }}"
+              newSha256: "sha256:{{ edge_runtime_source_refresh_expected_new_sha256 }}"
+              nodeId: "{{ inventory_hostname }}"
+              oldSha256: "sha256:{{ edge_runtime_source_refresh_expected_old_sha256 }}"
+              profile: SYNTHETIC_PRIVATE
+              runtimeChecks: "{{ edge_runtime_source_refresh_health_after.runtimeChecks }}"
+              runtimeStateUnchanged: true
+              sourcePath: /usr/lib/vivolution-edge/python/edge/runtime/contracts.py
+              status: ACTIVE_SYNTHETIC_RUNTIME_SOURCE_REFRESHED
+
+        - name: Serialize and digest deterministic source refresh evidence
+          ansible.builtin.set_fact:
+            edge_runtime_source_refresh_evidence_bytes: >-
+              {{ edge_runtime_source_refresh_evidence | to_nice_json }}{{ '\n' }}
+            edge_runtime_source_refresh_evidence_sha256: >-
+              {{ ((edge_runtime_source_refresh_evidence | to_nice_json) ~ '\n') | hash('sha256') }}
+
+        - name: Create protected deterministic controller evidence directory
+          ansible.builtin.file:
+            path: "{{ edge_runtime_source_refresh_evidence_root }}"
+            state: directory
+            mode: '0700'
+          delegate_to: localhost
+          become: false
+
+        - name: Preserve deterministic non-secret source refresh evidence
+          ansible.builtin.copy:
+            content: "{{ edge_runtime_source_refresh_evidence_bytes }}"
+            dest: "{{ edge_runtime_source_refresh_evidence_file }}"
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+        - name: Verify protected deterministic evidence leaf
+          ansible.builtin.stat:
+            path: "{{ edge_runtime_source_refresh_evidence_file }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          delegate_to: localhost
+          become: false
+          register: edge_runtime_source_refresh_final_evidence
+
+        - name: Require protected deterministic evidence before releasing rollback bytes
+          ansible.builtin.assert:
+            that:
+              - edge_runtime_source_refresh_final_evidence.stat.exists
+              - edge_runtime_source_refresh_final_evidence.stat.isreg | default(false)
+              - not (edge_runtime_source_refresh_final_evidence.stat.islnk | default(false))
+              - edge_runtime_source_refresh_final_evidence.stat.nlink | int == 1
+              - edge_runtime_source_refresh_final_evidence.stat.mode == '0600'
+              - edge_runtime_source_refresh_final_evidence.stat.size | int > 0
+              - edge_runtime_source_refresh_final_evidence.stat.size | int <= 65536
+              - edge_runtime_source_refresh_final_evidence.stat.checksum == edge_runtime_source_refresh_evidence_sha256
+            fail_msg: Source refresh evidence was not preserved as one protected bounded file.
+
+        - name: Report exact reviewed source refresh
+          ansible.builtin.debug:
+            msg: >-
+              ACTIVE_SYNTHETIC_RUNTIME_SOURCE_REFRESHED node={{ inventory_hostname }}
+              old=sha256:{{ edge_runtime_source_refresh_expected_old_sha256 }}
+              new=sha256:{{ edge_runtime_source_refresh_expected_new_sha256 }}
+
+        - name: Remove exact old-source backup only after every acceptance step passes
+          ansible.builtin.file:
+            path: "{{ edge_runtime_source_refresh_backup }}"
+            state: absent
+
+      rescue:
+        - name: Inspect exact old-source backup and current target for rollback
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          loop:
+            - "{{ edge_runtime_source_refresh_backup }}"
+            - "{{ edge_runtime_source_refresh_remote_source }}"
+          register: edge_runtime_source_refresh_rescue_backup
+
+        - name: Classify whether a source mutation needs rollback
+          ansible.builtin.set_fact:
+            edge_runtime_source_refresh_backup_present: >-
+              {{ edge_runtime_source_refresh_rescue_backup.results[0].stat.exists | default(false) }}
+
+        - name: Require exact rollback bytes or proof mutation never began
+          ansible.builtin.assert:
+            that:
+              - >-
+                (edge_runtime_source_refresh_backup_present | bool and
+                 edge_runtime_source_refresh_rescue_backup.results[0].stat.isreg | default(false) and
+                 not (edge_runtime_source_refresh_rescue_backup.results[0].stat.islnk | default(false)) and
+                 edge_runtime_source_refresh_rescue_backup.results[0].stat.nlink | int == 1 and
+                 edge_runtime_source_refresh_rescue_backup.results[0].stat.pw_name == 'root' and
+                 edge_runtime_source_refresh_rescue_backup.results[0].stat.gr_name == 'root' and
+                 edge_runtime_source_refresh_rescue_backup.results[0].stat.mode == '0444' and
+                 edge_runtime_source_refresh_rescue_backup.results[0].stat.checksum == edge_runtime_source_refresh_expected_old_sha256) or
+                (not (edge_runtime_source_refresh_backup_present | bool) and
+                 edge_runtime_source_refresh_rescue_backup.results[1].stat.exists and
+                 edge_runtime_source_refresh_rescue_backup.results[1].stat.isreg | default(false) and
+                 not (edge_runtime_source_refresh_rescue_backup.results[1].stat.islnk | default(false)) and
+                 edge_runtime_source_refresh_rescue_backup.results[1].stat.nlink | int == 1 and
+                 edge_runtime_source_refresh_rescue_backup.results[1].stat.pw_name == 'root' and
+                 edge_runtime_source_refresh_rescue_backup.results[1].stat.gr_name == 'root' and
+                 edge_runtime_source_refresh_rescue_backup.results[1].stat.mode == '0444' and
+                 edge_runtime_source_refresh_rescue_backup.results[1].stat.checksum == edge_runtime_source_refresh_expected_old_sha256)
+            fail_msg: >-
+              Source refresh failed and neither an exact old backup nor an
+              untouched exact old target can be proven; transaction material
+              is intentionally retained for recovery.
+
+        - name: Atomically restore exact original source bytes
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - -c
+              - |
+                import hashlib, os, stat, sys
+                target, backup, expected = sys.argv[1:]
+                parent = os.path.dirname(target)
+                if os.path.dirname(backup) != parent:
+                    raise SystemExit("backup is not beside target")
+                value = os.lstat(backup)
+                if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+                    raise SystemExit("rollback source is not a single-link regular file")
+                if value.st_uid != 0 or value.st_gid != 0 or stat.S_IMODE(value.st_mode) != 0o444:
+                    raise SystemExit("rollback source ownership or mode changed")
+                with open(backup, "rb", buffering=0) as handle:
+                    if hashlib.sha256(handle.read(1048577)).hexdigest() != expected:
+                        raise SystemExit("rollback source digest changed")
+                os.replace(backup, target)
+                os.chown(target, 0, 0)
+                os.chmod(target, 0o444)
+                directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+              - "{{ edge_runtime_source_refresh_remote_source }}"
+              - "{{ edge_runtime_source_refresh_backup }}"
+              - "{{ edge_runtime_source_refresh_expected_old_sha256 }}"
+          changed_when: true
+          when: edge_runtime_source_refresh_backup_present | bool
+
+        - name: Remove only the failed transaction stage
+          ansible.builtin.file:
+            path: "{{ edge_runtime_source_refresh_stage }}"
+            state: absent
+
+        - name: Remove a success evidence leaf invalidated by rollback
+          ansible.builtin.file:
+            path: "{{ edge_runtime_source_refresh_evidence_file }}"
+            state: absent
+          delegate_to: localhost
+          become: false
+
+        - name: Reinspect rolled-back original source
+          ansible.builtin.stat:
+            path: "{{ edge_runtime_source_refresh_remote_source }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          register: edge_runtime_source_refresh_rolled_back_source
+
+        - name: Require exact original protection after rollback
+          ansible.builtin.assert:
+            that:
+              - edge_runtime_source_refresh_rolled_back_source.stat.exists
+              - edge_runtime_source_refresh_rolled_back_source.stat.isreg | default(false)
+              - not (edge_runtime_source_refresh_rolled_back_source.stat.islnk | default(false))
+              - edge_runtime_source_refresh_rolled_back_source.stat.nlink | int == 1
+              - edge_runtime_source_refresh_rolled_back_source.stat.pw_name == 'root'
+              - edge_runtime_source_refresh_rolled_back_source.stat.gr_name == 'root'
+              - edge_runtime_source_refresh_rolled_back_source.stat.mode == '0444'
+              - edge_runtime_source_refresh_rolled_back_source.stat.checksum == edge_runtime_source_refresh_expected_old_sha256
+            fail_msg: Original runtime source was not exactly restored.
+
+        - name: Compile and import rolled-back original source
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - -c
+              - |
+                import hashlib, importlib, pathlib, sys
+                source = pathlib.Path(sys.argv[1])
+                raw = source.read_bytes()
+                if hashlib.sha256(raw).hexdigest() != sys.argv[2]:
+                    raise SystemExit("rolled-back digest changed")
+                compile(raw, str(source), "exec")
+                sys.path.insert(0, "/usr/lib/vivolution-edge/python")
+                module = importlib.import_module("edge.runtime.contracts")
+                if pathlib.Path(module.__file__).resolve() != source.resolve():
+                    raise SystemExit("rollback import resolved an unexpected module")
+              - "{{ edge_runtime_source_refresh_remote_source }}"
+              - "{{ edge_runtime_source_refresh_expected_old_sha256 }}"
+          changed_when: false
+
+        - name: Reprove locked runtime health after exact source rollback
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+          register: edge_runtime_source_refresh_rollback_health_raw
+          changed_when: false
+
+        - name: Re-read runtime and Agent state after exact source rollback
+          block:
+            - name: Read protected runtime status after rollback
+              ansible.builtin.command:
+                argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+              register: edge_runtime_source_refresh_rollback_runtime_raw
+              changed_when: false
+
+            - name: Read protected Agent status after rollback
+              ansible.builtin.command:
+                argv: >-
+                  {{ ['/usr/local/bin/vivolution-edge-agent', 'status'] +
+                     edge_runtime_source_refresh_agent_context_argv }}
+              become_user: vivolution-edge-agent
+              register: edge_runtime_source_refresh_rollback_agent_raw
+              changed_when: false
+
+            - name: Reinspect complete protected Agent state bytes after rollback
+              ansible.builtin.stat:
+                path: /var/lib/vivolution-edge/agent-state/tenant/edge-state-v3.json
+                follow: false
+                get_checksum: true
+                checksum_algorithm: sha256
+              register: edge_runtime_source_refresh_rollback_agent_state
+
+        - name: Require exact protected state and health after rollback
+          ansible.builtin.assert:
+            that:
+              - (edge_runtime_source_refresh_rollback_runtime_raw.stdout | from_json) == edge_runtime_source_refresh_runtime_before
+              - (edge_runtime_source_refresh_rollback_agent_raw.stdout | from_json) == edge_runtime_source_refresh_agent_before
+              - edge_runtime_source_refresh_rollback_agent_raw.stderr | trim == ''
+              - edge_runtime_source_refresh_rollback_agent_state.stat.exists
+              - edge_runtime_source_refresh_rollback_agent_state.stat.isreg | default(false)
+              - not (edge_runtime_source_refresh_rollback_agent_state.stat.islnk | default(false))
+              - edge_runtime_source_refresh_rollback_agent_state.stat.nlink | int == 1
+              - edge_runtime_source_refresh_rollback_agent_state.stat.pw_name == 'vivolution-edge-agent'
+              - edge_runtime_source_refresh_rollback_agent_state.stat.gr_name == 'vivolution-edge-agent'
+              - edge_runtime_source_refresh_rollback_agent_state.stat.mode == '0600'
+              - edge_runtime_source_refresh_rollback_agent_state.stat.checksum == edge_runtime_source_refresh_agent_state_paths.results[0].stat.checksum
+              - (edge_runtime_source_refresh_rollback_health_raw.stdout | from_json).active == edge_runtime_source_refresh_runtime_before.active
+              - (edge_runtime_source_refresh_rollback_health_raw.stdout | from_json).highestSeenSequence | int == edge_runtime_source_refresh_runtime_before.highestSeenSequence | int
+              - (edge_runtime_source_refresh_rollback_health_raw.stdout | from_json).runtimeChecks | rejectattr('status', 'equalto', 'PASSED') | list | length == 0
+            fail_msg: Exact original source rollback did not restore the healthy unchanged protected state.
+
+        - name: Reinspect immutable source parent hierarchy after rollback
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            follow: false
+          loop:
+            - /usr/lib/vivolution-edge
+            - /usr/lib/vivolution-edge/python
+            - /usr/lib/vivolution-edge/python/edge
+            - "{{ edge_runtime_source_refresh_remote_parent }}"
+          register: edge_runtime_source_refresh_rollback_parent_stats
+
+        - name: Require immutable parent modes after source rollback
+          ansible.builtin.assert:
+            that:
+              - item.stat.exists
+              - item.stat.isdir | default(false)
+              - not (item.stat.islnk | default(false))
+              - item.stat.pw_name == 'root'
+              - item.stat.gr_name == 'root'
+              - item.stat.mode == '0555'
+            fail_msg: Runtime source parent immutability changed during rollback.
+          loop: "{{ edge_runtime_source_refresh_rollback_parent_stats.results }}"
+
+        - name: Report source refresh failure only after exact rollback
+          ansible.builtin.fail:
+            msg: >-
+              Runtime source refresh failed and the exact original source was
+              atomically restored with unchanged runtime and Agent state.
