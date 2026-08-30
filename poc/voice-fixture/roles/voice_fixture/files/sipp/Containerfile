@@ -15,7 +15,6 @@ RUN set -eux; \
         libgsl-dev \
         libncurses-dev \
         libpcap-dev \
-        libpugixml-dev \
         libsctp-dev \
         libssl-dev \
         ninja-build \

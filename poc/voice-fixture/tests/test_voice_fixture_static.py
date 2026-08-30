@@ -654,6 +654,7 @@ require_exact_word_set 'fixture SocketBindAllow' "$normalized_words" \
         self.assertIn("-DUSE_SSL=1", sipp)
         self.assertNotIn("TLS_KEY_LOGGING", sipp)
         self.assertNotIn("USE_SYSTEM_PUGIXML", sipp)
+        self.assertNotIn("libpugixml-dev", sipp)
         self.assertIn("COPY --from=builder /runtime-libs/ /", sipp)
         self.assertNotIn("sip-tester", sipp)
         self.assertNotIn("SIPP_DEBIAN_VERSION", sipp)
