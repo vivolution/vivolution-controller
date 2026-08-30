@@ -2,7 +2,7 @@
 - name: Force and journal one exact CP1 synthetic fixture leaf generation
   hosts: fixture_controller
   become: true
-  gather_facts: false
+  gather_facts: true
   serial: 1
   order: sorted
   any_errors_fatal: true

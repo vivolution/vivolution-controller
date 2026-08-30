@@ -693,6 +693,10 @@ class ForcedFixtureLeafRotationStaticTests(unittest.TestCase):
         self.assertIn("fixture_rotation_request_id", playbook)
         self.assertIn("voice_fixture_force_leaf_rotation_request_id", playbook)
         self.assertIn("voice_fixture_force_leaf_rotation_expected_generation", playbook)
+        self.assertRegex(
+            playbook,
+            r"(?s)Force and journal one exact CP1 synthetic fixture leaf generation.*?gather_facts: true",
+        )
         self.assertIn("serial: 1", playbook)
         self.assertIn("forced_fixture_leaf_rotation_state.py", playbook)
         self.assertIn("edge_fixture_rotation", playbook)
