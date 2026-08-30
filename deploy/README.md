@@ -245,6 +245,21 @@ Lego deletes the challenge TXT record set during cleanup, while the managed
 identity's Reader/Contributor roles remain on the child zone. The preflight
 rejects the parent zone, the peer's zone, or any non-derived zone name.
 
+The Edge egress contract permits DNS only to Azure WireServer
+`168.63.129.16`; direct UDP/TCP queries to Azure's public authoritative
+servers are intentionally denied. Lego is therefore pinned to that recursive
+resolver and disables only its direct-authoritative propagation probe. It
+still requires the exact challenge TXT value through the approved recursive
+resolver, follows the public CNAME into the node-isolated child zone, and the
+public CA independently validates DNS authority before issuance. The fixed
+post-issuance validator continues to require the exact SANs, RSA key, EKU,
+chain, lifetime, and public trust. The systemd job allows ten minutes because
+two identifiers can each consume the bounded three-minute propagation window;
+it remains a hard timeout. Initial installation permits only one automatic
+retry after a three-minute managed-identity/RBAC convergence delay. Thus a
+persistent DNS or ACME failure is bounded to two service starts (at most 23
+minutes including the delay), instead of silently creating dozens of orders.
+
 ## Edge profile deployment and replacement
 
 `playbooks/install-edge.yml` and `playbooks/activate-edge.yml` accept exactly

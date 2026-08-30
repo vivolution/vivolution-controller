@@ -76,11 +76,24 @@ class DnsAcmeStaticTests(unittest.TestCase):
         self.assertIn("edge_azure_dns_zone: acme-sbc2.voice.example.invalid", hosts)
         self.assertIn("edge_azure_dns_zone == 'acme-' ~ edge_acme_node_fqdn", preflight)
         self.assertIn("AZURE_ZONE_NAME={{ edge_azure_dns_zone }}", environment)
+        self.assertIn("AZURE_PROPAGATION_TIMEOUT=180", environment)
         self.assertNotIn("LEGO_DISABLE_CNAME_SUPPORT", environment + renewal)
+        self.assertEqual(
+            renewal.count(
+                "--dns.resolvers '{{ edge_azure_wire_server_ipv4 }}:53'"
+            ),
+            2,
+        )
+        self.assertEqual(renewal.count("--dns.propagation.disable-ans"), 2)
+        self.assertNotIn("--dns.propagation.disable-rns", renewal)
+        self.assertNotIn("--dns.propagation.wait", renewal)
         self.assertIn("Managed-identity and Resource Graph authorization", certificate_tasks)
-        self.assertIn("retries: 30", certificate_tasks)
-        self.assertIn("delay: 20", certificate_tasks)
-        self.assertIn("TimeoutStartSec=5min", certificate_service)
+        self.assertIn("exactly one delayed retry", certificate_tasks)
+        self.assertIn("retries: 1", certificate_tasks)
+        self.assertIn("delay: 180", certificate_tasks)
+        self.assertNotIn("retries: 30", certificate_tasks)
+        self.assertIn("TimeoutStartSec=10min", certificate_service)
+        self.assertNotIn("TimeoutStartSec=5min", certificate_service)
 
 
 if __name__ == "__main__":

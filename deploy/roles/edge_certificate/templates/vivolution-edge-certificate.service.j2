@@ -5,7 +5,9 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-TimeoutStartSec=5min
+# Two identifiers can each consume the bounded 180-second Azure-DNS
+# propagation window. Leave room for provider cleanup and ACME finalization.
+TimeoutStartSec=10min
 EnvironmentFile=/etc/vivolution-edge/acme-azure.env
 ExecStart=/usr/local/libexec/vivolution-edge/renew-edge-certificate
 User=root

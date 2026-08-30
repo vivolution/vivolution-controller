@@ -165,8 +165,11 @@
   register: edge_certificate_issue
   # Managed-identity and Resource Graph authorization can take several minutes
   # to converge after the isolated ACME-zone role assignments are created.
-  retries: 30
-  delay: 20
+  # Permit exactly one delayed retry (two service starts total). A persistent
+  # DNS or ACME failure must stop the play instead of creating up to 31 orders
+  # behind a ten-minute systemd timeout.
+  retries: 1
+  delay: 180
   until: edge_certificate_issue is succeeded
 
 - name: Validate the deployed Edge certificate contract

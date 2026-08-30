@@ -193,8 +193,18 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
         )
         self.assertIn("checksum: \"sha256:{{ edge_lego_linux_amd64_archive_sha256 }}\"", tasks)
         self.assertIn("AZURE_AUTH_METHOD=msi", environment)
+        self.assertIn("AZURE_PROPAGATION_TIMEOUT=180", environment)
         self.assertNotIn("CLIENT_SECRET", environment)
         self.assertIn("--dns azuredns", helper)
+        self.assertEqual(
+            helper.count(
+                "--dns.resolvers '{{ edge_azure_wire_server_ipv4 }}:53'"
+            ),
+            2,
+        )
+        self.assertEqual(helper.count("--dns.propagation.disable-ans"), 2)
+        self.assertNotIn("--dns.propagation.disable-rns", helper)
+        self.assertNotIn("--dns.propagation.wait", helper)
         self.assertIn("--domains '{{ edge_acme_wildcard_fqdn }}'", helper)
         self.assertIn("--key-type '{{ edge_acme_certificate_key_type }}'", helper)
         self.assertEqual(helper.count("/usr/local/sbin/lego \\\n        run \\"), 2)
@@ -203,6 +213,7 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
         self.assertIn("--renew-days 30", helper)
         self.assertIn("--no-random-sleep", helper)
         self.assertIn("edge_acme_certificate_key_type: rsa2048", playbook)
+        self.assertIn("edge_azure_wire_server_ipv4: 168.63.129.16", playbook)
         self.assertIn(
             "ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256",
             playbook,
@@ -218,6 +229,12 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
             "ReadWritePaths=/var/lib/vivolution-edge/acme /var/lib/vivolution-edge/certificate-rotation /var/lib/vivolution-edge/runtime /etc/vivolution-edge/tls -/etc/vivolution-edge/runtime-authority.json",
             service,
         )
+        self.assertIn("TimeoutStartSec=10min", service)
+        self.assertNotIn("TimeoutStartSec=5min", service)
+        self.assertIn("exactly one delayed retry", tasks)
+        self.assertIn("retries: 1", tasks)
+        self.assertIn("delay: 180", tasks)
+        self.assertNotIn("retries: 30", tasks)
 
     def test_rtpengine_is_one_unprivileged_userspace_instance(self) -> None:
         config = self.read("roles/edge_rtpengine/templates/rtpengine.conf.j2")

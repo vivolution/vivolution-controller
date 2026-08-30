@@ -22,6 +22,8 @@ if [ -f "$certificate_source" ] && [ -f "$key_source" ]; then
         --accept-tos \
         --email '{{ edge_acme_email }}' \
         --dns azuredns \
+        --dns.resolvers '{{ edge_azure_wire_server_ipv4 }}:53' \
+        --dns.propagation.disable-ans \
         --domains '{{ edge_acme_node_fqdn }}' \
         --domains '{{ edge_acme_wildcard_fqdn }}' \
         --key-type '{{ edge_acme_certificate_key_type }}' \
@@ -34,6 +36,8 @@ else
         --accept-tos \
         --email '{{ edge_acme_email }}' \
         --dns azuredns \
+        --dns.resolvers '{{ edge_azure_wire_server_ipv4 }}:53' \
+        --dns.propagation.disable-ans \
         --domains '{{ edge_acme_node_fqdn }}' \
         --domains '{{ edge_acme_wildcard_fqdn }}' \
         --key-type '{{ edge_acme_certificate_key_type }}' \
