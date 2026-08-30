@@ -33,7 +33,8 @@ def inputs() -> teardown.ExpectedInputs:
 class FakeAzure:
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
-        self.inject_child_record_after_first_lock_delete = False
+        self.inject_child_record_after_first_assignment_delete = False
+        self.inject_role_definition_drift_after_final_zone_delete = False
         self.injected_child_record = False
         self.account = {
             "id": teardown.EXPECTED_SUBSCRIPTION_ID,
@@ -42,7 +43,32 @@ class FakeAzure:
         self.children = {}
         self.child_records = {}
         self.assignments = {}
+        self.inherited_assignments = {
+            SBC1_PRINCIPAL: [],
+            SBC2_PRINCIPAL: [],
+        }
         self.locks = {}
+        self.role_definition = {
+            "assignableScopes": [
+                f"/subscriptions/{teardown.EXPECTED_SUBSCRIPTION_ID}"
+            ],
+            "description": teardown.EDGE_ACME_TXT_ROLE_DESCRIPTION,
+            "id": teardown._role_definition_id(
+                teardown.EXPECTED_SUBSCRIPTION_ID,
+                teardown.EDGE_ACME_TXT_ROLE_ID,
+            ),
+            "name": teardown.EDGE_ACME_TXT_ROLE_ID,
+            "permissions": [
+                {
+                    "actions": sorted(teardown.EDGE_ACME_TXT_ROLE_ACTIONS),
+                    "notActions": [],
+                    "dataActions": [],
+                    "notDataActions": [],
+                }
+            ],
+            "roleName": teardown.EDGE_ACME_TXT_ROLE_NAME,
+            "roleType": "CustomRole",
+        }
         self.parent_records = {}
         self._seed()
 
@@ -89,36 +115,27 @@ class FakeAzure:
                     "type": "Microsoft.Network/dnsZones/TXT",
                 },
             ]
-            self.assignments[zone] = []
-            for role_index, role_id in enumerate(
-                (teardown.READER_ROLE_ID, teardown.DNS_ZONE_CONTRIBUTOR_ROLE_ID), start=1
-            ):
-                assignment_name = f"{index}{role_index}000000-0000-4000-8000-000000000000"
-                assignment_name = assignment_name[:36]
-                self.assignments[zone].append(
-                    {
-                        "id": (
-                            f"{zone_id}/providers/Microsoft.Authorization/roleAssignments/"
-                            f"{assignment_name}"
-                        ),
-                        "principalId": principals[zone],
-                        "principalType": "ServicePrincipal",
-                        "roleDefinitionId": teardown._role_definition_id(
-                            teardown.EXPECTED_SUBSCRIPTION_ID, role_id
-                        ),
-                        "scope": zone_id,
-                    }
-                )
-            self.locks[zone] = [
+            assignment_name = (
+                "11111111-aaaa-4aaa-8aaa-111111111111"
+                if index == 1
+                else "22222222-bbbb-4bbb-8bbb-222222222222"
+            )
+            self.assignments[zone] = [
                 {
                     "id": (
-                        f"{zone_id}/providers/Microsoft.Authorization/locks/{teardown.LOCK_NAME}"
+                        f"{zone_id}/providers/Microsoft.Authorization/roleAssignments/"
+                        f"{assignment_name}"
                     ),
-                    "level": teardown.LOCK_LEVEL,
-                    "name": teardown.LOCK_NAME,
-                    "notes": teardown.LOCK_NOTES[zone],
+                    "principalId": principals[zone],
+                    "principalType": "ServicePrincipal",
+                    "roleDefinitionId": teardown._role_definition_id(
+                        teardown.EXPECTED_SUBSCRIPTION_ID,
+                        teardown.EDGE_ACME_TXT_ROLE_ID,
+                    ),
+                    "scope": zone_id,
                 }
             ]
+            self.locks[zone] = []
 
         for spec in teardown._parent_specs(inputs()):
             name = spec["name"]
@@ -163,6 +180,10 @@ class FakeAzure:
                     "name": name,
                 }
             )
+        if command[:3] == ["role", "definition", "list"]:
+            return json.dumps(
+                [] if self.role_definition is None else [self.role_definition]
+            )
         if command[:2] == ["resource", "list"]:
             name = self._value(argv, "--name")
             child = self.children.get(name)
@@ -191,9 +212,51 @@ class FakeAzure:
                 return json.dumps(list(self.parent_records.values()))
             return json.dumps(self.child_records[zone])
         if command[:3] == ["role", "assignment", "list"]:
+            if "--assignee-object-id" in argv:
+                principal = self._value(argv, "--assignee-object-id")
+                if "--all" not in argv:
+                    scope = self._value(argv, "--scope")
+                    return json.dumps(
+                        [
+                            record
+                            for zone in teardown.CHILD_ZONES
+                            if zone in self.assignments
+                            for record in self.assignments[zone]
+                            if record["principalId"] == principal
+                            and record["scope"].lower() == scope.lower()
+                        ]
+                        + self.inherited_assignments[principal]
+                    )
+                return json.dumps(
+                    [
+                        record
+                        for zone in teardown.CHILD_ZONES
+                        if zone in self.assignments
+                        for record in self.assignments[zone]
+                        if record["principalId"] == principal
+                    ]
+                )
+            if "--all" in argv:
+                return json.dumps(
+                    [
+                        record
+                        for zone in teardown.CHILD_ZONES
+                        if zone in self.assignments
+                        for record in self.assignments[zone]
+                        if record["roleDefinitionId"].lower().endswith(
+                            teardown.EDGE_ACME_TXT_ROLE_ID
+                        )
+                    ]
+                )
             scope = self._value(argv, "--scope")
             zone = scope.rsplit("/", 1)[-1]
-            return json.dumps(self.assignments[zone])
+            return json.dumps(
+                [
+                    record
+                    for record in self.assignments[zone]
+                    if record["scope"].lower() == scope.lower()
+                ]
+            )
         if command[:2] == ["lock", "list"]:
             zone = self._value(argv, "--resource-name")
             return json.dumps(self.locks[zone])
@@ -204,14 +267,9 @@ class FakeAzure:
                 self.assignments[zone] = [
                     record for record in self.assignments[zone] if record["id"] != target
                 ]
-            return ""
-        if command[:2] == ["lock", "delete"]:
-            target = self._value(argv, "--ids")
-            for zone in list(self.locks):
-                self.locks[zone] = [record for record in self.locks[zone] if record["id"] != target]
             first_zone = teardown.CHILD_ZONES[0]
             if (
-                self.inject_child_record_after_first_lock_delete
+                self.inject_child_record_after_first_assignment_delete
                 and not self.injected_child_record
                 and first_zone in target
             ):
@@ -224,6 +282,10 @@ class FakeAzure:
                 )
                 self.injected_child_record = True
             return ""
+        if command[:3] == ["role", "definition", "delete"]:
+            self.assert_role_definition_delete_is_safe(argv)
+            self.role_definition = None
+            return ""
         if command[:4] == ["network", "dns", "zone", "delete"]:
             target = self._value(argv, "--ids")
             zone = target.rsplit("/", 1)[-1]
@@ -233,6 +295,11 @@ class FakeAzure:
             self.child_records.pop(zone)
             self.assignments.pop(zone)
             self.locks.pop(zone)
+            if (
+                self.inject_role_definition_drift_after_final_zone_delete
+                and not self.children
+            ):
+                self.role_definition["description"] = "drifted after zone deletion"
             return ""
         if command[:3] == ["network", "dns", "record-set"] and command[4] == "delete":
             kind = command[3].upper()
@@ -242,6 +309,12 @@ class FakeAzure:
             self.parent_records.pop((name, kind))
             return ""
         raise AssertionError(argv)
+
+    def assert_role_definition_delete_is_safe(self, argv: list[str]) -> None:
+        if self._value(argv, "--name") != teardown.EDGE_ACME_TXT_ROLE_ID:
+            raise AssertionError("custom-role identity mismatch")
+        if any(self.assignments.values()) or self.children:
+            raise AssertionError("custom role deleted before its assignments and zones")
 
     @property
     def mutation_commands(self) -> list[list[str]]:
@@ -257,7 +330,7 @@ class DnsAcmeTeardownTests(unittest.TestCase):
         azure = FakeAzure()
         plan = teardown.plan_teardown(inputs(), runner=azure)
         self.assertEqual(plan["status"], "POC_DNS_ACME_TEARDOWN_PLAN_READY")
-        self.assertEqual(len(plan["actions"]), 17)
+        self.assertEqual(len(plan["actions"]), 14)
         self.assertRegex(plan["planSha256"], r"^[0-9a-f]{64}$")
         self.assertFalse(azure.mutation_commands)
         parent_zone_id = teardown._zone_id(
@@ -284,13 +357,57 @@ class DnsAcmeTeardownTests(unittest.TestCase):
             for command in azure.commands
             if command[1:4] == ["role", "assignment", "list"]
         ]
-        self.assertEqual(len(role_list_commands), 2)
-        for command in role_list_commands:
+        self.assertEqual(len(role_list_commands), 7)
+        scoped_role_commands = [
+            command
+            for command in role_list_commands
+            if "--scope" in command and "--assignee-object-id" not in command
+        ]
+        self.assertEqual(len(scoped_role_commands), 2)
+        for command in scoped_role_commands:
             self.assertNotIn("--include-inherited", command)
             self.assertEqual(FakeAzure._value(command, "--fill-principal-name"), "false")
             self.assertEqual(
                 FakeAzure._value(command, "--fill-role-definition-name"), "false"
             )
+        principal_role_commands = [
+            command
+            for command in role_list_commands
+            if "--assignee-object-id" in command
+        ]
+        self.assertEqual(len(principal_role_commands), 4)
+        direct_principal_commands = [
+            command for command in principal_role_commands if "--all" in command
+        ]
+        inherited_principal_commands = [
+            command
+            for command in principal_role_commands
+            if "--include-inherited" in command
+        ]
+        self.assertEqual(len(direct_principal_commands), 2)
+        self.assertEqual(len(inherited_principal_commands), 2)
+        for command in inherited_principal_commands:
+            self.assertEqual(
+                FakeAzure._value(command, "--scope"),
+                f"/subscriptions/{teardown.EXPECTED_SUBSCRIPTION_ID}",
+            )
+        global_role_command = next(
+            command for command in role_list_commands if "--role" in command
+        )
+        self.assertEqual(
+            FakeAzure._value(global_role_command, "--role"),
+            teardown.EDGE_ACME_TXT_ROLE_ID,
+        )
+        role_definition_commands = [
+            command
+            for command in azure.commands
+            if command[1:4] == ["role", "definition", "list"]
+        ]
+        self.assertEqual(len(role_definition_commands), 1)
+        self.assertEqual(
+            FakeAzure._value(role_definition_commands[0], "--name"),
+            teardown.EDGE_ACME_TXT_ROLE_ID,
+        )
 
     def test_apply_requires_matching_digest_and_exact_confirmation(self) -> None:
         azure = FakeAzure()
@@ -323,10 +440,11 @@ class DnsAcmeTeardownTests(unittest.TestCase):
             runner=azure,
         )
         self.assertEqual(result["status"], "POC_DNS_ACME_TEARDOWN_APPLIED")
-        self.assertEqual(result["deletedActions"], 17)
-        self.assertEqual(len(azure.mutation_commands), 17)
+        self.assertEqual(result["deletedActions"], 14)
+        self.assertEqual(len(azure.mutation_commands), 14)
         self.assertFalse(azure.children)
         self.assertFalse(azure.parent_records)
+        self.assertIsNone(azure.role_definition)
         self.assertFalse(
             any(command[1:3] == ["group", "delete"] for command in azure.mutation_commands)
         )
@@ -347,7 +465,7 @@ class DnsAcmeTeardownTests(unittest.TestCase):
             teardown.plan_teardown(inputs(), runner=azure)
         self.assertFalse(azure.mutation_commands)
 
-    def test_record_tag_child_content_rbac_and_lock_drift_fail_closed(self) -> None:
+    def test_record_tag_child_content_rbac_role_and_lock_drift_fail_closed(self) -> None:
         cases = []
 
         azure = FakeAzure()
@@ -371,11 +489,28 @@ class DnsAcmeTeardownTests(unittest.TestCase):
 
         azure = FakeAzure()
         azure.assignments[teardown.CHILD_ZONES[0]][0]["principalId"] = SBC2_PRINCIPAL
-        cases.append((azure, "unexpected direct RBAC"))
+        cases.append((azure, "unexpected subscription assignment"))
 
         azure = FakeAzure()
-        azure.locks[teardown.CHILD_ZONES[0]][0]["notes"] = "unrelated"
-        cases.append((azure, "lock identity drifted"))
+        unexpected = dict(azure.assignments[teardown.CHILD_ZONES[0]][0])
+        unexpected["id"] = (
+            f"/subscriptions/{teardown.EXPECTED_SUBSCRIPTION_ID}/providers/"
+            "Microsoft.Authorization/roleAssignments/"
+            "99999999-9999-4999-8999-999999999999"
+        )
+        unexpected["scope"] = f"/subscriptions/{teardown.EXPECTED_SUBSCRIPTION_ID}"
+        azure.assignments[teardown.CHILD_ZONES[0]].append(unexpected)
+        cases.append((azure, "unexpected subscription assignment"))
+
+        azure = FakeAzure()
+        azure.role_definition["permissions"][0]["actions"].append(
+            "Microsoft.Network/dnszones/delete"
+        )
+        cases.append((azure, "custom-role definition drifted"))
+
+        azure = FakeAzure()
+        azure.locks[teardown.CHILD_ZONES[0]] = [{"name": "unexpected"}]
+        cases.append((azure, "management lock"))
 
         for azure, message in cases:
             with self.subTest(message=message):
@@ -383,10 +518,10 @@ class DnsAcmeTeardownTests(unittest.TestCase):
                     teardown.plan_teardown(inputs(), runner=azure)
                 self.assertFalse(azure.mutation_commands)
 
-    def test_child_zone_is_revalidated_after_lock_and_rbac_removal(self) -> None:
+    def test_child_zone_is_revalidated_after_rbac_removal(self) -> None:
         azure = FakeAzure()
         plan = teardown.plan_teardown(inputs(), runner=azure)
-        azure.inject_child_record_after_first_lock_delete = True
+        azure.inject_child_record_after_first_assignment_delete = True
         with self.assertRaisesRegex(teardown.DnsTeardownError, "unexpected record set"):
             teardown.apply_teardown(
                 inputs(),
@@ -402,19 +537,37 @@ class DnsAcmeTeardownTests(unittest.TestCase):
             )
         )
 
+    def test_role_definition_is_revalidated_after_final_zone_deletion(self) -> None:
+        azure = FakeAzure()
+        plan = teardown.plan_teardown(inputs(), runner=azure)
+        azure.inject_role_definition_drift_after_final_zone_delete = True
+        with self.assertRaisesRegex(teardown.DnsTeardownError, "custom-role definition drifted"):
+            teardown.apply_teardown(
+                inputs(),
+                approved_plan_sha256=plan["planSha256"],
+                confirmation=teardown.CONFIRMATION,
+                runner=azure,
+            )
+        self.assertIsNotNone(azure.role_definition)
+        self.assertFalse(
+            any(
+                command[1:4] == ["role", "definition", "delete"]
+                for command in azure.mutation_commands
+            )
+        )
+
     def test_partial_teardown_can_be_replanned_and_already_absent_is_safe(self) -> None:
         azure = FakeAzure()
         azure.parent_records.pop(("cp1-poc", "A"))
-        azure.locks[teardown.CHILD_ZONES[0]] = []
-        azure.assignments[teardown.CHILD_ZONES[1]] = azure.assignments[
-            teardown.CHILD_ZONES[1]
-        ][1:]
+        azure.assignments[teardown.CHILD_ZONES[1]] = []
         plan = teardown.plan_teardown(inputs(), runner=azure)
-        self.assertEqual(len(plan["actions"]), 14)
+        self.assertEqual(len(plan["actions"]), 12)
         self.assertFalse(azure.mutation_commands)
 
         azure.parent_records.clear()
         azure.children.clear()
+        azure.assignments.clear()
+        azure.role_definition = None
         plan = teardown.plan_teardown(inputs(), runner=azure)
         self.assertEqual(plan["status"], "POC_DNS_ACME_ALREADY_ABSENT")
         self.assertEqual(plan["actions"], [])

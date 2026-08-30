@@ -44,6 +44,11 @@ else
         --path "$acme_root"
 fi
 
+/usr/local/libexec/vivolution-edge/verify-acme-cleanup \
+    --subscription-id '{{ edge_azure_subscription_id }}' \
+    --resource-group '{{ edge_azure_dns_resource_group }}' \
+    --zone '{{ edge_azure_dns_zone }}'
+
 test -s "$certificate_source"
 test -s "$issuer_source"
 test -s "$key_source"
@@ -52,10 +57,10 @@ certificate_tmp="$incoming_root/.teams-fullchain.pem.$$"
 key_tmp="$incoming_root/.teams-key.pem.$$"
 trap 'rm -f "$certificate_tmp" "$key_tmp"' EXIT HUP INT TERM
 
-{
-    /bin/cat "$certificate_source"
-    /bin/cat "$issuer_source"
-} >"$certificate_tmp"
+# Lego 5 writes the default bundled ACME response (leaf followed by issuers)
+# to `.crt`; `.issuer.crt` is the issuer-only suffix of that same response.
+# Concatenating both files duplicates the issuer chain and is invalid.
+/bin/cat "$certificate_source" >"$certificate_tmp"
 /usr/bin/install -o root -g root -m 0400 "$key_source" "$key_tmp"
 /bin/chown root:root "$certificate_tmp"
 /bin/chmod 0400 "$certificate_tmp"

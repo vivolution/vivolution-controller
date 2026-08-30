@@ -74,7 +74,7 @@
       - edge_acme_wildcard_fqdn == '*.' ~ edge_acme_node_fqdn
       - edge_azure_subscription_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
       - edge_azure_tenant_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
-      - edge_azure_dns_resource_group is match('^[A-Za-z0-9._()/-]{1,90}$')
+      - edge_azure_dns_resource_group is match('^[A-Za-z0-9._()-]{1,90}$')
       - edge_azure_dns_zone is match('^[a-z0-9](?:[a-z0-9.-]{1,251}[a-z0-9])$')
       - edge_azure_dns_zone == 'acme-' ~ edge_acme_node_fqdn
       - edge_acme_certificate_key_type == 'rsa2048'

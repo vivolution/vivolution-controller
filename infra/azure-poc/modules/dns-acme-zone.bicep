@@ -20,6 +20,9 @@ param sbc1PrincipalId string
 @description('System-assigned managed-identity principal ID of SBC2.')
 param sbc2PrincipalId string
 
+@description('Subscription custom-role ID limited to child-zone discovery and TXT record-set lifecycle.')
+param edgeAcmeTxtRoleDefinitionId string
+
 var sbc1RecordName = 'sbc1'
 var sbc2RecordName = 'sbc2'
 var cp1StagingRecordName = 'cp1-poc'
@@ -28,28 +31,20 @@ var sbc2AcmeZoneName = 'acme-${sbc2RecordName}.${dnsZoneName}'
 var sbc1AcmeDelegationName = 'acme-${sbc1RecordName}'
 var sbc2AcmeDelegationName = 'acme-${sbc2RecordName}'
 var acmeRecordName = '_acme-challenge'
-var acmeBootstrapTxtValue = 'vivolution-acme-rbac-bootstrap'
 var acmeZoneTags = {
   workload: 'vivolution-sbc'
   environment: 'poc'
   managedBy: 'bicep'
   purpose: 'edge-acme-dns01'
 }
-var readerRoleDefinitionId = subscriptionResourceId(
-  'Microsoft.Authorization/roleDefinitions',
-  'acdd72a7-3385-48ef-bd42-f606fba81ae7'
-)
-var dnsZoneContributorRoleDefinitionId = subscriptionResourceId(
-  'Microsoft.Authorization/roleDefinitions',
-  'befefa01-2a29-4197-83a8-272ff33ce314'
-)
-
 resource dnsZone 'Microsoft.Network/dnsZones@2018-05-01' existing = {
   name: dnsZoneName
 }
 
 // Lego deletes the entire TXT record set during challenge cleanup. Keep RBAC
 // on a durable, node-isolated child zone rather than on that ephemeral record.
+// The supplied custom role can discover this zone and mutate TXT record sets,
+// but cannot update or delete the zone or touch any other record type.
 resource sbc1AcmeZone 'Microsoft.Network/dnsZones@2018-05-01' = {
   name: sbc1AcmeZoneName
   location: 'global'
@@ -60,24 +55,6 @@ resource sbc2AcmeZone 'Microsoft.Network/dnsZones@2018-05-01' = {
   name: sbc2AcmeZoneName
   location: 'global'
   tags: acmeZoneTags
-}
-
-resource sbc1AcmeZoneDeleteLock 'Microsoft.Authorization/locks@2020-05-01' = {
-  name: 'prevent-edge-acme-zone-deletion'
-  scope: sbc1AcmeZone
-  properties: {
-    level: 'CanNotDelete'
-    notes: 'Preserve the durable SBC1 ACME RBAC boundary while allowing TXT record updates.'
-  }
-}
-
-resource sbc2AcmeZoneDeleteLock 'Microsoft.Authorization/locks@2020-05-01' = {
-  name: 'prevent-edge-acme-zone-deletion'
-  scope: sbc2AcmeZone
-  properties: {
-    level: 'CanNotDelete'
-    notes: 'Preserve the durable SBC2 ACME RBAC boundary while allowing TXT record updates.'
-  }
 }
 
 resource cp1StagingA 'Microsoft.Network/dnsZones/A@2018-05-01' = {
@@ -195,69 +172,25 @@ resource sbc2AcmeCname 'Microsoft.Network/dnsZones/CNAME@2018-05-01' = {
   }
 }
 
-resource sbc1AcmeTxt 'Microsoft.Network/dnsZones/TXT@2018-05-01' = {
-  parent: sbc1AcmeZone
-  name: acmeRecordName
-  properties: {
-    TTL: 60
-    TXTRecords: [
-      {
-        value: [acmeBootstrapTxtValue]
-      }
-    ]
-  }
-}
-
-resource sbc2AcmeTxt 'Microsoft.Network/dnsZones/TXT@2018-05-01' = {
-  parent: sbc2AcmeZone
-  name: acmeRecordName
-  properties: {
-    TTL: 60
-    TXTRecords: [
-      {
-        value: [acmeBootstrapTxtValue]
-      }
-    ]
-  }
-}
-
-resource sbc1ZoneReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(sbc1AcmeZone.id, sbc1PrincipalId, readerRoleDefinitionId)
+// A CanNotDelete lock on the zone is intentionally forbidden: Azure inherits
+// it to record sets and would turn Lego cleanup into a non-fatal 409 warning.
+resource sbc1AcmeTxtOperator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(sbc1AcmeZone.id, sbc1PrincipalId, edgeAcmeTxtRoleDefinitionId)
   scope: sbc1AcmeZone
   properties: {
     principalId: sbc1PrincipalId
     principalType: 'ServicePrincipal'
-    roleDefinitionId: readerRoleDefinitionId
+    roleDefinitionId: edgeAcmeTxtRoleDefinitionId
   }
 }
 
-resource sbc2ZoneReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(sbc2AcmeZone.id, sbc2PrincipalId, readerRoleDefinitionId)
+resource sbc2AcmeTxtOperator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(sbc2AcmeZone.id, sbc2PrincipalId, edgeAcmeTxtRoleDefinitionId)
   scope: sbc2AcmeZone
   properties: {
     principalId: sbc2PrincipalId
     principalType: 'ServicePrincipal'
-    roleDefinitionId: readerRoleDefinitionId
-  }
-}
-
-resource sbc1AcmeWriter 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(sbc1AcmeZone.id, sbc1PrincipalId, dnsZoneContributorRoleDefinitionId)
-  scope: sbc1AcmeZone
-  properties: {
-    principalId: sbc1PrincipalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: dnsZoneContributorRoleDefinitionId
-  }
-}
-
-resource sbc2AcmeWriter 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(sbc2AcmeZone.id, sbc2PrincipalId, dnsZoneContributorRoleDefinitionId)
-  scope: sbc2AcmeZone
-  properties: {
-    principalId: sbc2PrincipalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: dnsZoneContributorRoleDefinitionId
+    roleDefinitionId: edgeAcmeTxtRoleDefinitionId
   }
 }
 

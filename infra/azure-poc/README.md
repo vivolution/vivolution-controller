@@ -173,14 +173,20 @@ separate DNS/RBAC deployment. Lego removes an entire TXT record set after each
 DNS-01 challenge, so record-scoped RBAC would be deleted or orphaned with that
 ephemeral resource. The deployment instead creates one delegated ACME child
 zone per SBC, points the public `_acme-challenge.sbcN` name to the isolated zone
-with CNAME, and grants that node Reader plus DNS Zone Contributor only on its
-own durable child zone. Challenge TXT records may then be deleted and recreated
-without losing renewal authority. No VM can write the parent zone or the other
-node's ACME zone, and no Azure client secret is stored on an Edge node. The two
-small extra public DNS zones add roughly USD 1/month combined before queries.
-Each child zone also has a `CanNotDelete` management lock: the deployment owner
-must explicitly remove that lock during the bounded POC teardown, while the
-Edge identity can continue updating challenge records.
+with CNAME, and assigns that node the subscription custom role
+`Vivolution Edge ACME TXT Record Operator` only on its own durable child zone.
+The role contains exactly child-zone read, TXT read/write/delete, and Resource
+Graph read. It cannot update or delete a zone, touch another record type, write
+the parent zone, or write the peer's child zone. Challenge TXT records may then
+be deleted and recreated without losing renewal authority, and no Azure client
+secret is stored on an Edge node. The two small extra public DNS zones add
+roughly USD 1/month combined before queries.
+
+The child zones intentionally have no management lock. Azure propagates a
+zone-level `CanNotDelete` lock to record-set DELETE operations, which makes
+Lego issue successfully but leave cleanup as a non-fatal 409 warning. Zone
+deletion is instead denied by the narrow custom role itself; the Edge identity
+has only the TXT lifecycle actions it needs.
 
 ```bash
 az bicep build --file dns-acme.bicep
@@ -193,6 +199,91 @@ az deployment sub what-if \
   --parameters dns-acme.bicepparam
 ```
 
+Because the role definition is subscription-scoped, both `validate` and
+`what-if` above are mandatory review gates; resource-group-only validation is
+not an adequate substitute.
+
+## Exact incremental ACME-authority reconciliation
+
+An incremental deployment creates the new custom role and assignments but does
+not remove objects from the earlier template. On an existing POC, first deploy
+the reviewed `dns-acme.bicepparam`, Azure-deallocate both SBC VMs (guest
+shutdown is insufficient), and then use `reconcile_dns_acme_authority.py`. Its
+default plan mode validates the fixed subscription and tenant, both exact
+tagged child zones and parent
+delegations/CNAMEs, the exact custom role definition, and one new custom-role
+assignment for each expected VM principal before proposing any mutation. Two
+complementary per-principal inventories reject direct assignments anywhere
+in the subscription and inherited assignments from a management-group or root
+scope. A separate role-wide inventory rejects the custom role at any broader,
+peer, other-principal, or unrelated scope. It accepts only the exact legacy
+`CanNotDelete` lock, Reader assignment, DNS Zone Contributor assignment, and
+`_acme-challenge` TXT set. Assignment IDs and TXT
+ETags are captured in the reviewed digest-bound plan; record values are never
+emitted.
+
+```bash
+az vm deallocate \
+  --subscription 'a806949c-240f-4541-8c61-fd97f6d1f953' \
+  --resource-group 'rg-vivolution-sbc-poc-uaenorth' \
+  --name 'viv-sbc-poc-sbc1'
+az vm deallocate \
+  --subscription 'a806949c-240f-4541-8c61-fd97f6d1f953' \
+  --resource-group 'rg-vivolution-sbc-poc-uaenorth' \
+  --name 'viv-sbc-poc-sbc2'
+
+python3 reconcile_dns_acme_authority.py \
+  --expected-subscription-id 'a806949c-240f-4541-8c61-fd97f6d1f953' \
+  --expected-tenant-id 'efc3bcaa-8879-4366-a452-2b8efa76b16a' \
+  --expected-sbc1-principal-id '<reviewed-sbc1-principal-uuid>' \
+  --expected-sbc2-principal-id '<reviewed-sbc2-principal-uuid>'
+```
+
+Review every proposed action and retain `planSha256`. Apply only that fresh
+plan with the exact confirmation phrase:
+
+```bash
+python3 reconcile_dns_acme_authority.py \
+  --mode apply \
+  --expected-subscription-id 'a806949c-240f-4541-8c61-fd97f6d1f953' \
+  --expected-tenant-id 'efc3bcaa-8879-4366-a452-2b8efa76b16a' \
+  --expected-sbc1-principal-id '<reviewed-sbc1-principal-uuid>' \
+  --expected-sbc2-principal-id '<reviewed-sbc2-principal-uuid>' \
+  --approved-plan-sha256 '<planSha256-from-immediately-preceding-plan>' \
+  --confirmation 'RECONCILE-VIVOLUTION-SBC-POC-ACME-AUTHORITY'
+```
+
+While any migration action remains, the helper requires both exact VM identities
+to report Azure `PowerState/deallocated`. It removes each old lock, immediately
+removes DNS Zone Contributor and then Reader, and only then removes the
+ETag-bound stale TXT set. Before every deletion it
+revalidates the complete authority boundary and exact remaining action suffix.
+If interrupted, keep both VMs deallocated, rerun plan mode, review the smaller
+remainder, and approve its new digest; never restart a node while actions
+remain. A final read-only plan must have no actions and status
+`POC_DNS_ACME_AUTHORITY_RECONCILED`; that status proves zero child-zone locks,
+exactly one custom-role assignment per node, and absent challenge record sets.
+Only then restart the VMs. The read-only Azure infrastructure qualifier requires
+this same evidence and permits the already-reconciled nodes to be running.
+
+```bash
+az vm start \
+  --subscription 'a806949c-240f-4541-8c61-fd97f6d1f953' \
+  --resource-group 'rg-vivolution-sbc-poc-uaenorth' \
+  --name 'viv-sbc-poc-sbc1'
+az vm start \
+  --subscription 'a806949c-240f-4541-8c61-fd97f6d1f953' \
+  --resource-group 'rg-vivolution-sbc-poc-uaenorth' \
+  --name 'viv-sbc-poc-sbc2'
+```
+
+Azure RBAC and lock removal are separate control-plane calls, not an atomic
+transaction. Deallocation prevents new IMDS token acquisition but does not
+instantly invalidate a token issued earlier or eliminate Azure RBAC propagation
+latency. The lock-to-Contributor-removal interval is therefore a bounded POC
+migration risk that must run in a controlled window; it is not represented as
+an atomic production migration.
+
 ## Bounded DNS/ACME teardown
 
 Run the DNS teardown **before** deleting the core POC resource group. The
@@ -201,7 +292,7 @@ helper `teardown_dns_acme.py` defaults to read-only `plan` mode and never delete
 or any unrecognized record or zone. It is hard-bound to the reviewed
 subscription, tenant, POC resource-group name/location, shared DNS
 resource-group name, parent-zone name, child-zone names, ownership tags,
-management-lock contract, RBAC roles/principals, record values, and child-zone
+zero-lock contract, custom role/principals, record values, and child-zone
 contents.
 
 Copy the three public addresses and two managed-identity principal IDs from the
@@ -239,14 +330,15 @@ python3 teardown_dns_acme.py \
   --confirmation 'DELETE-VIVOLUTION-SBC-POC-ACME-DNS'
 ```
 
-The ordered deletion removes the nine exact POC parent record sets first,
-then each exact child-zone lock, the node's two direct role assignments, and
-finally the tagged child zone. A final read-only discovery must prove that no
-target remains. If execution is interrupted, rerun plan mode and approve the
-new digest for only the validated remainder. The helper accepts an already
-absent expected target for this recovery path, but rejects altered values,
-unexpected direct RBAC/locks, extra child-zone records, or a delegation whose
-child zone has disappeared and can no longer prove its authoritative servers.
+The ordered deletion removes the nine exact POC parent record sets first, then
+the node's one direct custom-role assignment and tagged child zone, and finally
+the now-unused custom role definition. A final read-only discovery must prove
+that no target remains. If execution is interrupted, rerun plan mode and
+approve the new digest for only the validated remainder. The helper accepts an
+already absent expected target for this recovery path, but rejects altered
+values, any lock, unexpected direct RBAC, extra child-zone records, or a
+delegation whose child zone has disappeared and can no longer prove its
+authoritative servers.
 
 ## Bounded core POC teardown
 

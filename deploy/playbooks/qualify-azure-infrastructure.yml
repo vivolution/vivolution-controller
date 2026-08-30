@@ -1326,6 +1326,7 @@
               - >-
                 {id:id,name:name,location:location,vmSize:hardwareProfile.vmSize,
                 availabilitySetId:availabilitySet.id,identityType:identity.type,
+                identityPrincipalId:identity.principalId,
                 securityType:securityProfile.securityType,
                 secureBootEnabled:securityProfile.uefiSettings.secureBootEnabled,
                 vTpmEnabled:securityProfile.uefiSettings.vTpmEnabled,
@@ -1366,6 +1367,7 @@
                 vm.availabilitySetId | lower ==
                 cp_azure_poc_expected_availability_set_id | lower
               - vm.identityType == 'SystemAssigned'
+              - vm.identityPrincipalId is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
               - vm.securityType == 'TrustedLaunch'
               - vm.secureBootEnabled | bool
               - vm.vTpmEnabled | bool
@@ -1403,6 +1405,73 @@
             expected_nic_id: >-
               /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
               }}/providers/Microsoft.Network/networkInterfaces/{{ item.item.nic_name }}
+
+        - name: Read the exact reconciled POC ACME DNS authority contract
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ playbook_dir }}/../../infra/azure-poc/reconcile_dns_acme_authority.py"
+              - --expected-subscription-id
+              - "{{ cp_azure_subscription_id }}"
+              - --expected-tenant-id
+              - "{{ cp_azure_tenant_id }}"
+              - --expected-sbc1-principal-id
+              - >-
+                {{ (cp_azure_poc_edge_vms_raw.results[0].stdout |
+                    from_json).identityPrincipalId }}
+              - --expected-sbc2-principal-id
+              - >-
+                {{ (cp_azure_poc_edge_vms_raw.results[1].stdout |
+                    from_json).identityPrincipalId }}
+          environment: *azure_cli_environment
+          register: cp_azure_poc_dns_acme_authority_raw
+          changed_when: false
+          check_mode: false
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Parse the sanitized POC ACME DNS authority evidence
+          ansible.builtin.set_fact:
+            cp_azure_poc_dns_acme_authority: >-
+              {{ cp_azure_poc_dns_acme_authority_raw.stdout | from_json }}
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require narrow lock-free ACME authority and absent challenge records
+          ansible.builtin.assert:
+            that:
+              - >-
+                cp_azure_poc_dns_acme_authority.keys() | list | sort ==
+                ['actions', 'authority', 'observed', 'planSha256',
+                 'scope', 'status'] | sort
+              - >-
+                cp_azure_poc_dns_acme_authority.status ==
+                'POC_DNS_ACME_AUTHORITY_RECONCILED'
+              - cp_azure_poc_dns_acme_authority.actions | length == 0
+              - >-
+                cp_azure_poc_dns_acme_authority.observed.childZones |
+                length == 2
+              - >-
+                cp_azure_poc_dns_acme_authority.observed.childZones |
+                map(attribute='name') | list ==
+                ['acme-sbc1.voice.vivolution.ae',
+                 'acme-sbc2.voice.vivolution.ae']
+              - >-
+                cp_azure_poc_dns_acme_authority.observed.childZones |
+                map(attribute='challengeRecordStatus') | list ==
+                ['ABSENT', 'ABSENT']
+              - >-
+                cp_azure_poc_dns_acme_authority.observed.childZones |
+                map(attribute='legacyLockCount') | list == [0, 0]
+              - >-
+                cp_azure_poc_dns_acme_authority.observed.childZones |
+                map(attribute='legacyRoleAssignments') | list == [[], []]
+              - >-
+                cp_azure_poc_dns_acme_authority.observed.childZones |
+                map(attribute='roleAssignmentCount') | list == [1, 1]
+            fail_msg: >-
+              POC ACME authority is not reconciled: final qualification
+              requires no zone locks, only one exact TXT-only custom-role
+              assignment per node, and no _acme-challenge TXT record set.
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
         - name: Read each POC Edge virtual machine instance state
           ansible.builtin.command:

@@ -242,8 +242,12 @@ Each Edge certificate job must receive the exact host-derived delegated zone
 `acme-sbc1.voice.vivolution.ae`). The Azure DNS deployment CNAMEs the public
 challenge name into that isolated zone. This is a durable permission boundary:
 Lego deletes the challenge TXT record set during cleanup, while the managed
-identity's Reader/Contributor roles remain on the child zone. The preflight
-rejects the parent zone, the peer's zone, or any non-derived zone name.
+identity's exact TXT-only custom-role assignment remains on the child zone.
+The role can read the zone and read/write/delete TXT record sets, but cannot
+update/delete the zone or touch any other DNS record type. Child-zone locks are
+forbidden because Azure would inherit them to challenge-record deletion. The
+preflight rejects the parent zone, the peer's zone, or any non-derived zone
+name.
 
 The Edge egress contract permits DNS only to Azure WireServer
 `168.63.129.16`; direct UDP/TCP queries to Azure's public authoritative
@@ -259,6 +263,21 @@ it remains a hard timeout. Initial installation permits only one automatic
 retry after a three-minute managed-identity/RBAC convergence delay. Thus a
 persistent DNS or ACME failure is bounded to two service starts (at most 23
 minutes including the delay), instead of silently creating dozens of orders.
+
+Lego 5 may report a cleanup warning when two authorizations shared one TXT
+record set and the second cleanup observes the first cleanup's 404. Warnings
+are not treated as authority evidence. Before any certificate is staged, a
+fixed managed-identity verifier polls Azure Resource Manager and requires the
+exact child-zone `_acme-challenge` TXT set to be absent; any remaining set,
+authorization failure, redirect, malformed response, or bounded timeout fails
+closed. The verifier never retrieves or logs TXT values or bearer tokens.
+
+Lego 5 writes its bundled ACME response (leaf followed by issuer certificates)
+to `.crt`; `.issuer.crt` is the issuer-only suffix of the same response. The
+renewal helper therefore stages `.crt` alone as the full chain and retains a
+nonempty `.issuer.crt` check only as a pinned Lego-source invariant. Appending
+the issuer file would duplicate intermediates and is explicitly rejected by
+the certificate validator.
 
 ## Edge profile deployment and replacement
 

@@ -113,6 +113,14 @@
     group: root
     mode: '0755'
 
+- name: Install the fail-closed Azure DNS challenge-cleanup verifier
+  ansible.builtin.copy:
+    src: verify_acme_cleanup.py
+    dest: /usr/local/libexec/vivolution-edge/verify-acme-cleanup
+    owner: root
+    group: root
+    mode: '0755'
+
 - name: Install the fixed rollback-capable certificate rotation core
   ansible.builtin.template:
     src: rotate-edge-certificate.py.j2

@@ -25,12 +25,41 @@ param sbc1PrincipalId string
 @description('System-assigned managed-identity principal ID of SBC2.')
 param sbc2PrincipalId string
 
+var edgeAcmeTxtRoleDefinitionGuid = 'c502c211-fd81-49aa-8ec3-45854ecd5e23'
+
+resource edgeAcmeTxtRoleDefinition 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: edgeAcmeTxtRoleDefinitionGuid
+  properties: {
+    roleName: 'Vivolution Edge ACME TXT Record Operator'
+    description: 'Discover one assigned public DNS child zone and manage only its TXT record sets for ACME DNS-01.'
+    type: 'CustomRole'
+    permissions: [
+      {
+        actions: [
+          'Microsoft.Network/dnszones/read'
+          'Microsoft.Network/dnszones/TXT/read'
+          'Microsoft.Network/dnszones/TXT/write'
+          'Microsoft.Network/dnszones/TXT/delete'
+          'Microsoft.ResourceGraph/resources/read'
+        ]
+        notActions: []
+        dataActions: []
+        notDataActions: []
+      }
+    ]
+    assignableScopes: [
+      subscription().id
+    ]
+  }
+}
+
 module dnsAcmeZone 'modules/dns-acme-zone.bicep' = {
   name: 'viv-sbc-poc-dns-acme-zone'
   scope: resourceGroup(dnsResourceGroupName)
   params: {
     cp1PublicIpv4: cp1PublicIpv4
     dnsZoneName: dnsZoneName
+    edgeAcmeTxtRoleDefinitionId: edgeAcmeTxtRoleDefinition.id
     sbc1PrincipalId: sbc1PrincipalId
     sbc1PublicIpv4: sbc1PublicIpv4
     sbc2PrincipalId: sbc2PrincipalId
@@ -49,3 +78,4 @@ output sbc2AcmeZoneScope string = dnsAcmeZone.outputs.sbc2AcmeZoneScope
 output sbc1AcmeChallengeFqdn string = dnsAcmeZone.outputs.sbc1AcmeChallengeFqdn
 output sbc2AcmeChallengeFqdn string = dnsAcmeZone.outputs.sbc2AcmeChallengeFqdn
 output cp1StagingFqdn string = dnsAcmeZone.outputs.cp1StagingFqdn
+output edgeAcmeTxtRoleDefinitionId string = edgeAcmeTxtRoleDefinition.id

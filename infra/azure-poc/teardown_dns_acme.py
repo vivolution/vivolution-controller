@@ -4,8 +4,8 @@
 Planning is the default and is read-only. Applying requires the digest emitted
 by an immediately preceding plan plus an exact confirmation phrase. The helper
 never deletes the shared DNS resource group or parent zone: it can delete only
-the exact POC record sets, per-SBC child-zone locks/RBAC, and tagged child
-zones defined below.
+the exact POC record sets, per-SBC child-zone RBAC, the POC custom role, and
+tagged child zones defined below.
 """
 
 from __future__ import annotations
@@ -37,18 +37,21 @@ ZONE_TAGS = {
     "purpose": "edge-acme-dns01",
     "workload": "vivolution-sbc",
 }
-LOCK_NAME = "prevent-edge-acme-zone-deletion"
-LOCK_LEVEL = "CanNotDelete"
-LOCK_NOTES = {
-    CHILD_ZONES[0]: (
-        "Preserve the durable SBC1 ACME RBAC boundary while allowing TXT record updates."
-    ),
-    CHILD_ZONES[1]: (
-        "Preserve the durable SBC2 ACME RBAC boundary while allowing TXT record updates."
-    ),
+EDGE_ACME_TXT_ROLE_ID = "c502c211-fd81-49aa-8ec3-45854ecd5e23"
+EDGE_ACME_TXT_ROLE_NAME = "Vivolution Edge ACME TXT Record Operator"
+EDGE_ACME_TXT_ROLE_DESCRIPTION = (
+    "Discover one assigned public DNS child zone and manage only its TXT record sets "
+    "for ACME DNS-01."
+)
+EDGE_ACME_TXT_ROLE_ACTIONS = {
+    "Microsoft.Network/dnszones/read",
+    "Microsoft.Network/dnszones/TXT/delete",
+    "Microsoft.Network/dnszones/TXT/read",
+    "Microsoft.Network/dnszones/TXT/write",
+    "Microsoft.ResourceGraph/resources/read",
 }
-READER_ROLE_ID = "acdd72a7-3385-48ef-bd42-f606fba81ae7"
-DNS_ZONE_CONTRIBUTOR_ROLE_ID = "befefa01-2a29-4197-83a8-272ff33ce314"
+LEGACY_READER_ROLE_ID = "acdd72a7-3385-48ef-bd42-f606fba81ae7"
+LEGACY_DNS_ZONE_CONTRIBUTOR_ROLE_ID = "befefa01-2a29-4197-83a8-272ff33ce314"
 CONFIRMATION = "DELETE-VIVOLUTION-SBC-POC-ACME-DNS"
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -356,6 +359,41 @@ def _validate_child_records(records: Any, zone: str, subscription_id: str) -> No
         raise DnsTeardownError(f"child zone {zone} is missing its Azure NS/SOA records")
 
 
+def _validate_role_definition(records: Any, subscription_id: str) -> dict[str, str] | None:
+    if not isinstance(records, list) or len(records) > 1:
+        raise DnsTeardownError("ACME custom-role definition inventory drifted")
+    if not records:
+        return None
+    record = records[0]
+    expected_id = _role_definition_id(subscription_id, EDGE_ACME_TXT_ROLE_ID)
+    expected_scope = f"/subscriptions/{subscription_id}"
+    if not isinstance(record, dict):
+        raise DnsTeardownError("ACME custom-role definition is not an object")
+    permissions = record.get("permissions")
+    if not isinstance(permissions, list) or len(permissions) != 1:
+        raise DnsTeardownError("ACME custom-role permissions drifted")
+    permission = permissions[0]
+    if not isinstance(permission, dict):
+        raise DnsTeardownError("ACME custom-role permission is not an object")
+    actions = permission.get("actions")
+    if (
+        record.get("name") != EDGE_ACME_TXT_ROLE_ID
+        or not _same_id(record.get("id"), expected_id)
+        or record.get("roleName") != EDGE_ACME_TXT_ROLE_NAME
+        or record.get("description") != EDGE_ACME_TXT_ROLE_DESCRIPTION
+        or record.get("roleType") != "CustomRole"
+        or record.get("assignableScopes") != [expected_scope]
+        or not isinstance(actions, list)
+        or len(actions) != len(set(actions))
+        or set(actions) != EDGE_ACME_TXT_ROLE_ACTIONS
+        or permission.get("notActions") != []
+        or permission.get("dataActions") != []
+        or permission.get("notDataActions") != []
+    ):
+        raise DnsTeardownError("ACME custom-role definition drifted")
+    return {"id": expected_id, "name": EDGE_ACME_TXT_ROLE_ID}
+
+
 def _validate_assignments(
     assignments: Any,
     zone: str,
@@ -363,54 +401,176 @@ def _validate_assignments(
     principal_id: str,
     subscription_id: str,
 ) -> list[dict[str, str]]:
+    validated = _validate_node_principal_assignments(
+        assignments,
+        zone=zone,
+        zone_id=zone_id,
+        principal_id=principal_id,
+        subscription_id=subscription_id,
+        allow_legacy=False,
+        require_custom=False,
+    )
+    return sorted(validated.values(), key=lambda value: value["roleDefinitionId"])
+
+
+def _validate_node_principal_assignments(
+    assignments: Any,
+    *,
+    zone: str,
+    zone_id: str,
+    principal_id: str,
+    subscription_id: str,
+    allow_legacy: bool,
+    require_custom: bool,
+) -> dict[str, dict[str, str]]:
+    """Validate every visible assignment for one Edge managed identity."""
     if not isinstance(assignments, list):
         raise DnsTeardownError(f"RBAC inventory for {zone} is not a list")
     expected_roles = {
-        _role_definition_id(subscription_id, READER_ROLE_ID).lower(),
-        _role_definition_id(subscription_id, DNS_ZONE_CONTRIBUTOR_ROLE_ID).lower(),
+        _role_definition_id(subscription_id, EDGE_ACME_TXT_ROLE_ID).lower(): (
+            "CUSTOM_ACME_TXT"
+        )
     }
-    found: set[str] = set()
-    validated = []
+    if allow_legacy:
+        expected_roles.update(
+            {
+                _role_definition_id(subscription_id, LEGACY_READER_ROLE_ID).lower(): (
+                    "LEGACY_READER"
+                ),
+                _role_definition_id(
+                    subscription_id, LEGACY_DNS_ZONE_CONTRIBUTOR_ROLE_ID
+                ).lower(): "LEGACY_DNS_ZONE_CONTRIBUTOR",
+            }
+        )
+    validated: dict[str, dict[str, str]] = {}
     assignment_prefix = f"{zone_id}/providers/Microsoft.Authorization/roleAssignments/".lower()
     for record in assignments:
         if not isinstance(record, dict):
             raise DnsTeardownError(f"RBAC inventory for {zone} contains a non-object")
         role_id = str(record.get("roleDefinitionId", "")).lower()
+        role_kind = expected_roles.get(role_id)
         assignment_id = record.get("id")
         if (
             record.get("principalId") != principal_id
             or record.get("principalType") != "ServicePrincipal"
             or not _same_id(record.get("scope"), zone_id)
-            or role_id not in expected_roles
-            or role_id in found
+            or role_kind is None
+            or role_kind in validated
             or not isinstance(assignment_id, str)
             or not assignment_id.lower().startswith(assignment_prefix)
             or UUID_RE.fullmatch(assignment_id.rsplit("/", 1)[-1].lower()) is None
         ):
-            raise DnsTeardownError(f"child zone {zone} has an unexpected direct RBAC assignment")
-        found.add(role_id)
-        validated.append({"id": assignment_id, "roleDefinitionId": role_id})
-    return sorted(validated, key=lambda value: value["roleDefinitionId"])
+            raise DnsTeardownError(
+                f"Edge principal for {zone} has an unexpected Azure RBAC assignment"
+            )
+        validated[role_kind] = {
+            "id": assignment_id,
+            "roleDefinitionId": role_id,
+            "roleKind": role_kind,
+        }
+    if require_custom and "CUSTOM_ACME_TXT" not in validated:
+        raise DnsTeardownError(
+            f"Edge principal for {zone} lacks its exact ACME TXT assignment"
+        )
+    return validated
 
 
-def _validate_locks(locks: Any, zone: str, zone_id: str) -> list[dict[str, str]]:
+def _validate_global_custom_role_assignments(
+    assignments: Any,
+    subscription_id: str,
+    principals: Mapping[str, str],
+    *,
+    require_all: bool,
+) -> dict[str, dict[str, str]]:
+    """Prove the custom role is assigned only to each node's own child zone."""
+    if not isinstance(assignments, list):
+        raise DnsTeardownError("global ACME custom-role assignment inventory is not a list")
+    expected_role = _role_definition_id(
+        subscription_id, EDGE_ACME_TXT_ROLE_ID
+    ).lower()
+    expected_scopes = {
+        _zone_id(subscription_id, zone).lower(): zone for zone in CHILD_ZONES
+    }
+    validated: dict[str, dict[str, str]] = {}
+    for record in assignments:
+        if not isinstance(record, dict):
+            raise DnsTeardownError(
+                "global ACME custom-role assignment inventory contains a non-object"
+            )
+        scope = str(record.get("scope", "")).lower()
+        zone = expected_scopes.get(scope)
+        assignment_id = record.get("id")
+        assignment_prefix = ""
+        if zone is not None:
+            assignment_prefix = (
+                f"{_zone_id(subscription_id, zone)}/providers/"
+                "Microsoft.Authorization/roleAssignments/"
+            ).lower()
+        if (
+            zone is None
+            or zone in validated
+            or record.get("principalId") != principals[zone]
+            or record.get("principalType") != "ServicePrincipal"
+            or str(record.get("roleDefinitionId", "")).lower() != expected_role
+            or not isinstance(assignment_id, str)
+            or not assignment_id.lower().startswith(assignment_prefix)
+            or UUID_RE.fullmatch(assignment_id.rsplit("/", 1)[-1].lower()) is None
+        ):
+            raise DnsTeardownError(
+                "ACME custom role has an unexpected subscription assignment"
+            )
+        validated[zone] = {"id": assignment_id, "scope": record["scope"]}
+    if require_all and set(validated) != set(CHILD_ZONES):
+        raise DnsTeardownError(
+            "ACME custom role must have exactly one scoped assignment per node"
+        )
+    return validated
+
+
+def _merge_assignment_inventories(*inventories: Any) -> list[dict[str, Any]]:
+    """Union overlapping Azure assignment queries without hiding disagreement."""
+    merged: dict[str, dict[str, Any]] = {}
+    for inventory in inventories:
+        if not isinstance(inventory, list):
+            raise DnsTeardownError("Edge-principal RBAC inventory is not a list")
+        for record in inventory:
+            if not isinstance(record, dict) or not isinstance(record.get("id"), str):
+                raise DnsTeardownError(
+                    "Edge-principal RBAC inventory contains an invalid assignment"
+                )
+            identity = record["id"].lower()
+            signature = (
+                identity,
+                record.get("principalId"),
+                record.get("principalType"),
+                str(record.get("roleDefinitionId", "")).lower(),
+                str(record.get("scope", "")).lower(),
+            )
+            existing = merged.get(identity)
+            if existing is not None:
+                existing_signature = (
+                    str(existing.get("id", "")).lower(),
+                    existing.get("principalId"),
+                    existing.get("principalType"),
+                    str(existing.get("roleDefinitionId", "")).lower(),
+                    str(existing.get("scope", "")).lower(),
+                )
+                if signature != existing_signature:
+                    raise DnsTeardownError(
+                        "overlapping Edge-principal RBAC inventories disagree"
+                    )
+                continue
+            merged[identity] = record
+    return [merged[key] for key in sorted(merged)]
+
+
+def _validate_no_locks(locks: Any, zone: str) -> None:
     if not isinstance(locks, list):
         raise DnsTeardownError(f"lock inventory for {zone} is not a list")
-    expected_id = f"{zone_id}/providers/Microsoft.Authorization/locks/{LOCK_NAME}"
-    if len(locks) > 1:
-        raise DnsTeardownError(f"child zone {zone} has unexpected management locks")
-    if not locks:
-        return []
-    record = locks[0]
-    if (
-        not isinstance(record, dict)
-        or record.get("name") != LOCK_NAME
-        or record.get("level") != LOCK_LEVEL
-        or record.get("notes") != LOCK_NOTES[zone]
-        or not _same_id(record.get("id"), expected_id)
-    ):
-        raise DnsTeardownError(f"management-lock identity drifted for child zone {zone}")
-    return [{"id": expected_id, "name": LOCK_NAME}]
+    if locks:
+        raise DnsTeardownError(
+            f"child zone {zone} has a management lock that would block ACME cleanup"
+        )
 
 
 def _discover(inputs: ExpectedInputs, runner: Runner) -> dict[str, Any]:
@@ -473,6 +633,128 @@ def _discover(inputs: ExpectedInputs, runner: Runner) -> dict[str, Any]:
         "parent DNS zone",
     )
     _validate_parent_zone(parent, subscription_id)
+
+    role_definitions = _json(
+        runner(
+            _base_command(
+                subscription_id,
+                "role",
+                "definition",
+                "list",
+                "--name",
+                EDGE_ACME_TXT_ROLE_ID,
+                "--custom-role-only",
+                "true",
+                "--query",
+                (
+                    "[].{assignableScopes:assignableScopes,description:description,id:id,"
+                    "name:name,permissions:permissions,roleName:roleName,roleType:roleType}"
+                ),
+            )
+        ),
+        "ACME custom-role definition inventory",
+    )
+    role_definition = _validate_role_definition(role_definitions, subscription_id)
+
+    principals = {
+        CHILD_ZONES[0]: inputs.sbc1_principal_id,
+        CHILD_ZONES[1]: inputs.sbc2_principal_id,
+    }
+    if role_definition is None:
+        global_custom_assignments: dict[str, dict[str, str]] = {}
+    else:
+        raw_global_custom_assignments = _json(
+            runner(
+                _base_command(
+                    subscription_id,
+                    "role",
+                    "assignment",
+                    "list",
+                    "--all",
+                    "--role",
+                    EDGE_ACME_TXT_ROLE_ID,
+                    "--fill-principal-name",
+                    "false",
+                    "--fill-role-definition-name",
+                    "false",
+                    "--query",
+                    (
+                        "[].{id:id,principalId:principalId,principalType:principalType,"
+                        "roleDefinitionId:roleDefinitionId,scope:scope}"
+                    ),
+                )
+            ),
+            "global ACME custom-role assignments",
+        )
+        global_custom_assignments = _validate_global_custom_role_assignments(
+            raw_global_custom_assignments,
+            subscription_id,
+            principals,
+            require_all=False,
+        )
+
+    principal_assignment_inventory: dict[str, dict[str, dict[str, str]]] = {}
+    for zone in CHILD_ZONES:
+        direct_principal_assignments = _json(
+            runner(
+                _base_command(
+                    subscription_id,
+                    "role",
+                    "assignment",
+                    "list",
+                    "--all",
+                    "--assignee-object-id",
+                    principals[zone],
+                    "--fill-principal-name",
+                    "false",
+                    "--fill-role-definition-name",
+                    "false",
+                    "--query",
+                    (
+                        "[].{id:id,principalId:principalId,principalType:principalType,"
+                        "roleDefinitionId:roleDefinitionId,scope:scope}"
+                    ),
+                )
+            ),
+            f"direct subscription RBAC assignments for Edge principal {zone}",
+        )
+        inherited_principal_assignments = _json(
+            runner(
+                _base_command(
+                    subscription_id,
+                    "role",
+                    "assignment",
+                    "list",
+                    "--scope",
+                    f"/subscriptions/{subscription_id}",
+                    "--assignee-object-id",
+                    principals[zone],
+                    "--include-inherited",
+                    "--fill-principal-name",
+                    "false",
+                    "--fill-role-definition-name",
+                    "false",
+                    "--query",
+                    (
+                        "[].{id:id,principalId:principalId,principalType:principalType,"
+                        "roleDefinitionId:roleDefinitionId,scope:scope}"
+                    ),
+                )
+            ),
+            f"inherited RBAC assignments for Edge principal {zone}",
+        )
+        complete_principal_assignments = _merge_assignment_inventories(
+            direct_principal_assignments, inherited_principal_assignments
+        )
+        principal_assignment_inventory[zone] = _validate_node_principal_assignments(
+            complete_principal_assignments,
+            zone=zone,
+            zone_id=_zone_id(subscription_id, zone),
+            principal_id=principals[zone],
+            subscription_id=subscription_id,
+            allow_legacy=False,
+            require_custom=False,
+        )
 
     child_zones: dict[str, dict[str, Any]] = {}
     for child_name in CHILD_ZONES:
@@ -572,12 +854,10 @@ def _discover(inputs: ExpectedInputs, runner: Runner) -> dict[str, Any]:
             }
         )
 
-    principals = {
-        CHILD_ZONES[0]: inputs.sbc1_principal_id,
-        CHILD_ZONES[1]: inputs.sbc2_principal_id,
-    }
     child_evidence = []
     child_actions: list[dict[str, str]] = []
+    direct_custom_assignment_ids: dict[str, str] = {}
+    direct_assignment_inventory: dict[str, dict[str, dict[str, str]]] = {}
     for zone in CHILD_ZONES:
         child = child_zones.get(zone)
         if child is None:
@@ -628,6 +908,12 @@ def _discover(inputs: ExpectedInputs, runner: Runner) -> dict[str, Any]:
         validated_assignments = _validate_assignments(
             assignments, zone, zone_id, principals[zone], subscription_id
         )
+        direct_assignment_inventory[zone] = {
+            assignment["roleKind"]: assignment
+            for assignment in validated_assignments
+        }
+        if validated_assignments:
+            direct_custom_assignment_ids[zone] = validated_assignments[0]["id"]
 
         locks = _json(
             runner(
@@ -649,16 +935,11 @@ def _discover(inputs: ExpectedInputs, runner: Runner) -> dict[str, Any]:
             ),
             f"management locks for {zone}",
         )
-        validated_locks = _validate_locks(locks, zone, zone_id)
+        _validate_no_locks(locks, zone)
 
-        # Removing the exact zone lock first ensures Azure permits deletion of
-        # its extension-resource role assignments. Parent records are already
-        # earlier in the plan, so an interrupted run cannot leave live DNS
-        # pointing into an unlocked child zone.
-        for lock in validated_locks:
-            child_actions.append(
-                {"id": lock["id"], "kind": "DELETE_CHILD_ZONE_LOCK", "zone": zone}
-            )
+        # Parent records are already earlier in the plan, so an interrupted
+        # run cannot leave live DNS pointing into a child zone whose narrow
+        # identity assignment has been removed.
         for assignment in validated_assignments:
             child_actions.append(
                 {
@@ -678,14 +959,46 @@ def _discover(inputs: ExpectedInputs, runner: Runner) -> dict[str, Any]:
         child_evidence.append(
             {
                 "id": zone_id,
-                "locks": len(validated_locks),
+                "locks": 0,
                 "name": zone,
                 "roleAssignments": len(validated_assignments),
                 "tags": ZONE_TAGS,
             }
         )
 
+    if role_definition is None and child_zones:
+        raise DnsTeardownError(
+            "ACME custom role disappeared before its child zones were removed"
+        )
+    if set(global_custom_assignments) != set(direct_custom_assignment_ids) or any(
+        not _same_id(
+            global_custom_assignments[zone]["id"], direct_custom_assignment_ids[zone]
+        )
+        for zone in global_custom_assignments
+    ):
+        raise DnsTeardownError(
+            "direct child-zone assignments do not match the global custom-role inventory"
+        )
+    for zone in CHILD_ZONES:
+        direct = direct_assignment_inventory.get(zone, {})
+        principal_wide = principal_assignment_inventory[zone]
+        if set(direct) != set(principal_wide) or any(
+            not _same_id(direct[kind]["id"], principal_wide[kind]["id"])
+            for kind in direct
+        ):
+            raise DnsTeardownError(
+                "direct child-zone assignments do not match the complete Edge-principal inventory"
+            )
+
     actions.extend(child_actions)
+    if role_definition is not None:
+        actions.append(
+            {
+                "id": role_definition["id"],
+                "kind": "DELETE_ACME_ROLE_DEFINITION",
+                "name": role_definition["name"],
+            }
+        )
     scope = {
         "childZones": list(CHILD_ZONES),
         "dnsResourceGroup": DNS_RESOURCE_GROUP,
@@ -693,6 +1006,9 @@ def _discover(inputs: ExpectedInputs, runner: Runner) -> dict[str, Any]:
         "pocResourceGroup": POC_RESOURCE_GROUP,
         "subscriptionId": subscription_id,
         "tenantId": inputs.tenant_id,
+        "roleDefinitionId": _role_definition_id(
+            subscription_id, EDGE_ACME_TXT_ROLE_ID
+        ),
     }
     return {
         "actions": actions,
@@ -749,19 +1065,6 @@ def _apply_action(action: Mapping[str, str], subscription_id: str, runner: Runne
                 "--only-show-errors",
             ]
         )
-    elif kind == "DELETE_CHILD_ZONE_LOCK":
-        runner(
-            [
-                "az",
-                "lock",
-                "delete",
-                "--subscription",
-                subscription_id,
-                "--ids",
-                action["id"],
-                "--only-show-errors",
-            ]
-        )
     elif kind == "DELETE_CHILD_ZONE_ROLE_ASSIGNMENT":
         runner(
             [
@@ -794,6 +1097,22 @@ def _apply_action(action: Mapping[str, str], subscription_id: str, runner: Runne
                 "--only-show-errors",
             ]
         )
+    elif kind == "DELETE_ACME_ROLE_DEFINITION":
+        if action.get("name") != EDGE_ACME_TXT_ROLE_ID:
+            raise DnsTeardownError("plan contains an unexpected custom-role identity")
+        runner(
+            [
+                "az",
+                "role",
+                "definition",
+                "delete",
+                "--subscription",
+                subscription_id,
+                "--name",
+                EDGE_ACME_TXT_ROLE_ID,
+                "--only-show-errors",
+            ]
+        )
     else:  # pragma: no cover - internal plan invariant
         raise DnsTeardownError(f"plan contains unsupported action {kind!r}")
 
@@ -816,15 +1135,14 @@ def apply_teardown(
         raise DnsTeardownError("approved plan digest does not match freshly validated Azure state")
 
     for index, action in enumerate(plan["actions"]):
-        if action["kind"] == "DELETE_CHILD_ZONE":
-            # A zone deletion also removes every record set below it. Re-read
-            # the complete bounded state after this script has removed the
-            # lock/RBAC and require the exact remaining action suffix before
-            # allowing that wider delete.
+        if action["kind"] in {"DELETE_CHILD_ZONE", "DELETE_ACME_ROLE_DEFINITION"}:
+            # Zone and role-definition deletion are wider than leaf cleanup.
+            # Re-read the complete bounded state after prior removals and
+            # require the exact remaining suffix before either wider delete.
             boundary = plan_teardown(inputs, runner=runner)
             if boundary["actions"] != plan["actions"][index:]:
                 raise DnsTeardownError(
-                    "validated state changed before child-zone deletion; generate a new plan"
+                    "validated state changed before a wide DNS-authority deletion; generate a new plan"
                 )
         _apply_action(action, inputs.subscription_id, runner)
 

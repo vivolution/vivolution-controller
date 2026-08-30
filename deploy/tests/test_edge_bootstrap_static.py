@@ -220,6 +220,20 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
         )
         self.assertNotIn("--http", helper)
         self.assertIn("validate-edge-certificate", helper)
+        self.assertIn("verify-acme-cleanup", helper)
+        self.assertIn("Install the fail-closed Azure DNS challenge-cleanup verifier", tasks)
+        self.assertIn("src: verify_acme_cleanup.py", tasks)
+        self.assertLess(
+            helper.index("verify-acme-cleanup"),
+            helper.index('test -s "$certificate_source"'),
+        )
+        self.assertLess(
+            helper.index("verify-acme-cleanup"),
+            helper.index("rotate-edge-certificate"),
+        )
+        self.assertIn('/bin/cat "$certificate_source" >"$certificate_tmp"', helper)
+        self.assertNotIn('/bin/cat "$issuer_source"', helper)
+        self.assertIn('test -s "$issuer_source"', helper)
         self.assertIn('-m 0400 "$key_source"', helper)
         self.assertIn("/bin/chmod 0400", helper)
         self.assertIn("/var/lib/vivolution-edge/certificate-rotation", helper)

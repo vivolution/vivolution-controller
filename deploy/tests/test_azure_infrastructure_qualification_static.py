@@ -226,6 +226,30 @@ class AzureInfrastructureQualificationStaticTests(unittest.TestCase):
         ):
             self.assertIn(value, self.disk_lockdown_text)
 
+    def test_poc_acme_authority_is_qualified_read_only_and_fail_closed(self) -> None:
+        for value in (
+            "identityPrincipalId:identity.principalId",
+            "reconcile_dns_acme_authority.py",
+            "POC_DNS_ACME_AUTHORITY_RECONCILED",
+            "['ABSENT', 'ABSENT']",
+            "map(attribute='legacyLockCount') | list == [0, 0]",
+            "map(attribute='legacyRoleAssignments') | list == [[], []]",
+            "map(attribute='roleAssignmentCount') | list == [1, 1]",
+            "no zone locks, only one exact TXT-only custom-role",
+        ):
+            self.assertIn(value, self.text)
+        task = self.text[
+            self.text.index(
+                "        - name: Read the exact reconciled POC ACME DNS authority contract\n"
+            ) : self.text.index(
+                "        - name: Parse the sanitized POC ACME DNS authority evidence\n"
+            )
+        ]
+        self.assertNotIn("--mode", task)
+        self.assertNotIn("--confirmation", task)
+        self.assertIn("changed_when: false", task)
+        self.assertIn("check_mode: false", task)
+
     def test_every_azure_cli_operation_is_read_only(self) -> None:
         task_sections = self.text.split("\n        - name: ")
         azure_tasks = [section for section in task_sections if "\n              - az\n" in section]

@@ -8,6 +8,7 @@ REPOSITORY = ROOT.parents[1]
 
 class DnsAcmeStaticTests(unittest.TestCase):
     def test_ephemeral_lego_records_do_not_own_the_rbac_scope(self) -> None:
+        entrypoint = (ROOT / "dns-acme.bicep").read_text()
         module = (ROOT / "modules" / "dns-acme-zone.bicep").read_text()
         self.assertIn("Lego deletes the entire TXT record set", module)
         self.assertIn("acme-${sbc1RecordName}.${dnsZoneName}", module)
@@ -15,19 +16,35 @@ class DnsAcmeStaticTests(unittest.TestCase):
         self.assertIn("resource sbc1AcmeZone 'Microsoft.Network/dnsZones@2018-05-01'", module)
         self.assertIn("resource sbc2AcmeZone 'Microsoft.Network/dnsZones@2018-05-01'", module)
         self.assertIn("purpose: 'edge-acme-dns01'", module)
-        self.assertEqual(module.count("name: 'prevent-edge-acme-zone-deletion'"), 2)
-        self.assertEqual(module.count("level: 'CanNotDelete'"), 2)
+        self.assertNotIn("Microsoft.Authorization/locks", module)
+        self.assertIn("A CanNotDelete lock on the zone is intentionally forbidden", module)
         self.assertIn("resource sbc1AcmeDelegation 'Microsoft.Network/dnsZones/NS@2018-05-01'", module)
         self.assertIn("resource sbc2AcmeDelegation 'Microsoft.Network/dnsZones/NS@2018-05-01'", module)
         self.assertIn("resource sbc1AcmeCname 'Microsoft.Network/dnsZones/CNAME@2018-05-01'", module)
         self.assertIn("resource sbc2AcmeCname 'Microsoft.Network/dnsZones/CNAME@2018-05-01'", module)
         self.assertEqual(module.count("sbc1AcmeZone.properties.nameServers["), 4)
         self.assertEqual(module.count("sbc2AcmeZone.properties.nameServers["), 4)
-        self.assertEqual(module.count("scope: sbc1AcmeZone"), 3)
-        self.assertEqual(module.count("scope: sbc2AcmeZone"), 3)
-        self.assertNotIn("scope: sbc1AcmeTxt", module)
-        self.assertNotIn("scope: sbc2AcmeTxt", module)
+        self.assertEqual(module.count("scope: sbc1AcmeZone"), 1)
+        self.assertEqual(module.count("scope: sbc2AcmeZone"), 1)
+        self.assertNotIn("Microsoft.Network/dnsZones/TXT@", module)
         self.assertNotIn("scope: dnsZone\n", module)
+        self.assertIn(
+            "resource edgeAcmeTxtRoleDefinition 'Microsoft.Authorization/roleDefinitions@2022-04-01'",
+            entrypoint,
+        )
+        self.assertIn("c502c211-fd81-49aa-8ec3-45854ecd5e23", entrypoint)
+        for action in (
+            "Microsoft.Network/dnszones/read",
+            "Microsoft.Network/dnszones/TXT/read",
+            "Microsoft.Network/dnszones/TXT/write",
+            "Microsoft.Network/dnszones/TXT/delete",
+            "Microsoft.ResourceGraph/resources/read",
+        ):
+            self.assertEqual(entrypoint.count(action), 1)
+        self.assertNotIn("Microsoft.Network/dnszones/write", entrypoint)
+        self.assertNotIn("Microsoft.Network/dnszones/delete", entrypoint)
+        self.assertNotIn("befefa01-2a29-4197-83a8-272ff33ce314", module)
+        self.assertNotIn("acdd72a7-3385-48ef-bd42-f606fba81ae7", module)
 
     def test_each_edge_is_pinned_to_only_its_derived_acme_zone(self) -> None:
         hosts = (
