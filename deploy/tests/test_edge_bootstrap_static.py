@@ -13,6 +13,27 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
     def read(self, relative_path: str) -> str:
         return (DEPLOY / relative_path).read_text(encoding="utf-8")
 
+    def folded_assertion(self, relative_path: str, needle: str) -> str:
+        lines = self.read(relative_path).splitlines()
+        matches = [index for index, line in enumerate(lines) if needle in line]
+        self.assertEqual(
+            len(matches),
+            1,
+            f"expected one {needle!r} assertion in {relative_path}",
+        )
+        start = next(
+            index
+            for index in range(matches[0], -1, -1)
+            if lines[index] == "      - >-"
+        )
+        end = next(
+            index
+            for index in range(start + 1, len(lines))
+            if lines[index].startswith("      - ")
+            or lines[index].startswith("    fail_msg:")
+        )
+        return " ".join(line.strip() for line in lines[start + 1 : end])
+
     def run_local_assertions(
         self, assertions: list[str], variables: dict[str, object]
     ) -> subprocess.CompletedProcess[str]:
@@ -255,6 +276,111 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
         self.assertIn("destroy table inet vivolution_edge_filter", systemd)
         self.assertNotIn("state: restarted", handler)
         self.assertIn("--file, /etc/nftables.conf", handler)
+
+    def test_live_firewall_tls_port_assertion_is_profile_exact(self) -> None:
+        assertions = [
+            self.folded_assertion(
+                "roles/edge_firewall/tasks/main.yml",
+                "edge_active_firewall.stdout is search('tcp dport 5061",
+            ),
+            self.folded_assertion(
+                "roles/edge_verify/tasks/main.yml",
+                "edge_verify_firewall.stdout is search('tcp dport 5061",
+            ),
+        ]
+        azure_synthetic_nft = """table inet vivolution_edge_filter {
+        set pbx_source_ipv4 {
+                type ipv4_addr
+                flags interval
+                auto-merge
+                elements = { 10.20.1.4 }
+        }
+
+        chain input {
+                type filter hook input priority filter; policy drop;
+                ip saddr @pbx_source_ipv4 tcp dport 15061 ct state new accept
+                ip saddr @pbx_source_ipv4 udp sport 21000-21127 udp dport 20000-20255 accept
+        }
+}"""
+        azure_teams_tls_rule = (
+            "ip saddr @microsoft_signaling_source_ipv4 "
+            "tcp dport 5061 ct state new accept"
+        )
+        azure_direct_nft = azure_synthetic_nft.replace(
+            "ip saddr @pbx_source_ipv4 tcp dport 15061",
+            azure_teams_tls_rule
+            + "\n                ip saddr @pbx_source_ipv4 tcp dport 15061",
+        )
+        azure_synthetic_source_nft = azure_synthetic_nft.replace(
+            "ip saddr @pbx_source_ipv4 tcp dport 15061",
+            "ip saddr @synthetic_teams_source_ipv4 "
+            "tcp dport 5061 ct state new accept"
+            "\n                ip saddr @pbx_source_ipv4 tcp dport 15061",
+        )
+
+        cases = (
+            (
+                "synthetic-empty-accepted",
+                "SYNTHETIC_PRIVATE",
+                [],
+                azure_synthetic_nft,
+                True,
+            ),
+            (
+                "synthetic-empty-rejects-5061",
+                "SYNTHETIC_PRIVATE",
+                [],
+                azure_synthetic_source_nft,
+                False,
+            ),
+            (
+                "direct-requires-5061",
+                "DIRECT_ROUTING",
+                [],
+                azure_direct_nft,
+                True,
+            ),
+            (
+                "direct-rejects-missing-5061",
+                "DIRECT_ROUTING",
+                [],
+                azure_synthetic_nft,
+                False,
+            ),
+            (
+                "synthetic-source-requires-5061",
+                "SYNTHETIC_PRIVATE",
+                ["10.20.1.4/32"],
+                azure_synthetic_source_nft,
+                True,
+            ),
+            (
+                "synthetic-source-rejects-missing-5061",
+                "SYNTHETIC_PRIVATE",
+                ["10.20.1.4/32"],
+                azure_synthetic_nft,
+                False,
+            ),
+        )
+        for name, profile, synthetic_sources, nft_output, accepted in cases:
+            with self.subTest(name=name):
+                completed = self.run_local_assertions(
+                    assertions,
+                    {
+                        "edge_runtime_profile": profile,
+                        "edge_synthetic_teams_source_ipv4_cidrs": synthetic_sources,
+                        "edge_active_firewall": {"stdout": nft_output},
+                        "edge_verify_firewall": {"stdout": nft_output},
+                    },
+                )
+                if accepted:
+                    self.assertEqual(
+                        completed.returncode,
+                        0,
+                        msg=f"{completed.stdout}\n{completed.stderr}",
+                    )
+                else:
+                    self.assertNotEqual(completed.returncode, 0)
 
     def test_template_inventory_contains_no_fabricated_ingress_cidrs(self) -> None:
         variables = self.read("inventories/poc-edge-template/group_vars/all.yml")

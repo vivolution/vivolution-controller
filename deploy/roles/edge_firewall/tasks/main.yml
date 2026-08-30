@@ -149,7 +149,20 @@
       - edge_active_firewall.stdout is search('set pbx_source_ipv4')
       - edge_active_firewall.stdout is search('set control_plane_ipv4')
       - edge_active_firewall.stdout is search('set ntp_server_ipv4')
-      - edge_active_firewall.stdout is search('tcp dport 5061')
+      - >-
+        (
+          (
+            (edge_runtime_profile == 'DIRECT_ROUTING') or
+            (edge_runtime_profile == 'SYNTHETIC_PRIVATE' and
+             edge_synthetic_teams_source_ipv4_cidrs | length > 0)
+          ) and
+          (edge_active_firewall.stdout is search('tcp dport 5061\\b'))
+        ) or
+        (
+          (edge_runtime_profile == 'SYNTHETIC_PRIVATE') and
+          (edge_synthetic_teams_source_ipv4_cidrs | length == 0) and
+          (edge_active_firewall.stdout is not search('tcp dport 5061\\b'))
+        )
       - edge_active_firewall.stdout is search('tcp dport 15061')
       - edge_active_firewall.stdout is search('udp dport 20000-20255')
       - >-
