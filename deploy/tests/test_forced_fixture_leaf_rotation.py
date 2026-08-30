@@ -717,6 +717,8 @@ class ForcedFixtureLeafRotationStaticTests(unittest.TestCase):
         self.assertIn("- 15s", active_leaf_probe)
         self.assertIn("stdin: 'Q'", active_leaf_probe)
         self.assertIn("stdin_add_newline: true", active_leaf_probe)
+        self.assertIn("Require exact OpenSSL SHA-256 fingerprint output", playbook)
+        self.assertIn("(?i)^sha256 fingerprint=", playbook)
         self.assertLess(
             playbook.index("Revalidate an existing exact-request acceptance before any mutation"),
             playbook.index("Prepare or reconcile the durable forced-rotation request"),

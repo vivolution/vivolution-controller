@@ -308,6 +308,17 @@
       changed_when: false
       register: fixture_rotation_active_server_fingerprint_results
 
+    - name: Require exact OpenSSL SHA-256 fingerprint output
+      ansible.builtin.assert:
+        that:
+          - >-
+            item.stdout is
+            match('(?i)^sha256 fingerprint=([0-9a-f]{2}:){31}[0-9a-f]{2}$')
+        fail_msg: OpenSSL returned a malformed served-leaf fingerprint.
+      loop: "{{ fixture_rotation_active_server_fingerprint_results.results }}"
+      loop_control:
+        label: "{{ item.item.item.name }}"
+
     - name: Initialize the active fixture server fingerprint map
       ansible.builtin.set_fact:
         fixture_rotation_active_server_fingerprints: {}
@@ -318,7 +329,7 @@
           {{ fixture_rotation_active_server_fingerprints | combine({
              item.item.item.name:
                (item.stdout |
-                regex_replace('^SHA256 Fingerprint=', '') |
+                regex_replace('(?i)^sha256 fingerprint=', '') |
                 replace(':', '') | lower)
           }) }}
       loop: "{{ fixture_rotation_active_server_fingerprint_results.results }}"
