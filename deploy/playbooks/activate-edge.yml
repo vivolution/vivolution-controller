@@ -590,11 +590,11 @@
               '--manifest-digest', edge_activation_manifest_digest,
               '--runtime-evidence-digest', edge_runtime_evidence.evidenceDigest] }}
       become_user: vivolution-edge-agent
-      register: edge_agent_reconcile
+      register: edge_agent_commit_reconcile
       changed_when: true
       retries: 3
       delay: 2
-      until: edge_agent_reconcile.rc == 0
+      until: edge_agent_commit_reconcile.rc == 0
       when: edge_runtime_apply_healthy | bool
 
     - name: Abort the exact pending Agent candidate after verified safe no-change or rollback
@@ -605,12 +605,43 @@
              ['--sequence', edge_activation_sequence | string,
               '--manifest-digest', edge_activation_manifest_digest] }}
       become_user: vivolution-edge-agent
-      register: edge_agent_reconcile
+      register: edge_agent_abort_reconcile
       changed_when: true
       retries: 3
       delay: 2
-      until: edge_agent_reconcile.rc == 0
+      until: edge_agent_abort_reconcile.rc == 0
       when: edge_runtime_safe_abort | bool
+
+    - name: Select only the Agent reconciliation command that executed
+      ansible.builtin.set_fact:
+        edge_agent_reconcile: >-
+          {{ ((edge_agent_commit_reconcile | default({}))
+              if ((edge_runtime_apply_healthy | bool) and
+                  not (edge_runtime_safe_abort | bool))
+              else ((edge_agent_abort_reconcile | default({}))
+                    if ((edge_runtime_safe_abort | bool) and
+                        not (edge_runtime_apply_healthy | bool))
+                    else {})) }}
+
+    - name: Require one exact successful Agent reconciliation command before parsing
+      ansible.builtin.assert:
+        that:
+          - (edge_runtime_apply_healthy | bool) != (edge_runtime_safe_abort | bool)
+          - edge_agent_reconcile is mapping
+          - edge_agent_reconcile | length > 0
+          - not (edge_agent_reconcile.get('skipped', false) | bool)
+          - edge_agent_reconcile.get('rc', 1) | int == 0
+          - edge_agent_reconcile.get('stdout', '') is string
+          - edge_agent_reconcile.get('stdout', '') | trim | length > 0
+          - >-
+            (edge_runtime_apply_healthy | bool and
+             edge_agent_reconcile == edge_agent_commit_reconcile) or
+            (edge_runtime_safe_abort | bool and
+             edge_agent_reconcile == edge_agent_abort_reconcile)
+        fail_msg: >-
+          Agent reconciliation did not produce exactly one successful executed
+          command result. Pending Agent state is intentionally preserved for
+          exact operator recovery.
 
     - name: Parse the Agent reconciliation evidence
       ansible.builtin.set_fact:

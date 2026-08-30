@@ -13,6 +13,73 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
     def read(self, relative_path: str) -> str:
         return (DEPLOY / relative_path).read_text(encoding="utf-8")
 
+    def evaluate_activation_reconciliation_selection(
+        self, variables: dict[str, object]
+    ) -> dict[str, object]:
+        executable = shutil.which("ansible-playbook")
+        if executable is None:
+            self.skipTest("ansible-playbook is unavailable")
+        first_line = Path(executable).read_text(encoding="utf-8").splitlines()[0]
+        self.assertTrue(first_line.startswith("#!"))
+        ansible_python = first_line[2:]
+        script = r"""
+import json
+import sys
+
+import yaml
+from jinja2.nativetypes import NativeEnvironment
+
+playbook = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+variables = json.loads(sys.argv[2])
+tasks = playbook[0]["tasks"]
+selection = next(
+    item
+    for item in tasks
+    if item.get("name") == "Select only the Agent reconciliation command that executed"
+)
+guard = next(
+    item
+    for item in tasks
+    if item.get("name")
+    == "Require one exact successful Agent reconciliation command before parsing"
+)
+environment = NativeEnvironment(autoescape=False)
+environment.filters["bool"] = bool
+selected = environment.from_string(
+    selection["ansible.builtin.set_fact"]["edge_agent_reconcile"]
+).render(**variables)
+variables["edge_agent_reconcile"] = selected
+assertions = [
+    bool(environment.compile_expression(expression)(**variables))
+    for expression in guard["ansible.builtin.assert"]["that"]
+]
+print(
+    json.dumps(
+        {"assertions": assertions, "selected": selected},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+)
+"""
+        completed = subprocess.run(
+            [
+                ansible_python,
+                "-c",
+                script,
+                str(DEPLOY / "playbooks/activate-edge.yml"),
+                json.dumps(variables, separators=(",", ":")),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f"{completed.stdout}\n{completed.stderr}",
+        )
+        return json.loads(completed.stdout)
+
     def test_install_playbook_adds_runtime_after_native_data_plane(self) -> None:
         playbook = self.read("playbooks/install-edge.yml")
         self.assertIn("role: edge_runtime_install", playbook)
@@ -674,6 +741,115 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
         self.assertIn("PENDING_ABORTED_ACTIVE_LKG_PRESERVED", playbook)
         self.assertIn("Pending Agent state is", playbook)
         self.assertNotIn("signed-envelope.json\"\n        dest: \"{{ edge_activation_local", playbook)
+
+    def test_activation_selects_only_the_executed_reconciliation_register(self) -> None:
+        playbook = self.read("playbooks/activate-edge.yml")
+        commit_start = playbook.index(
+            "Commit the exact pending Agent candidate only after healthy runtime evidence"
+        )
+        abort_start = playbook.index(
+            "Abort the exact pending Agent candidate after verified safe no-change or rollback"
+        )
+        selection_start = playbook.index(
+            "Select only the Agent reconciliation command that executed"
+        )
+        parse_start = playbook.index("Parse the Agent reconciliation evidence")
+        commit_task = playbook[commit_start:abort_start]
+        abort_task = playbook[abort_start:selection_start]
+        selection = playbook[selection_start:parse_start]
+
+        self.assertIn("register: edge_agent_commit_reconcile", commit_task)
+        self.assertIn("until: edge_agent_commit_reconcile.rc == 0", commit_task)
+        self.assertNotIn("register: edge_agent_reconcile", commit_task)
+        self.assertIn("register: edge_agent_abort_reconcile", abort_task)
+        self.assertIn("until: edge_agent_abort_reconcile.rc == 0", abort_task)
+        self.assertNotIn("register: edge_agent_reconcile", abort_task)
+        self.assertIn("else {}", selection)
+        self.assertIn(
+            "edge_agent_reconcile == edge_agent_commit_reconcile", selection
+        )
+        self.assertIn(
+            "edge_agent_reconcile == edge_agent_abort_reconcile", selection
+        )
+        self.assertIn("not (edge_agent_reconcile.get('skipped', false) | bool)", selection)
+        self.assertLess(commit_start, abort_start)
+        self.assertLess(abort_start, selection_start)
+        self.assertLess(selection_start, parse_start)
+
+    def test_activation_reconciliation_selection_survives_skipped_sibling_task(
+        self,
+    ) -> None:
+        commit_stdout = json.dumps(
+            {
+                "activeManifestDigest": "sha256:" + "a" * 64,
+                "activeSequence": 1,
+                "healthGates": [],
+                "localHealthGatePlanDigest": "sha256:" + "b" * 64,
+                "runtimeEvidenceDigest": "sha256:" + "c" * 64,
+                "runtimeReleaseDigest": "sha256:" + "d" * 64,
+                "status": "PENDING_COMMITTED_AFTER_SIGNED_LOCAL_HEALTH",
+            },
+            separators=(",", ":"),
+        )
+        abort_stdout = json.dumps(
+            {
+                "abortedManifestDigest": "sha256:" + "e" * 64,
+                "abortedSequence": 2,
+                "status": "PENDING_ABORTED_ACTIVE_LKG_PRESERVED",
+            },
+            separators=(",", ":"),
+        )
+        commit_result = {
+            "changed": True,
+            "rc": 0,
+            "stderr": "",
+            "stdout": commit_stdout,
+        }
+        abort_result = {
+            "changed": True,
+            "rc": 0,
+            "stderr": "",
+            "stdout": abort_stdout,
+        }
+        skipped = {
+            "changed": False,
+            "skip_reason": "Conditional result was False",
+            "skipped": True,
+        }
+
+        committed = self.evaluate_activation_reconciliation_selection(
+            {
+                "edge_agent_abort_reconcile": skipped,
+                "edge_agent_commit_reconcile": commit_result,
+                "edge_runtime_apply_healthy": True,
+                "edge_runtime_safe_abort": False,
+            }
+        )
+        self.assertEqual(committed["selected"], commit_result)
+        self.assertTrue(all(committed["assertions"]))
+
+        aborted = self.evaluate_activation_reconciliation_selection(
+            {
+                "edge_agent_abort_reconcile": abort_result,
+                "edge_agent_commit_reconcile": skipped,
+                "edge_runtime_apply_healthy": False,
+                "edge_runtime_safe_abort": True,
+            }
+        )
+        self.assertEqual(aborted["selected"], abort_result)
+        self.assertTrue(all(aborted["assertions"]))
+
+        for healthy, safe_abort in ((False, False), (True, True)):
+            ambiguous = self.evaluate_activation_reconciliation_selection(
+                {
+                    "edge_agent_abort_reconcile": abort_result,
+                    "edge_agent_commit_reconcile": commit_result,
+                    "edge_runtime_apply_healthy": healthy,
+                    "edge_runtime_safe_abort": safe_abort,
+                }
+            )
+            self.assertEqual(ambiguous["selected"], {})
+            self.assertFalse(all(ambiguous["assertions"]))
 
     def test_direct_routing_requires_replacement_generation_and_preserves_predecessor(self) -> None:
         tasks = self.read("roles/edge_runtime_install/tasks/main.yml")
