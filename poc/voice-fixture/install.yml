@@ -1,0 +1,8 @@
+---
+- name: Install the isolated Vivolution no-PSTN voice fixture
+  hosts: fixture_controller
+  become: true
+  gather_facts: true
+  serial: 1
+  roles:
+    - role: voice_fixture

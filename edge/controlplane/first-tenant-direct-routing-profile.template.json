@@ -1,0 +1,79 @@
+{
+  "acceptedState": null,
+  "activationTtlSeconds": 1800,
+  "apiVersion": "edge.vivolution.ae/control-plane-profile/v0.1",
+  "capacity": {
+    "maxBandwidthKbps": 6400,
+    "maxCallsPerSecond": 5,
+    "maxConcurrentSessions": 50,
+    "reservedConcurrentSessions": 25
+  },
+  "deploymentMode": "DIRECT_ROUTING",
+  "kind": "FirstTenantDirectRoutingProfile",
+  "media": {
+    "codecs": [
+      "PCMA",
+      "PCMU"
+    ],
+    "maxSessions": 50,
+    "rtcpMux": false
+  },
+  "microsoftTargets": [
+    {
+      "fqdn": "sip.pstnhub.microsoft.com",
+      "tlsPort": 5061,
+      "transport": "TLS"
+    },
+    {
+      "fqdn": "sip2.pstnhub.microsoft.com",
+      "tlsPort": 5061,
+      "transport": "TLS"
+    },
+    {
+      "fqdn": "sip3.pstnhub.microsoft.com",
+      "tlsPort": 5061,
+      "transport": "TLS"
+    }
+  ],
+  "pbxConnector": {
+    "mediaDestinationPortEnd": 30127,
+    "mediaDestinationPortStart": 30000,
+    "optionsIntervalSeconds": 60,
+    "remoteHost": "replace-with-real-pbx-fqdn",
+    "remotePort": 5061,
+    "sourceIpv4Cidrs": [
+      "0.0.0.0/32"
+    ],
+    "tlsServerName": "replace-with-real-pbx-fqdn"
+  },
+  "routing": {
+    "calledNumberPrefix": "+971",
+    "priority": 100
+  },
+  "secretReferences": {
+    "pbxClientCa": {
+      "offlineValiditySeconds": 31536000,
+      "secretRefId": "replace-with-direct-pbx-ca-bundle-ref",
+      "version": "replace-with-direct-pbx-ca-bundle-version"
+    },
+    "pbxClientIdentity": {
+      "offlineValiditySeconds": 31536000,
+      "secretRefId": "replace-with-direct-edge-pbx-client-identity-ref",
+      "version": "replace-with-direct-edge-pbx-client-identity-version"
+    },
+    "pbxServerIdentity": {
+      "offlineValiditySeconds": 31536000,
+      "secretRefId": "replace-with-direct-edge-pbx-server-identity-ref",
+      "version": "replace-with-direct-edge-pbx-server-identity-version"
+    }
+  },
+  "sequence": 1,
+  "targetAuthority": {
+    "allocationId": "allocation-vivolution-uaen-poc",
+    "clusterId": "cluster-uaen-poc-01",
+    "customerAccountId": "vivolution-technologies-llc",
+    "m365TenantId": "00000000-0000-0000-0000-000000000000",
+    "serviceInstanceId": "service-vivolution-pbx-relay",
+    "tenantContextId": "tenant-vivolution-poc"
+  }
+}

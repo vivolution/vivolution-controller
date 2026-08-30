@@ -1,0 +1,39 @@
+[Unit]
+Description=Vivolution isolated no-PSTN SIPp Teams-side fixture
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Container]
+Image={{ voice_fixture_sipp_image_id }}
+Pull=never
+ContainerName=vivolution-voice-fixture-sipp
+Network=host
+User=10002:10002
+Volume={{ voice_fixture_pki_root }}:/run/fixture-pki:ro
+Volume={{ voice_fixture_state_root }}/sipp:/results:rw
+ReadOnly=true
+Tmpfs=/tmp:rw,size=16m,mode=1777
+DropCapability=all
+NoNewPrivileges=true
+Exec=/opt/fixture/bin/fixture_sipp.py uas
+
+[Service]
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=60
+TimeoutStopSec=15
+MemoryMax=256M
+CPUQuota=50%
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8
+IPAddressAllow={{ voice_fixture_controller_ipv4 }}/32
+IPAddressAllow={{ voice_fixture_edge_subnet_ipv4 }}
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET
+SocketBindDeny=any
+SocketBindAllow=ipv4:tcp:{{ voice_fixture_sipp_uas_tls_port }}
+SocketBindAllow=ipv4:udp:{{ voice_fixture_sipp_uas_rtp_port }}
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

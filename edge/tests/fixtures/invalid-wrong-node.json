@@ -1,0 +1,16 @@
+{
+  "description": "An envelope signed for SBC1 is presented to SBC2.",
+  "baseEnvelope": "../../schema/examples/v0.1-one-tenant-pbx-relay.json",
+  "mutations": [],
+  "context": {
+    "expectedClusterId": "cluster-uaen-poc-01",
+    "expectedNodeId": "sbc2",
+    "expectedGeneration": 1,
+    "expectedTenantContextId": "tenant-vivolution-poc",
+    "expectedAllocationId": "allocation-vivolution-uaen-poc",
+    "acceptedSequence": 6,
+    "acceptedDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "now": "2026-08-30T04:45:00Z"
+  },
+  "expectedError": "wrong target"
+}

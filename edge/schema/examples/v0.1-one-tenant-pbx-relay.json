@@ -1,0 +1,289 @@
+{
+  "apiVersion": "edge.vivolution.ae/v0.1",
+  "kind": "SignedDesiredState",
+  "manifestDigest": "sha256:31825c369dfedf928effd0c16191ed986e4964c41a9d890d4bf6e2951d98dc72",
+  "manifest": {
+    "manifestId": "manifest-vivolution-sbc1-000007",
+    "target": {
+      "scope": "TENANT",
+      "clusterId": "cluster-uaen-poc-01",
+      "nodeId": "sbc1",
+      "slot": "A",
+      "generation": 1,
+      "tenant": {
+        "customerAccountId": "vivolution-technologies-llc",
+        "m365TenantId": "9b7a1c2d-3e4f-4a5b-8c6d-7e8f9012abcd",
+        "tenantContextId": "tenant-vivolution-poc",
+        "serviceInstanceId": "service-vivolution-pbx-relay",
+        "allocationId": "allocation-vivolution-uaen-poc"
+      }
+    },
+    "lifecycle": "ACTIVE",
+    "sequence": 7,
+    "issuedAt": "2026-08-30T04:30:00Z",
+    "expiresAt": "2026-08-30T05:00:00Z",
+    "previousDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "resourceSet": {
+      "mode": "COMPLETE",
+      "cleanupIntent": null,
+      "artifacts": [
+        {
+          "artifactId": "artifact-opensips-vivo-000007",
+          "scope": "TENANT",
+          "tenantContextId": "tenant-vivolution-poc",
+          "allocationId": "allocation-vivolution-uaen-poc",
+          "kind": "OPENSIPS_TENANT_CONFIG",
+          "mediaType": "application/json",
+          "sizeBytes": 8192,
+          "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "fetchPath": "/v0.1/artifacts/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "applyOrder": 10
+        },
+        {
+          "artifactId": "artifact-rtpengine-vivo-000007",
+          "scope": "TENANT",
+          "tenantContextId": "tenant-vivolution-poc",
+          "allocationId": "allocation-vivolution-uaen-poc",
+          "kind": "RTPENGINE_TENANT_CONFIG",
+          "mediaType": "application/toml",
+          "sizeBytes": 2048,
+          "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "fetchPath": "/v0.1/artifacts/sha256/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "applyOrder": 20
+        },
+        {
+          "artifactId": "artifact-nftables-vivo-000007",
+          "scope": "TENANT",
+          "tenantContextId": "tenant-vivolution-poc",
+          "allocationId": "allocation-vivolution-uaen-poc",
+          "kind": "NFTABLES_TENANT_POLICY",
+          "mediaType": "application/json",
+          "sizeBytes": 4096,
+          "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "fetchPath": "/v0.1/artifacts/sha256/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "applyOrder": 30
+        }
+      ],
+      "secretReferences": [
+        {
+          "secretRefId": "secret-pbx-client-identity",
+          "scope": "TENANT",
+          "tenantContextId": "tenant-vivolution-poc",
+          "allocationId": "allocation-vivolution-uaen-poc",
+          "purpose": "PBX_CLIENT_MTLS_IDENTITY",
+          "version": "version-2026-08-30-01",
+          "requiredOnNode": true,
+          "offlineValiditySeconds": 604800
+        },
+        {
+          "secretRefId": "secret-pbx-server-identity",
+          "scope": "TENANT",
+          "tenantContextId": "tenant-vivolution-poc",
+          "allocationId": "allocation-vivolution-uaen-poc",
+          "purpose": "PBX_SERVER_TLS_IDENTITY",
+          "version": "version-2026-08-30-01",
+          "requiredOnNode": true,
+          "offlineValiditySeconds": 604800
+        },
+        {
+          "secretRefId": "secret-pbx-client-ca",
+          "scope": "TENANT",
+          "tenantContextId": "tenant-vivolution-poc",
+          "allocationId": "allocation-vivolution-uaen-poc",
+          "purpose": "PBX_CLIENT_CA_BUNDLE",
+          "version": "version-2026-08-30-01",
+          "requiredOnNode": true,
+          "offlineValiditySeconds": 604800
+        }
+      ],
+      "resources": [
+        {
+          "type": "tenant.connector",
+          "resourceId": "connector-vivolution-pbx",
+          "tenantContextId": "tenant-vivolution-poc",
+          "allocationId": "allocation-vivolution-uaen-poc",
+          "artifactIds": [
+            "artifact-opensips-vivo-000007"
+          ],
+      "spec": {
+        "role": "PBX",
+        "transport": "TLS",
+        "remoteHost": "pbx.vivolution.ae",
+        "remotePort": 5061,
+        "mediaDestinationPortStart": 30000,
+        "mediaDestinationPortEnd": 30127,
+        "tlsServerName": "pbx.vivolution.ae",
+            "sourceCidrs": [
+              "203.0.113.10/32"
+            ],
+            "authentication": "MTLS_AND_IP_ACL",
+            "credentialSecretRef": "secret-pbx-client-identity",
+            "optionsIntervalSeconds": 60
+          }
+        },
+        {
+          "type": "tenant.listener",
+          "resourceId": "listener-vivolution-pbx",
+          "tenantContextId": "tenant-vivolution-poc",
+          "allocationId": "allocation-vivolution-uaen-poc",
+          "artifactIds": [
+            "artifact-opensips-vivo-000007",
+            "artifact-nftables-vivo-000007"
+          ],
+          "spec": {
+            "role": "PBX",
+            "transport": "TLS",
+            "bindAddress": "0.0.0.0",
+            "port": 15061,
+            "allowedSourceCidrs": [
+              "203.0.113.10/32"
+            ],
+            "certificateSecretRef": "secret-pbx-server-identity",
+            "mutualTls": true,
+            "clientCaSecretRef": "secret-pbx-client-ca"
+          }
+        },
+        {
+          "type": "tenant.route",
+          "resourceId": "route-vivolution-teams-to-pbx",
+          "tenantContextId": "tenant-vivolution-poc",
+          "allocationId": "allocation-vivolution-uaen-poc",
+          "artifactIds": [
+            "artifact-opensips-vivo-000007"
+          ],
+          "spec": {
+            "direction": "TEAMS_TO_PBX",
+            "priority": 100,
+            "calledNumberPrefix": "+971",
+            "connectorRef": "connector-vivolution-pbx",
+            "enabled": true
+          }
+        },
+        {
+          "type": "tenant.route",
+          "resourceId": "route-vivolution-pbx-to-teams",
+          "tenantContextId": "tenant-vivolution-poc",
+          "allocationId": "allocation-vivolution-uaen-poc",
+          "artifactIds": [
+            "artifact-opensips-vivo-000007"
+          ],
+          "spec": {
+            "direction": "PBX_TO_TEAMS",
+            "priority": 100,
+            "calledNumberPrefix": "+971",
+            "connectorRef": "connector-vivolution-pbx",
+            "enabled": true
+          }
+        },
+        {
+          "type": "tenant.media",
+          "resourceId": "media-vivolution-rtpengine",
+          "tenantContextId": "tenant-vivolution-poc",
+          "allocationId": "allocation-vivolution-uaen-poc",
+          "artifactIds": [
+            "artifact-rtpengine-vivo-000007",
+            "artifact-nftables-vivo-000007"
+          ],
+          "spec": {
+            "engine": "RTPENGINE",
+            "unitKey": "rtp-vivolution-poc",
+            "advertisedAddress": "198.51.100.20",
+            "portStart": 20000,
+            "portEnd": 20255,
+            "rtcpMux": false,
+            "codecs": [
+              "PCMA",
+              "PCMU"
+            ],
+            "maxSessions": 50
+          }
+        },
+        {
+          "type": "tenant.capacity",
+          "resourceId": "capacity-vivolution-poc",
+          "tenantContextId": "tenant-vivolution-poc",
+          "allocationId": "allocation-vivolution-uaen-poc",
+          "artifactIds": [
+            "artifact-opensips-vivo-000007",
+            "artifact-rtpengine-vivo-000007"
+          ],
+          "spec": {
+            "reservedConcurrentSessions": 25,
+            "maxConcurrentSessions": 50,
+            "maxCallsPerSecond": 5,
+            "maxBandwidthKbps": 6400
+          }
+        }
+      ]
+    },
+    "healthGates": [
+      {
+        "gateId": "gate-artifact-digests",
+        "type": "ARTIFACT_DIGESTS",
+        "tenantContextId": "tenant-vivolution-poc",
+        "allocationId": "allocation-vivolution-uaen-poc",
+      "resourceRefs": [
+        "connector-vivolution-pbx",
+        "listener-vivolution-pbx",
+        "route-vivolution-teams-to-pbx",
+        "route-vivolution-pbx-to-teams",
+        "media-vivolution-rtpengine",
+        "capacity-vivolution-poc"
+      ],
+        "timeoutSeconds": 30,
+        "maxAttempts": 1,
+        "onFailure": "ROLLBACK_TO_TARGET"
+      },
+      {
+        "gateId": "gate-opensips-config",
+        "type": "OPENSIPS_CONFIG",
+        "tenantContextId": "tenant-vivolution-poc",
+        "allocationId": "allocation-vivolution-uaen-poc",
+        "resourceRefs": [
+          "connector-vivolution-pbx",
+          "listener-vivolution-pbx",
+          "route-vivolution-teams-to-pbx",
+          "route-vivolution-pbx-to-teams"
+        ],
+        "timeoutSeconds": 30,
+        "maxAttempts": 1,
+        "onFailure": "ROLLBACK_TO_TARGET"
+      },
+      {
+        "gateId": "gate-rtpengine-ready",
+        "type": "RTPENGINE_READY",
+        "tenantContextId": "tenant-vivolution-poc",
+        "allocationId": "allocation-vivolution-uaen-poc",
+        "resourceRefs": [
+          "media-vivolution-rtpengine"
+        ],
+        "timeoutSeconds": 30,
+        "maxAttempts": 3,
+        "onFailure": "ROLLBACK_TO_TARGET"
+      }
+    ],
+    "rollbackTarget": {
+      "scope": "TENANT",
+      "clusterId": "cluster-uaen-poc-01",
+      "nodeId": "sbc1",
+      "generation": 1,
+      "tenantContextId": "tenant-vivolution-poc",
+      "allocationId": "allocation-vivolution-uaen-poc",
+      "sequence": 6,
+      "manifestDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "artifactDigests": [
+        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      ]
+    }
+  },
+  "signatures": [
+    {
+      "keyId": "edge-signing-key-2026-01",
+      "algorithm": "Ed25519",
+      "createdAt": "2026-08-30T04:30:00Z",
+      "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    }
+  ]
+}

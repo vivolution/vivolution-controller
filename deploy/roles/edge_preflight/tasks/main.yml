@@ -1,0 +1,206 @@
+---
+- name: Require the exact Debian edge platform
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Debian'
+      - ansible_facts['distribution_major_version'] == '13'
+      - ansible_facts['architecture'] == 'x86_64'
+      - ansible_facts['pkg_mgr'] == 'apt'
+      - ansible_facts['service_mgr'] == 'systemd'
+      - ansible_facts['default_ipv4']['address'] | default('') | length > 0
+      - ansible_facts['default_ipv4']['interface'] | default('') is match('^[A-Za-z0-9_.:-]+$')
+    fail_msg: The Open Edge bootstrap requires Debian 13 AMD64 with systemd and a primary IPv4 address.
+
+- name: Require the immutable upstream package contract
+  ansible.builtin.assert:
+    that:
+      - edge_opensips_version_required == '3.6.8-1'
+      - edge_rtpengine_version_required == '26.0.1.22-1~bpo13+1'
+      - edge_opensips_keyring_sha256 | length == 64
+      - edge_rtpengine_keyring_deb_sha256 | length == 64
+      - edge_rtpengine_keyring_sha256 | length == 64
+      - edge_lego_version_required == '5.4.0'
+      - edge_lego_linux_amd64_archive_sha256 == 'd3adf89392d606ce84d485c1cc20832edd42ace6ff9ced9dd3670d9d8b8aca38'
+    fail_msg: The edge playbook package pins or trust anchors were changed from the qualified contract.
+
+- name: Resolve the effective private media address
+  ansible.builtin.set_fact:
+    edge_effective_private_ipv4: >-
+      {{ edge_private_ipv4 |
+         default(ansible_facts['default_ipv4']['address'], true) }}
+
+- name: Validate scalar edge inputs
+  ansible.builtin.assert:
+    that:
+      - edge_expected_hostname is match('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+      - edge_ssh_allowed_user is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - edge_ssh_allowed_user == ansible_user
+      - edge_public_ipv4 | default('') | length > 0
+      - edge_tls_signaling_port | int == 5061
+      - edge_pbx_tls_signaling_port | int == 15061
+      - edge_rtpengine_ng_port | int == 2223
+      - edge_rtpengine_cli_port | int == 2224
+      - edge_rtp_port_start | int == 20000
+      - edge_rtp_port_end | int == 20255
+      - edge_pbx_media_destination_port_start is number
+      - edge_pbx_media_destination_port_end is number
+      - edge_pbx_media_destination_port_start | int >= 1024
+      - edge_pbx_media_destination_port_end | int <= 65535
+      - edge_pbx_media_destination_port_start | int % 2 == 0
+      - edge_pbx_media_destination_port_end | int % 2 == 1
+      - edge_pbx_media_destination_port_start | int <= edge_pbx_media_destination_port_end | int
+      - edge_pbx_media_destination_port_end | int - edge_pbx_media_destination_port_start | int + 1 <= 4096
+      - >-
+        not (edge_pbx_media_destination_port_start | int <= 2223 and
+             edge_pbx_media_destination_port_end | int >= 2223)
+      - >-
+        not (edge_pbx_media_destination_port_start | int <= 2224 and
+             edge_pbx_media_destination_port_end | int >= 2224)
+      - >-
+        not (edge_pbx_media_destination_port_start | int <= 5061 and
+             edge_pbx_media_destination_port_end | int >= 5061)
+      - >-
+        not (edge_pbx_media_destination_port_start | int <= 15061 and
+             edge_pbx_media_destination_port_end | int >= 15061)
+      - edge_journal_max_use is match('^[1-9][0-9]*[MGT]$')
+      - edge_dns_probe_name is match('^[A-Za-z0-9.-]+$')
+      - edge_perform_reboot_check is boolean
+      - edge_runtime_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING']
+      - edge_azure_wire_server_ipv4 | string == '168.63.129.16'
+      - edge_azure_imds_ipv4 | string == '169.254.169.254'
+      - edge_acme_email is match('^[A-Za-z0-9.!#$%&''*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+$')
+      - edge_acme_node_fqdn is match('^' ~ edge_expected_hostname ~ '\\.[a-z0-9.-]+$')
+      - edge_acme_wildcard_fqdn == '*.' ~ edge_acme_node_fqdn
+      - edge_azure_subscription_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - edge_azure_tenant_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - edge_azure_dns_resource_group is match('^[A-Za-z0-9._()/-]{1,90}$')
+      - edge_azure_dns_zone is match('^[a-z0-9](?:[a-z0-9.-]{1,251}[a-z0-9])$')
+      - edge_azure_dns_zone == 'acme-' ~ edge_acme_node_fqdn
+      - edge_acme_certificate_key_type == 'rsa2048'
+      - >-
+        edge_microsoft_tls12_cipher_list ==
+        'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256'
+      - >-
+        edge_microsoft_media_processor_remote_port_ranges ==
+        ['3478-3481', '49152-53247']
+    fail_msg: One or more edge host, port, media-range, or reboot inputs are unsafe.
+
+- name: Bind the PBX media destination range to the selected runtime profile
+  ansible.builtin.assert:
+    that:
+      - >-
+        (edge_runtime_profile == 'SYNTHETIC_PRIVATE' and
+         edge_pbx_media_destination_port_start | int == 21000 and
+         edge_pbx_media_destination_port_end | int == 21127) or
+        (edge_runtime_profile == 'DIRECT_ROUTING' and
+         edge_pbx_media_destination_port_start | int != 21000 and
+         edge_pbx_media_destination_port_end | int != 21127 and
+         edge_pbx_media_destination_port_end | int -
+         edge_pbx_media_destination_port_start | int + 1 >= 100)
+    fail_msg: >-
+      Synthetic requires the exact CP1 PBX range 21000-21127. Direct Routing
+      requires an explicit non-fixture PBX destination range with at least two
+      UDP ports for each of the 50 reviewed non-muxed POC sessions.
+
+- name: Require typed and bounded source lists
+  ansible.builtin.assert:
+    that:
+      - edge_admin_source_ipv4_cidrs is sequence
+      - edge_admin_source_ipv4_cidrs is not string
+      - edge_admin_source_ipv4_cidrs | length > 0
+      - edge_microsoft_signaling_source_ipv4_cidrs is sequence
+      - edge_microsoft_signaling_source_ipv4_cidrs is not string
+      - edge_microsoft_signaling_source_ipv4_cidrs | length > 0
+      - edge_microsoft_media_source_ipv4_cidrs is sequence
+      - edge_microsoft_media_source_ipv4_cidrs is not string
+      - edge_microsoft_media_source_ipv4_cidrs | length > 0
+      - edge_synthetic_teams_source_ipv4_cidrs is sequence
+      - edge_synthetic_teams_source_ipv4_cidrs is not string
+      - edge_pbx_source_ipv4_cidrs is sequence
+      - edge_pbx_source_ipv4_cidrs is not string
+      - edge_pbx_source_ipv4_cidrs | length > 0
+      - edge_control_plane_ipv4_cidrs == ['10.20.1.4/32']
+      - >-
+        edge_ntp_server_ipv4_cidrs ==
+        ['162.159.200.1/32', '162.159.200.123/32']
+    fail_msg: Administration, Microsoft, and first-tenant PBX source CIDRs are mandatory.
+
+- name: Validate the public media address
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - >-
+        import ipaddress,sys;
+        value=ipaddress.ip_address(sys.argv[1]);
+        assert value.version == 4 and value.is_global
+      - "{{ edge_public_ipv4 }}"
+  changed_when: false
+
+- name: Validate the private media address
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - >-
+        import ipaddress,sys;
+        value=ipaddress.ip_address(sys.argv[1]);
+        assert value.version == 4 and not value.is_unspecified and
+        not value.is_loopback and not value.is_multicast
+      - "{{ edge_effective_private_ipv4 }}"
+  changed_when: false
+
+- name: Validate every declared ingress CIDR
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - >-
+        import ipaddress,sys;
+        value=ipaddress.ip_network(sys.argv[1], strict=True);
+        assert value.version == 4 and value.prefixlen >= 8 and
+        not value.is_multicast and not value.network_address.is_unspecified and
+        not value.network_address.is_loopback
+      - "{{ item }}"
+  loop: >-
+    {{ edge_admin_source_ipv4_cidrs +
+       edge_microsoft_signaling_source_ipv4_cidrs +
+       edge_microsoft_media_source_ipv4_cidrs +
+       edge_synthetic_teams_source_ipv4_cidrs +
+       edge_pbx_source_ipv4_cidrs +
+       edge_control_plane_ipv4_cidrs +
+       edge_ntp_server_ipv4_cidrs }}
+  loop_control:
+    label: "{{ item }}"
+  changed_when: false
+
+- name: Require globally routable Microsoft endpoint CIDRs
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - >-
+        import ipaddress,sys;
+        value=ipaddress.ip_network(sys.argv[1], strict=True);
+        assert value.version == 4 and value.is_global
+      - "{{ item }}"
+  loop: >-
+    {{ edge_microsoft_signaling_source_ipv4_cidrs +
+       edge_microsoft_media_source_ipv4_cidrs }}
+  loop_control:
+    label: "{{ item }}"
+  changed_when: false
+
+- name: Validate the optional DHCP server address
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - >-
+        import ipaddress,sys;
+        value=ipaddress.ip_address(sys.argv[1]);
+        assert value.version == 4 and not value.is_unspecified and
+        not value.is_multicast
+      - "{{ edge_firewall_dhcp_server_ipv4 }}"
+  when: edge_firewall_dhcp_server_ipv4 | default('') | length > 0
+  changed_when: false

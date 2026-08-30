@@ -1,0 +1,543 @@
+---
+- name: Reconfirm the native Debian edge platform
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Debian'
+      - ansible_facts['distribution_major_version'] == '13'
+      - ansible_facts['architecture'] == 'x86_64'
+    fail_msg: Edge platform identity drifted from Debian 13 AMD64.
+
+- name: Inspect exact installed edge package metadata
+  ansible.builtin.command:
+    argv:
+      - dpkg-query
+      - --show
+      - '--showformat=${Package}|${Version}|${Architecture}|${db:Status-Status}\n'
+      - opensips
+      - opensips-tls-module
+      - opensips-tls-openssl-module
+      - opensips-tlsmgm-module
+      - rtpengine-daemon
+  register: edge_verify_package_metadata
+  changed_when: false
+
+- name: Require all exact native AMD64 data-plane DEBs
+  ansible.builtin.assert:
+    that:
+      - >-
+        ('opensips|' ~ edge_opensips_version_required ~ '|amd64|installed') in
+        edge_verify_package_metadata.stdout_lines
+      - >-
+        ('opensips-tls-module|' ~ edge_opensips_version_required ~ '|amd64|installed') in
+        edge_verify_package_metadata.stdout_lines
+      - >-
+        ('opensips-tls-openssl-module|' ~ edge_opensips_version_required ~ '|amd64|installed') in
+        edge_verify_package_metadata.stdout_lines
+      - >-
+        ('opensips-tlsmgm-module|' ~ edge_opensips_version_required ~ '|amd64|installed') in
+        edge_verify_package_metadata.stdout_lines
+      - >-
+        ('rtpengine-daemon|' ~ edge_rtpengine_version_required ~ '|amd64|installed') in
+        edge_verify_package_metadata.stdout_lines
+    fail_msg: Edge data-plane package version or architecture drift was detected.
+
+- name: Reconfirm the pinned ACME client version
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/lego, --version]
+  register: edge_verify_lego_version
+  changed_when: false
+  failed_when: >-
+    edge_verify_lego_version.rc != 0 or
+    ('lego version ' ~ edge_lego_version_required) not in edge_verify_lego_version.stdout
+
+- name: Inspect deployed Edge TLS files without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /etc/vivolution-edge/tls/teams-fullchain.pem
+    - /etc/vivolution-edge/tls/teams-key.pem
+  register: edge_verify_tls_files
+
+- name: Require regular, non-linked, root/OpenSIPS TLS files with bounded modes
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg | default(false)
+      - not (item.stat.islnk | default(false))
+      - item.stat.nlink | int == 1
+      - item.stat.pw_name == 'root'
+      - item.stat.gr_name == 'opensips'
+      - item.stat.mode == '0440'
+    fail_msg: "Edge TLS file {{ item.item }} has unsafe type, ownership, links, or mode."
+  loop: "{{ edge_verify_tls_files.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Reconfirm the complete public certificate contract
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-edge/validate-edge-certificate
+      - --certificate
+      - /etc/vivolution-edge/tls/teams-fullchain.pem
+      - --private-key
+      - /etc/vivolution-edge/tls/teams-key.pem
+      - --expected-san
+      - "{{ edge_acme_node_fqdn }}"
+      - --expected-san
+      - "{{ edge_acme_wildcard_fqdn }}"
+      - --trust-bundle
+      - /etc/ssl/certs/ca-certificates.crt
+      - --minimum-valid-seconds
+      - '1209600'
+  register: edge_verify_certificate_identity
+  changed_when: false
+
+- name: Require exact Microsoft-compatible public certificate evidence after bootstrap
+  ansible.builtin.assert:
+    that:
+      - (edge_verify_certificate_identity.stdout | from_json).status == 'EDGE_PUBLIC_CERTIFICATE_VALID'
+      - (edge_verify_certificate_identity.stdout | from_json).dnsSans == [edge_acme_wildcard_fqdn, edge_acme_node_fqdn] | sort
+      - (edge_verify_certificate_identity.stdout | from_json).chainCertificateCount | int >= 2
+      - (edge_verify_certificate_identity.stdout | from_json).leafKeyAlgorithm == 'RSA'
+      - (edge_verify_certificate_identity.stdout | from_json).leafKeyBits | int == 2048
+      - (edge_verify_certificate_identity.stdout | from_json).serverAuthenticationEku | bool
+      - (edge_verify_certificate_identity.stdout | from_json).publicTrustBundleSha256 is match('^[0-9a-f]{64}$')
+    fail_msg: The deployed Edge certificate identity, key, chain, EKU, or trust anchor drifted.
+
+- name: Inspect held edge packages
+  ansible.builtin.command:
+    argv: [apt-mark, showhold]
+  register: edge_verify_held_packages
+  changed_when: false
+
+- name: Require controlled upgrades for every data-plane DEB
+  ansible.builtin.assert:
+    that:
+      - item in edge_verify_held_packages.stdout_lines
+    fail_msg: "The required package hold is missing for {{ item }}."
+  loop:
+    - opensips
+    - opensips-tls-module
+    - opensips-tls-openssl-module
+    - opensips-tlsmgm-module
+    - rtpengine-daemon
+
+- name: Inspect prohibited deployment packages
+  ansible.builtin.command:
+    argv:
+      - dpkg-query
+      - --show
+      - '--showformat=${db:Status-Abbrev}'
+      - "{{ item }}"
+  loop:
+    - rtpengine
+    - rtpengine-kernel-dkms
+    - ngcp-rtpengine-kernel-dkms
+    - docker.io
+    - docker-ce
+    - containerd
+    - podman
+  register: edge_verify_prohibited_packages
+  changed_when: false
+  failed_when: false
+
+- name: Reject metapackage, DKMS, and container deployment drift
+  ansible.builtin.assert:
+    that:
+      - >-
+        edge_verify_prohibited_packages.results |
+        selectattr('stdout', 'match', '^ii') | list | length == 0
+    fail_msg: A prohibited RTPengine metapackage, DKMS package, or container runtime appeared.
+
+- name: Inspect required OpenSIPS runtime modules
+  ansible.builtin.stat:
+    path: "/usr/lib/x86_64-linux-gnu/opensips/modules/{{ item }}"
+    follow: false
+  loop:
+    - proto_tls.so
+    - tls_mgm.so
+    - tls_openssl.so
+    - rtpengine.so
+  register: edge_opensips_runtime_modules
+
+- name: Require native TLS and RTPengine OpenSIPS modules
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg | default(false)
+    fail_msg: "Required native OpenSIPS module {{ item.item }} is missing."
+  loop: "{{ edge_opensips_runtime_modules.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Validate the fail-closed OpenSIPS bootstrap configuration
+  ansible.builtin.command:
+    argv: [/usr/sbin/opensips, -C, -f, /etc/opensips/opensips.cfg]
+  changed_when: false
+
+- name: Inspect RTPengine configuration invariants
+  ansible.builtin.command:
+    argv:
+      - awk
+      - >-
+        BEGIN { table=0; interface=0; range=0; ng=0; cli=0 }
+        /^table[[:space:]]*=[[:space:]]*-1$/ { table++ }
+        $0 == "interface = {{ edge_effective_private_ipv4 }}!{{ edge_public_ipv4 }}" { interface++ }
+        $0 == "port-min = {{ edge_rtp_port_start }}" { range++ }
+        $0 == "port-max = {{ edge_rtp_port_end }}" { range++ }
+        $0 == "listen-ng = 127.0.0.1:{{ edge_rtpengine_ng_port }}" { ng++ }
+        $0 == "listen-cli = 127.0.0.1:{{ edge_rtpengine_cli_port }}" { cli++ }
+        END { print table "|" interface "|" range "|" ng "|" cli }
+      - /etc/rtpengine/rtpengine.conf
+  register: edge_verify_rtpengine_config
+  changed_when: false
+
+- name: Require one userspace RTPengine instance and exact active allocation
+  ansible.builtin.assert:
+    that:
+      - edge_verify_rtpengine_config.stdout | trim == '1|1|2|1|1'
+    fail_msg: RTPengine drifted from its single userspace instance and exact media allocation.
+
+- name: Inspect kernel forwarding state
+  ansible.builtin.command:
+    argv:
+      - awk
+      - '$1 == "nft_rtpengine" || $1 == "xt_RTPENGINE" { print $1 }'
+      - /proc/modules
+  register: edge_verify_rtpengine_kernel_modules
+  changed_when: false
+
+- name: Require RTPengine kernel forwarding to remain absent
+  ansible.builtin.assert:
+    that:
+      - edge_verify_rtpengine_kernel_modules.stdout | trim | length == 0
+    fail_msg: An RTPengine kernel forwarding module is loaded despite table=-1.
+
+- name: Require all edge services to be active
+  ansible.builtin.command:
+    argv: [systemctl, is-active, "{{ item }}"]
+  loop:
+    - nftables.service
+    - opensips.service
+    - rtpengine-daemon.service
+    - ssh.service
+  register: edge_verify_active_services
+  changed_when: false
+
+- name: Inspect recovery-owned boot enablement
+  ansible.builtin.command:
+    argv: [systemctl, is-enabled, "{{ item.unit }}"]
+  loop:
+    - unit: nftables.service
+      allowed: [enabled]
+    - unit: ssh.service
+      allowed: [enabled]
+    - unit: vivolution-edge-runtime-recover.service
+      allowed: [enabled]
+    - unit: opensips.service
+      allowed: [disabled, static]
+    - unit: rtpengine-daemon.service
+      allowed: [disabled, static]
+  register: edge_verify_boot_enablement
+  changed_when: false
+  failed_when: false
+
+- name: Require exact recovery-owned boot enablement
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim in item.item.allowed
+    fail_msg: >-
+      {{ item.item.unit }} has boot state {{ item.stdout | trim | default('unknown') }};
+      expected one of {{ item.item.allowed | join(', ') }}.
+  loop: "{{ edge_verify_boot_enablement.results }}"
+  loop_control:
+    label: "{{ item.item.unit }}={{ item.stdout | trim }}"
+
+- name: Require the certificate renewal timer to be active and enabled
+  ansible.builtin.command:
+    argv: [systemctl, "{{ item.command }}", vivolution-edge-certificate.timer]
+  loop:
+    - command: is-active
+      expected: active
+    - command: is-enabled
+      expected: enabled
+  register: edge_verify_certificate_timer
+  changed_when: false
+
+- name: Require persistent automated certificate renewal
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim == item.item.expected
+    fail_msg: The managed-identity DNS-01 certificate timer is inactive or disabled.
+  loop: "{{ edge_verify_certificate_timer.results }}"
+  loop_control:
+    label: "{{ item.item.command }}={{ item.stdout | trim }}"
+
+- name: Require complete service startup persistence
+  ansible.builtin.assert:
+    that:
+      - >-
+        edge_verify_active_services.results |
+        map(attribute='stdout') | unique | list == ['active']
+    fail_msg: >-
+      An edge service is inactive, or OpenSIPS/RTPengine can bypass the enabled
+      protected runtime recovery service across reboot.
+
+- name: Inspect the pinned Edge time synchronization service
+  ansible.builtin.command:
+    argv: [systemctl, is-active, ntpsec.service]
+  register: edge_verify_time_service
+  changed_when: false
+
+- name: Require the pinned Edge time synchronization service
+  ansible.builtin.assert:
+    that:
+      - edge_verify_time_service.stdout | trim == 'active'
+    fail_msg: The fixed-endpoint ntpsec service is not active.
+
+- name: Wait for the kernel clock to report NTP synchronization
+  ansible.builtin.command:
+    argv: [timedatectl, show, --property=NTPSynchronized, --value]
+  register: edge_verify_ntp_synchronized
+  changed_when: false
+  retries: 10
+  delay: 3
+  until:
+    - edge_verify_ntp_synchronized.rc == 0
+    - edge_verify_ntp_synchronized.stdout | trim | lower == 'yes'
+
+- name: Inspect effective network routing invariants
+  ansible.builtin.command:
+    argv: [/usr/sbin/sysctl, --values, "{{ item }}"]
+  loop:
+    - net.ipv4.ip_forward
+    - net.ipv6.conf.all.forwarding
+    - net.ipv4.conf.all.accept_redirects
+    - net.ipv4.conf.default.accept_redirects
+    - "net.ipv4.conf.{{ ansible_facts['default_ipv4']['interface'] }}.accept_redirects"
+    - net.ipv6.conf.all.accept_redirects
+    - net.ipv6.conf.default.accept_redirects
+    - "net.ipv6.conf.{{ ansible_facts['default_ipv4']['interface'] }}.accept_redirects"
+    - net.ipv4.conf.all.send_redirects
+    - net.ipv4.conf.default.send_redirects
+    - "net.ipv4.conf.{{ ansible_facts['default_ipv4']['interface'] }}.send_redirects"
+    - net.ipv4.conf.all.accept_source_route
+    - net.ipv4.conf.default.accept_source_route
+    - "net.ipv4.conf.{{ ansible_facts['default_ipv4']['interface'] }}.accept_source_route"
+    - net.ipv6.conf.all.accept_source_route
+    - net.ipv6.conf.default.accept_source_route
+    - "net.ipv6.conf.{{ ansible_facts['default_ipv4']['interface'] }}.accept_source_route"
+    - net.ipv4.conf.all.rp_filter
+    - net.ipv4.conf.default.rp_filter
+    - "net.ipv4.conf.{{ ansible_facts['default_ipv4']['interface'] }}.rp_filter"
+  register: edge_verify_network_sysctls
+  changed_when: false
+
+- name: Require endpoint-only routing invariants after activation or reboot
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim == expected_sysctl_value
+    fail_msg: "Unsafe effective sysctl {{ item.item }}={{ item.stdout | trim }}."
+  loop: "{{ edge_verify_network_sysctls.results }}"
+  loop_control:
+    label: "{{ item.item }}={{ item.stdout | trim }}"
+  vars:
+    expected_sysctl_value: >-
+      {{ '1' if item.item.endswith('.rp_filter') else '0' }}
+
+- name: Inspect effective OpenSIPS systemd isolation
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - opensips.service
+      - --property=User
+      - --property=Group
+      - --property=NoNewPrivileges
+      - --property=CapabilityBoundingSet
+      - --property=AmbientCapabilities
+      - --property=ProtectSystem
+  register: edge_verify_opensips_unit
+  changed_when: false
+
+- name: Inspect effective RTPengine systemd isolation
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - rtpengine-daemon.service
+      - --property=User
+      - --property=Group
+      - --property=NoNewPrivileges
+      - --property=CapabilityBoundingSet
+      - --property=AmbientCapabilities
+      - --property=ProtectSystem
+  register: edge_verify_rtpengine_unit
+  changed_when: false
+
+- name: Require dedicated unprivileged service identities and no capabilities
+  ansible.builtin.assert:
+    that:
+      - "'User=opensips' in edge_verify_opensips_unit.stdout_lines"
+      - "'Group=opensips' in edge_verify_opensips_unit.stdout_lines"
+      - "'NoNewPrivileges=yes' in edge_verify_opensips_unit.stdout_lines"
+      - "'CapabilityBoundingSet=' in edge_verify_opensips_unit.stdout_lines"
+      - "'AmbientCapabilities=' in edge_verify_opensips_unit.stdout_lines"
+      - "'ProtectSystem=strict' in edge_verify_opensips_unit.stdout_lines"
+      - "'User=rtpengine' in edge_verify_rtpengine_unit.stdout_lines"
+      - "'Group=rtpengine' in edge_verify_rtpengine_unit.stdout_lines"
+      - "'NoNewPrivileges=yes' in edge_verify_rtpengine_unit.stdout_lines"
+      - "'CapabilityBoundingSet=' in edge_verify_rtpengine_unit.stdout_lines"
+      - "'AmbientCapabilities=' in edge_verify_rtpengine_unit.stdout_lines"
+      - "'ProtectSystem=strict' in edge_verify_rtpengine_unit.stdout_lines"
+    fail_msg: OpenSIPS or RTPengine escaped its dedicated unprivileged systemd sandbox.
+
+- name: Inspect active listening sockets
+  ansible.builtin.command:
+    argv: [ss, -H, -lntup]
+  register: edge_verify_listeners
+  changed_when: false
+
+- name: Require fail-closed loopback signaling and media control
+  ansible.builtin.assert:
+    that:
+      - edge_verify_listeners.stdout is search('127\\.0\\.0\\.1:5060\\b')
+      - edge_verify_listeners.stdout is search('127\\.0\\.0\\.1:' ~ edge_rtpengine_ng_port ~ '\\b')
+      - edge_verify_listeners.stdout is search('127\\.0\\.0\\.1:' ~ edge_rtpengine_cli_port ~ '\\b')
+      - edge_verify_listeners.stdout is not search('(0\\.0\\.0\\.0|\\[::\\]|\\*):5060\\b')
+      - edge_verify_listeners.stdout is not search('(0\\.0\\.0\\.0|\\[::\\]|\\*):(2223|2224)\\b')
+      - edge_verify_listeners.stdout is not search(':5061\\b')
+      - edge_verify_listeners.stdout is not search(':15061\\b')
+    fail_msg: Bootstrap signaling or control sockets are exposed beyond loopback, or unprovisioned TLS is listening.
+
+- name: Inspect active nftables policy
+  ansible.builtin.command:
+    argv: [nft, list, table, inet, vivolution_edge_filter]
+  register: edge_verify_firewall
+  changed_when: false
+
+- name: Inspect the effective nftables service stop action
+  ansible.builtin.command:
+    argv: [systemctl, show, nftables.service, --property=ExecStop]
+  register: edge_verify_nftables_execstop
+  changed_when: false
+
+- name: Require owned-table firewall lifecycle and exact ingress split
+  ansible.builtin.assert:
+    that:
+      - edge_verify_firewall.stdout is search('hook input priority filter; policy drop;')
+      - edge_verify_firewall.stdout is search('hook forward priority filter; policy drop;')
+      - edge_verify_firewall.stdout is search('hook output priority filter; policy drop;')
+      - edge_verify_firewall.stdout is search('set admin_source_ipv4')
+      - edge_verify_firewall.stdout is search('set microsoft_signaling_source_ipv4')
+      - edge_verify_firewall.stdout is search('set microsoft_media_source_ipv4')
+      - >-
+        (edge_synthetic_teams_source_ipv4_cidrs | length == 0) or
+        (edge_verify_firewall.stdout is search('set synthetic_teams_source_ipv4'))
+      - edge_verify_firewall.stdout is search('set pbx_source_ipv4')
+      - edge_verify_firewall.stdout is search('set control_plane_ipv4')
+      - edge_verify_firewall.stdout is search('set ntp_server_ipv4')
+      - edge_verify_firewall.stdout is search('tcp dport 5061')
+      - edge_verify_firewall.stdout is search('tcp dport 15061')
+      - edge_verify_firewall.stdout is search('udp dport 20000-20255')
+      - >-
+        edge_verify_firewall.stdout is search(
+          'ip saddr @pbx_source_ipv4 udp sport ' ~
+          (edge_pbx_media_destination_port_start | string) ~ '-' ~
+          (edge_pbx_media_destination_port_end | string) ~
+          ' udp dport 20000-20255 accept'
+        )
+      - >-
+        (edge_runtime_profile != 'DIRECT_ROUTING') or
+        (edge_verify_firewall.stdout is search(
+          'ip saddr @microsoft_media_source_ipv4 udp sport .*3478-3481.*49152-53247.*udp dport 20000-20255'
+        ))
+      - edge_verify_firewall.stdout is not search('dport 5060\\b')
+      - edge_verify_firewall.stdout is not search('dport (2223|2224)\\b')
+      - >-
+        edge_verify_firewall.stdout is search(
+          'ip daddr 168\\.63\\.129\\.16 udp sport 68 udp dport 67 accept'
+        )
+      - >-
+        edge_verify_firewall.stdout is search(
+          'ip daddr @ntp_server_ipv4 udp dport 123 accept'
+        )
+      - >-
+        (edge_runtime_profile != 'SYNTHETIC_PRIVATE') or
+        (edge_verify_firewall.stdout is search(
+          'ip daddr @control_plane_ipv4 udp sport 20000-20255 udp dport .*21000-21127.*22000-22063.*accept'
+        ))
+      - >-
+        (edge_runtime_profile != 'SYNTHETIC_PRIVATE') or
+        (edge_verify_firewall.stdout is not search(
+          'ip saddr @microsoft_(signaling|media)_source_ipv4'
+        ))
+      - >-
+        (edge_runtime_profile != 'SYNTHETIC_PRIVATE') or
+        (edge_verify_firewall.stdout is not search(
+          'ip daddr @(microsoft_(signaling|media)_source_ipv4|pbx_source_ipv4)'
+        ))
+      - >-
+        (edge_runtime_profile != 'DIRECT_ROUTING') or
+        (edge_verify_firewall.stdout is search(
+          'ip daddr @microsoft_media_source_ipv4 udp sport 20000-20255 udp dport .*3478-3481.*49152-53247.*accept'
+        ))
+      - >-
+        (edge_runtime_profile != 'DIRECT_ROUTING') or
+        (edge_verify_firewall.stdout is search(
+          'ip daddr @pbx_source_ipv4 udp sport 20000-20255 udp dport ' ~
+          (edge_pbx_media_destination_port_start | string) ~ '-' ~
+          (edge_pbx_media_destination_port_end | string) ~ ' accept'
+        ))
+      - >-
+        (edge_runtime_profile != 'DIRECT_ROUTING') or
+        (edge_verify_firewall.stdout is not search(
+          'ip (saddr @synthetic_teams_source_ipv4|daddr @control_plane_ipv4 (tcp dport .*16061.*25061|udp sport 20000-20255))'
+        ))
+      - "'destroy table inet vivolution_edge_filter' in edge_verify_nftables_execstop.stdout"
+      - "'flush ruleset' not in edge_verify_nftables_execstop.stdout"
+    fail_msg: Firewall lifecycle ownership, default deny, or exact source/port split drifted.
+
+- name: Inspect prohibited multicast resolver listeners
+  ansible.builtin.command:
+    argv: [ss, -H, -lntu]
+  register: edge_verify_resolver_listeners
+  changed_when: false
+
+- name: Recheck unicast DNS
+  ansible.builtin.command:
+    argv: [getent, ahostsv4, "{{ edge_dns_probe_name }}"]
+  register: edge_verify_dns
+  changed_when: false
+
+- name: Require working unicast DNS without multicast listeners
+  ansible.builtin.assert:
+    that:
+      - edge_verify_dns.stdout | trim | length > 0
+      - edge_verify_resolver_listeners.stdout is not search(':(5353|5355)\\b')
+    fail_msg: Resolver behavior regressed after service activation or reboot.
+
+- name: Inspect effective journal limits
+  ansible.builtin.command:
+    argv: [systemd-analyze, cat-config, systemd/journald.conf]
+  register: edge_verify_journald_config
+  changed_when: false
+
+- name: Require bounded persistent journal policy
+  ansible.builtin.assert:
+    that:
+      - edge_verify_journald_config.stdout is search('(?m)^Storage=persistent$')
+      - >-
+        edge_verify_journald_config.stdout is
+        search('(?m)^SystemMaxUse=' ~ (edge_journal_max_use | regex_escape) ~ '$')
+      - edge_verify_journald_config.stdout is search('(?m)^RuntimeMaxUse=64M$')
+      - edge_verify_journald_config.stdout is search('(?m)^MaxRetentionSec=14day$')
+    fail_msg: The bounded edge journald policy is missing.
+
+- name: Report the verified edge bootstrap boundary
+  ansible.builtin.debug:
+    msg: >-
+      native_debs=verified userspace_rtpengine=verified
+      firewall=bidirectional-default-deny-owned-table services=unprivileged
+      tls_and_tenant_routes=awaiting-signed-desired-state

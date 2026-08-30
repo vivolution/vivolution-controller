@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Vivolution Edge certificate renewal
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=2h
+Persistent=true
+Unit=vivolution-edge-certificate.service
+
+[Install]
+WantedBy=timers.target

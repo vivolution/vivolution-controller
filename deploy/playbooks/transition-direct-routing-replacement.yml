@@ -1,0 +1,368 @@
+---
+- name: Gate a non-destructive Direct Routing replacement-generation transition
+  hosts: edge_nodes
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  serial: 1
+
+  vars:
+    edge_direct_predecessor_known_hosts_file: "{{ inventory_dir }}/generated/known_hosts"
+    edge_direct_predecessor_fixed_ssh_common_args: >-
+      -F /dev/null
+      -o IdentitiesOnly=yes
+      -o StrictHostKeyChecking=yes
+      -o 'UserKnownHostsFile="{{ edge_direct_predecessor_known_hosts_file }}"'
+      -o GlobalKnownHostsFile=/dev/null
+
+  pre_tasks:
+    - name: Require the exact replacement and rollback preservation contract
+      ansible.builtin.assert:
+        that:
+          - edge_runtime_profile == 'DIRECT_ROUTING'
+          - edge_generation is number
+          - edge_generation | int >= 2
+          - edge_direct_predecessor_generation is number
+          - edge_direct_predecessor_generation | int == (edge_generation | int) - 1
+          - edge_direct_predecessor_activation_sequence is number
+          - edge_direct_predecessor_activation_sequence | int >= 1
+          - edge_direct_predecessor_manifest_digest is match('^sha256:[0-9a-f]{64}$')
+          - edge_direct_predecessor_ansible_host is string
+          - edge_direct_predecessor_ansible_host | length > 0
+          - edge_direct_predecessor_ansible_host is match('^[A-Za-z0-9.-]+$')
+          - edge_direct_predecessor_ansible_host not in ['localhost', '127.0.0.1']
+          - edge_direct_predecessor_ansible_host != ansible_host
+          - edge_direct_predecessor_ssh_port is number
+          - edge_direct_predecessor_ssh_port | int >= 1
+          - edge_direct_predecessor_ssh_port | int <= 65535
+          - edge_direct_predecessor_ansible_user is string
+          - edge_direct_predecessor_ansible_user is match('^[a-z_][a-z0-9_-]{0,31}$')
+          - edge_direct_predecessor_ssh_private_key_file is string
+          - edge_direct_predecessor_ssh_private_key_file is match('^/')
+          - edge_direct_replacement_transition_acknowledgement == 'TRANSITION_TO_DIRECT_ROUTING_REPLACEMENT_FLEET'
+          - edge_direct_rollback_contract == 'PRESERVE_SYNTHETIC_PREDECESSOR_UNTIL_SEPARATE_CUTOVER'
+          - edge_direct_predecessor_fixture_probe_acknowledgement == 'PROBE_PRESERVED_SYNTHETIC_PREDECESSOR_BEFORE_AND_AFTER'
+          - edge_direct_install_acknowledgement == 'INSTALL_DIRECT_ROUTING_REPLACEMENT_GENERATION'
+          - edge_direct_activation_acknowledgement == 'ACTIVATE_DIRECT_ROUTING_REPLACEMENT_GENERATION'
+          - groups.get('controllers', []) | length == 1
+        fail_msg: >-
+          Direct Routing transition must target a distinct replacement host and
+          preserve the prior synthetic generation as the rollback fleet until
+          a separately reviewed cutover is explicitly authorized.
+
+    - name: Inspect predecessor SSH trust inputs on the controller
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ edge_direct_predecessor_ssh_private_key_file }}"
+        - "{{ edge_direct_predecessor_known_hosts_file }}"
+      delegate_to: localhost
+      become: false
+      register: edge_direct_predecessor_ssh_trust_inputs
+
+    - name: Require protected predecessor SSH key and pinned host-key inventory
+      ansible.builtin.assert:
+        that:
+          - edge_direct_predecessor_ssh_trust_inputs.results | length == 2
+          - edge_direct_predecessor_ssh_trust_inputs.results | selectattr('stat.exists', 'equalto', true) | list | length == 2
+          - edge_direct_predecessor_ssh_trust_inputs.results | selectattr('stat.isreg', 'equalto', true) | list | length == 2
+          - edge_direct_predecessor_ssh_trust_inputs.results | selectattr('stat.islnk', 'equalto', false) | list | length == 2
+          - edge_direct_predecessor_ssh_trust_inputs.results | selectattr('stat.nlink', 'equalto', 1) | list | length == 2
+          - edge_direct_predecessor_ssh_trust_inputs.results | selectattr('stat.mode', 'equalto', '0600') | list | length == 2
+        fail_msg: >-
+          The predecessor SSH private key or pinned known_hosts file is
+          missing, linked, multiply linked, non-regular, or not mode 0600.
+
+    - name: Prove the preserved predecessor SSH endpoint is reachable before staging
+      ansible.builtin.wait_for:
+        host: "{{ edge_direct_predecessor_ansible_host }}"
+        port: "{{ edge_direct_predecessor_ssh_port | int }}"
+        state: started
+        connect_timeout: 5
+        timeout: 15
+      delegate_to: localhost
+      become: false
+
+    - name: Read the preserved predecessor runtime authority without mutation
+      ansible.builtin.slurp:
+        src: /etc/vivolution-edge/runtime-authority.json
+      delegate_to: "{{ edge_direct_predecessor_ansible_host }}"
+      vars:
+        ansible_port: "{{ edge_direct_predecessor_ssh_port | int }}"
+        ansible_user: "{{ edge_direct_predecessor_ansible_user }}"
+        ansible_ssh_private_key_file: "{{ edge_direct_predecessor_ssh_private_key_file }}"
+        ansible_ssh_common_args: "{{ edge_direct_predecessor_fixed_ssh_common_args }}"
+      register: edge_direct_predecessor_authority_before
+
+    - name: Read the preserved predecessor runtime state without mutation
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+      delegate_to: "{{ edge_direct_predecessor_ansible_host }}"
+      vars:
+        ansible_port: "{{ edge_direct_predecessor_ssh_port | int }}"
+        ansible_user: "{{ edge_direct_predecessor_ansible_user }}"
+        ansible_ssh_private_key_file: "{{ edge_direct_predecessor_ssh_private_key_file }}"
+        ansible_ssh_common_args: "{{ edge_direct_predecessor_fixed_ssh_common_args }}"
+      register: edge_direct_predecessor_status_before
+      changed_when: false
+
+    - name: Prove the preserved predecessor active runtime health before staging
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+      delegate_to: "{{ edge_direct_predecessor_ansible_host }}"
+      vars:
+        ansible_port: "{{ edge_direct_predecessor_ssh_port | int }}"
+        ansible_user: "{{ edge_direct_predecessor_ansible_user }}"
+        ansible_ssh_private_key_file: "{{ edge_direct_predecessor_ssh_private_key_file }}"
+        ansible_ssh_common_args: "{{ edge_direct_predecessor_fixed_ssh_common_args }}"
+      register: edge_direct_predecessor_health_before
+      changed_when: false
+
+    - name: Require the predecessor data-plane services to be active before staging
+      ansible.builtin.command:
+        argv: [/usr/bin/systemctl, is-active, --quiet, "{{ item }}"]
+      loop:
+        - opensips.service
+        - rtpengine-daemon.service
+      delegate_to: "{{ edge_direct_predecessor_ansible_host }}"
+      vars:
+        ansible_port: "{{ edge_direct_predecessor_ssh_port | int }}"
+        ansible_user: "{{ edge_direct_predecessor_ansible_user }}"
+        ansible_ssh_private_key_file: "{{ edge_direct_predecessor_ssh_private_key_file }}"
+        ansible_ssh_common_args: "{{ edge_direct_predecessor_fixed_ssh_common_args }}"
+      changed_when: false
+
+    - name: Require an exact healthy synthetic predecessor rollback LKG
+      ansible.builtin.assert:
+        that:
+          - (edge_direct_predecessor_authority_before.content | b64decode | from_json).profile == 'SYNTHETIC_PRIVATE'
+          - (edge_direct_predecessor_authority_before.content | b64decode | from_json).generation | int == edge_direct_predecessor_generation | int
+          - (edge_direct_predecessor_authority_before.content | b64decode | from_json).nodeId == inventory_hostname
+          - (edge_direct_predecessor_status_before.stdout | from_json).apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+          - (edge_direct_predecessor_status_before.stdout | from_json).kind == 'EdgeRuntimeStatus'
+          - not ((edge_direct_predecessor_status_before.stdout | from_json).journalPresent | bool)
+          - (edge_direct_predecessor_status_before.stdout | from_json).active.kind == 'CANDIDATE'
+          - (edge_direct_predecessor_status_before.stdout | from_json).active.sequence | int == edge_direct_predecessor_activation_sequence | int
+          - (edge_direct_predecessor_status_before.stdout | from_json).active.manifestDigest == edge_direct_predecessor_manifest_digest
+          - (edge_direct_predecessor_health_before.stdout | from_json).apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+          - (edge_direct_predecessor_health_before.stdout | from_json).kind == 'EdgeRuntimeHealth'
+          - (edge_direct_predecessor_health_before.stdout | from_json).active == (edge_direct_predecessor_status_before.stdout | from_json).active
+          - >-
+            ((edge_direct_predecessor_health_before.stdout | from_json).healthGates |
+             map(attribute='status') | unique | list) == ['PASSED']
+          - >-
+            ['nft-owned-default-deny', 'opensips-active-parse',
+             'rtpengine-ng-ping', 'systemd-nftables', 'systemd-opensips',
+             'systemd-rtpengine-daemon'] |
+            difference((edge_direct_predecessor_health_before.stdout | from_json).healthGates |
+                       map(attribute='name') | list) | length == 0
+        fail_msg: >-
+          The declared predecessor is not the exact healthy synthetic
+          last-known-good candidate. Replacement staging is refused.
+
+    - name: Prove both synthetic call directions through the predecessor before staging
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/vivolution-voice-fixture-test
+          - "{{ inventory_hostname }}"
+      delegate_to: "{{ groups['controllers'][0] }}"
+      register: edge_direct_predecessor_fixture_before
+      changed_when: true
+
+    - name: Inspect replacement protected state before installation
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - /etc/vivolution-edge/runtime-authority.json
+        - /var/lib/vivolution-edge/runtime/state.json
+        - /var/lib/vivolution-edge/runtime/transaction.json
+      register: edge_direct_replacement_existing_state
+
+    - name: Refuse a replacement host with a pending runtime transaction
+      ansible.builtin.assert:
+        that:
+          - not (edge_direct_replacement_existing_state.results[2].stat.exists | default(false))
+          - not (edge_direct_replacement_existing_state.results[2].stat.islnk | default(false))
+        fail_msg: >-
+          The replacement has a pending or linked runtime transaction. Recover
+          it before beginning the replacement-generation workflow.
+
+    - name: Read an existing replacement runtime authority
+      ansible.builtin.slurp:
+        src: /etc/vivolution-edge/runtime-authority.json
+      register: edge_direct_replacement_authority_raw
+      when: edge_direct_replacement_existing_state.results[0].stat.exists | default(false)
+
+    - name: Refuse reuse of a synthetic or different-generation node
+      ansible.builtin.assert:
+        that:
+          - (edge_direct_replacement_authority_raw.content | b64decode | from_json).profile == 'DIRECT_ROUTING'
+          - (edge_direct_replacement_authority_raw.content | b64decode | from_json).generation | int == edge_generation | int
+          - (edge_direct_replacement_authority_raw.content | b64decode | from_json).nodeId == inventory_hostname
+        fail_msg: >-
+          A pre-existing authority belongs to a synthetic or different node
+          generation. Reimage the replacement; it will not be rewritten.
+      when: edge_direct_replacement_existing_state.results[0].stat.exists | default(false)
+
+- import_playbook: install-edge.yml
+
+- import_playbook: activate-edge.yml
+
+- name: Prove the staged replacement is healthy while the predecessor remains rollback LKG
+  hosts: edge_nodes
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  serial: 1
+
+  tasks:
+    - name: Re-prove the preserved predecessor SSH endpoint after replacement activation
+      ansible.builtin.wait_for:
+        host: "{{ edge_direct_predecessor_ansible_host }}"
+        port: "{{ edge_direct_predecessor_ssh_port | int }}"
+        state: started
+        connect_timeout: 5
+        timeout: 15
+      delegate_to: localhost
+      become: false
+
+    - name: Re-read the preserved predecessor runtime authority after staging
+      ansible.builtin.slurp:
+        src: /etc/vivolution-edge/runtime-authority.json
+      delegate_to: "{{ edge_direct_predecessor_ansible_host }}"
+      vars:
+        ansible_port: "{{ edge_direct_predecessor_ssh_port | int }}"
+        ansible_user: "{{ edge_direct_predecessor_ansible_user }}"
+        ansible_ssh_private_key_file: "{{ edge_direct_predecessor_ssh_private_key_file }}"
+        ansible_ssh_common_args: "{{ edge_direct_predecessor_fixed_ssh_common_args }}"
+      register: edge_direct_predecessor_authority_after
+
+    - name: Re-read the preserved predecessor runtime state after staging
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+      delegate_to: "{{ edge_direct_predecessor_ansible_host }}"
+      vars:
+        ansible_port: "{{ edge_direct_predecessor_ssh_port | int }}"
+        ansible_user: "{{ edge_direct_predecessor_ansible_user }}"
+        ansible_ssh_private_key_file: "{{ edge_direct_predecessor_ssh_private_key_file }}"
+        ansible_ssh_common_args: "{{ edge_direct_predecessor_fixed_ssh_common_args }}"
+      register: edge_direct_predecessor_status_after
+      changed_when: false
+
+    - name: Re-prove the preserved predecessor active runtime health after staging
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+      delegate_to: "{{ edge_direct_predecessor_ansible_host }}"
+      vars:
+        ansible_port: "{{ edge_direct_predecessor_ssh_port | int }}"
+        ansible_user: "{{ edge_direct_predecessor_ansible_user }}"
+        ansible_ssh_private_key_file: "{{ edge_direct_predecessor_ssh_private_key_file }}"
+        ansible_ssh_common_args: "{{ edge_direct_predecessor_fixed_ssh_common_args }}"
+      register: edge_direct_predecessor_health_after
+      changed_when: false
+
+    - name: Require the predecessor data-plane services to remain active after staging
+      ansible.builtin.command:
+        argv: [/usr/bin/systemctl, is-active, --quiet, "{{ item }}"]
+      loop:
+        - opensips.service
+        - rtpengine-daemon.service
+      delegate_to: "{{ edge_direct_predecessor_ansible_host }}"
+      vars:
+        ansible_port: "{{ edge_direct_predecessor_ssh_port | int }}"
+        ansible_user: "{{ edge_direct_predecessor_ansible_user }}"
+        ansible_ssh_private_key_file: "{{ edge_direct_predecessor_ssh_private_key_file }}"
+        ansible_ssh_common_args: "{{ edge_direct_predecessor_fixed_ssh_common_args }}"
+      changed_when: false
+
+    - name: Prove the synthetic predecessor rollback LKG is unchanged after staging
+      ansible.builtin.assert:
+        that:
+          - edge_direct_predecessor_authority_after.content == edge_direct_predecessor_authority_before.content
+          - (edge_direct_predecessor_status_after.stdout | from_json).active == (edge_direct_predecessor_status_before.stdout | from_json).active
+          - (edge_direct_predecessor_status_after.stdout | from_json).highestSeenSequence == (edge_direct_predecessor_status_before.stdout | from_json).highestSeenSequence
+          - (edge_direct_predecessor_status_after.stdout | from_json).lastEvidenceDigest == (edge_direct_predecessor_status_before.stdout | from_json).lastEvidenceDigest
+          - not ((edge_direct_predecessor_status_after.stdout | from_json).journalPresent | bool)
+          - (edge_direct_predecessor_health_after.stdout | from_json).kind == 'EdgeRuntimeHealth'
+          - (edge_direct_predecessor_health_after.stdout | from_json).active == (edge_direct_predecessor_status_after.stdout | from_json).active
+          - >-
+            ((edge_direct_predecessor_health_after.stdout | from_json).healthGates |
+             map(attribute='status') | unique | list) == ['PASSED']
+        fail_msg: >-
+          The predecessor authority or protected active LKG changed during
+          replacement staging; cutover is prohibited.
+
+    - name: Re-prove both synthetic call directions through the preserved predecessor
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/vivolution-voice-fixture-test
+          - "{{ inventory_hostname }}"
+      delegate_to: "{{ groups['controllers'][0] }}"
+      register: edge_direct_predecessor_fixture_after
+      changed_when: true
+
+    - name: Read protected replacement runtime status
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+      register: edge_direct_replacement_runtime_status
+      changed_when: false
+
+    - name: Read protected replacement runtime authority
+      ansible.builtin.slurp:
+        src: /etc/vivolution-edge/runtime-authority.json
+      register: edge_direct_replacement_runtime_authority
+
+    - name: Prove replacement active runtime health without asserting live interop
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+      register: edge_direct_replacement_runtime_health
+      changed_when: false
+
+    - name: Require the exact healthy Direct Routing replacement identity
+      ansible.builtin.assert:
+        that:
+          - (edge_direct_replacement_runtime_status.stdout | from_json).apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+          - (edge_direct_replacement_runtime_status.stdout | from_json).kind == 'EdgeRuntimeStatus'
+          - not ((edge_direct_replacement_runtime_status.stdout | from_json).journalPresent | bool)
+          - (edge_direct_replacement_runtime_status.stdout | from_json).active.kind == 'CANDIDATE'
+          - (edge_direct_replacement_runtime_status.stdout | from_json).active.sequence | int == edge_activation_sequence | int
+          - (edge_direct_replacement_runtime_status.stdout | from_json).active.manifestDigest == edge_activation_manifest_digest
+          - (edge_direct_replacement_runtime_authority.content | b64decode | from_json).profile == 'DIRECT_ROUTING'
+          - (edge_direct_replacement_runtime_authority.content | b64decode | from_json).generation | int == edge_generation | int
+          - (edge_direct_replacement_runtime_health.stdout | from_json).apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+          - (edge_direct_replacement_runtime_health.stdout | from_json).kind == 'EdgeRuntimeHealth'
+          - (edge_direct_replacement_runtime_health.stdout | from_json).active == (edge_direct_replacement_runtime_status.stdout | from_json).active
+          - >-
+            ((edge_direct_replacement_runtime_health.stdout | from_json).healthGates |
+             map(attribute='status') | unique | list) == ['PASSED']
+        fail_msg: The replacement did not reach the exact healthy Direct Routing candidate.
+
+    - name: Preserve non-secret replacement transition evidence on the controller
+      ansible.builtin.copy:
+        content: >-
+          {{ {
+               'apiVersion': 'edge.vivolution.ae/direct-routing-transition/v0.1',
+               'kind': 'DirectRoutingReplacementEvidence',
+               'manifestDigest': edge_activation_manifest_digest,
+               'nodeId': inventory_hostname,
+               'predecessorGeneration': edge_direct_predecessor_generation | int,
+               'predecessorHostPreserved': edge_direct_predecessor_ansible_host,
+               'predecessorManifestDigest': edge_direct_predecessor_manifest_digest,
+               'predecessorReachableAfterStaging': true,
+               'predecessorRuntimeHealthBeforeAndAfter': true,
+               'predecessorSequence': edge_direct_predecessor_activation_sequence | int,
+               'predecessorSyntheticCallsBeforeAndAfter': true,
+               'replacementGeneration': edge_generation | int,
+               'replacementHost': ansible_host,
+               'replacementLiveInteroperability': 'NOT_ASSERTED',
+               'replacementRuntimeHealth': true,
+               'rollbackContract': 'PRESERVE_SYNTHETIC_PREDECESSOR_UNTIL_SEPARATE_CUTOVER',
+               'sequence': edge_activation_sequence | int,
+               'status': 'DIRECT_ROUTING_REPLACEMENT_STAGED_NO_CUTOVER'
+             } | to_nice_json }}
+        dest: "{{ edge_activation_local_evidence_dir }}/{{ inventory_hostname }}/direct-routing-replacement.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false

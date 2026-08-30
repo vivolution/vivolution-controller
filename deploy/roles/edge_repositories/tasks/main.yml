@@ -1,0 +1,340 @@
+---
+- name: Create the APT trust and cache directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - path: /usr/share/keyrings
+      mode: '0755'
+    - path: /var/cache/vivolution-edge
+      mode: '0750'
+
+- name: Install the checksum-pinned official OpenSIPS archive keyring
+  ansible.builtin.get_url:
+    url: https://apt.opensips.org/opensips-org.gpg
+    dest: /usr/share/keyrings/opensips-org.gpg
+    owner: root
+    group: root
+    mode: '0644'
+    checksum: "sha256:{{ edge_opensips_keyring_sha256 }}"
+    force: false
+
+- name: Download the checksum-pinned RTPengine archive keyring package
+  ansible.builtin.get_url:
+    url: >-
+      https://rtpengine.dfx.at/latest/pool/main/r/rtpengine-dfx-repo-keyring/rtpengine-dfx-repo-keyring_1.0_all.deb
+    dest: /var/cache/vivolution-edge/rtpengine-dfx-repo-keyring_1.0_all.deb
+    owner: root
+    group: root
+    mode: '0644'
+    checksum: "sha256:{{ edge_rtpengine_keyring_deb_sha256 }}"
+    force: false
+
+- name: Install only the verified RTPengine archive keyring package
+  ansible.builtin.apt:
+    deb: /var/cache/vivolution-edge/rtpengine-dfx-repo-keyring_1.0_all.deb
+    state: present
+    lock_timeout: 120
+
+- name: Inspect installed archive keyring digests
+  ansible.builtin.command:
+    argv:
+      - sha256sum
+      - /usr/share/keyrings/opensips-org.gpg
+      - /usr/share/keyrings/dfx.at-rtpengine-archive-keyring.gpg
+  register: edge_keyring_digests
+  changed_when: false
+
+- name: Require the installed archive keyrings to match their pinned digests
+  ansible.builtin.assert:
+    that:
+      - edge_opensips_keyring_sha256 in edge_keyring_digests.stdout_lines[0]
+      - edge_rtpengine_keyring_sha256 in edge_keyring_digests.stdout_lines[1]
+    fail_msg: An installed edge APT archive keyring does not match its reviewed digest.
+
+- name: Install signed-by repository definitions
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - src: opensips.sources.j2
+      dest: /etc/apt/sources.list.d/vivolution-opensips.sources
+    - src: rtpengine.sources.j2
+      dest: /etc/apt/sources.list.d/vivolution-rtpengine.sources
+
+- name: Pin the two edge data-plane packages to their reviewed versions
+  ansible.builtin.template:
+    src: vivolution-edge.pref.j2
+    dest: /etc/apt/preferences.d/vivolution-edge
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Refresh signed APT metadata
+  ansible.builtin.apt:
+    update_cache: true
+    lock_timeout: 120
+
+- name: Inspect exact package candidates
+  ansible.builtin.command:
+    argv: [apt-cache, policy, "{{ item.name }}"]
+  loop:
+    - name: opensips
+      version: "{{ edge_opensips_version_required }}"
+    - name: opensips-tls-module
+      version: "{{ edge_opensips_version_required }}"
+    - name: opensips-tls-openssl-module
+      version: "{{ edge_opensips_version_required }}"
+    - name: opensips-tlsmgm-module
+      version: "{{ edge_opensips_version_required }}"
+    - name: rtpengine-daemon
+      version: "{{ edge_rtpengine_version_required }}"
+  loop_control:
+    label: "{{ item.name }}={{ item.version }}"
+  register: edge_package_candidates
+  changed_when: false
+
+- name: Require every exact package candidate before installation
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - "('Candidate: ' ~ item.item.version) in item.stdout"
+    fail_msg: >-
+      The signed repositories do not offer required candidate
+      {{ item.item.name }}={{ item.item.version }}.
+  loop: "{{ edge_package_candidates.results }}"
+  loop_control:
+    label: "{{ item.item.name }}={{ item.item.version }}"
+
+- name: Require the reviewed DEB contract to match the requested versions
+  ansible.builtin.assert:
+    that:
+      - edge_native_debs | length == 5
+      - >-
+        edge_native_debs |
+        selectattr('name', 'equalto', 'opensips') |
+        selectattr('version', 'equalto', edge_opensips_version_required) |
+        list | length == 1
+      - >-
+        edge_native_debs |
+        selectattr('name', 'match', '^opensips-tls.*-module$') |
+        selectattr('version', 'equalto', edge_opensips_version_required) |
+        list | length == 3
+      - >-
+        edge_native_debs |
+        selectattr('name', 'equalto', 'rtpengine-daemon') |
+        selectattr('version', 'equalto', edge_rtpengine_version_required) |
+        list | length == 1
+      - edge_native_debs | map(attribute='name') | unique | list | length == 5
+      - edge_native_debs | map(attribute='filename') | unique | list | length == 5
+      - edge_native_debs | selectattr('architecture', 'ne', 'amd64') | list | length == 0
+    fail_msg: The reviewed native DEB list does not match the requested edge package contract.
+
+- name: Download only the independently checksum-pinned native edge DEBs
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "/var/cache/vivolution-edge/{{ item.filename }}"
+    owner: root
+    group: root
+    mode: '0644'
+    checksum: "sha256:{{ item.sha256 }}"
+    force: false
+  loop: "{{ edge_native_debs }}"
+  loop_control:
+    label: "{{ item.name }}={{ item.version }}"
+
+- name: Inspect downloaded native DEB digests
+  ansible.builtin.command:
+    argv:
+      - sha256sum
+      - "/var/cache/vivolution-edge/{{ item.filename }}"
+  loop: "{{ edge_native_debs }}"
+  loop_control:
+    label: "{{ item.name }}={{ item.version }}"
+  register: edge_native_deb_digests
+  changed_when: false
+
+- name: Require every downloaded native DEB to match its reviewed digest
+  ansible.builtin.assert:
+    that:
+      - item.item.sha256 in item.stdout
+    fail_msg: >-
+      Downloaded native DEB {{ item.item.name }}={{ item.item.version }} does not
+      match its reviewed SHA-256 digest.
+  loop: "{{ edge_native_deb_digests.results }}"
+  loop_control:
+    label: "{{ item.item.name }}={{ item.item.version }}"
+
+- name: Inspect downloaded native DEB identity
+  ansible.builtin.command:
+    argv:
+      - dpkg-deb
+      - --field
+      - "/var/cache/vivolution-edge/{{ item.filename }}"
+      - Package
+      - Version
+      - Architecture
+  loop: "{{ edge_native_debs }}"
+  loop_control:
+    label: "{{ item.name }}={{ item.version }}"
+  register: edge_native_deb_metadata
+  changed_when: false
+
+- name: Require every downloaded DEB identity to match its reviewed contract
+  ansible.builtin.assert:
+    that:
+      - "('Package: ' ~ item.item.name) in item.stdout_lines"
+      - "('Version: ' ~ item.item.version) in item.stdout_lines"
+      - "('Architecture: ' ~ item.item.architecture) in item.stdout_lines"
+    fail_msg: >-
+      Downloaded native DEB {{ item.item.filename }} has unexpected control metadata.
+  loop: "{{ edge_native_deb_metadata.results }}"
+  loop_control:
+    label: "{{ item.item.name }}={{ item.item.version }}"
+
+- name: Install only the verified native signaling and media daemon DEBs
+  ansible.builtin.apt:
+    deb: "/var/cache/vivolution-edge/{{ item.filename }}"
+    install_recommends: false
+    policy_rc_d: 101
+    lock_timeout: 120
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  loop: "{{ edge_native_debs }}"
+  loop_control:
+    label: "{{ item.name }}={{ item.version }}"
+
+- name: Remove the package-generated kernel forwarding hint
+  ansible.builtin.file:
+    path: /etc/modprobe.d/rtpengine.conf
+    state: absent
+
+- name: Hold the exact data-plane package versions
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - opensips
+    - opensips-tls-module
+    - opensips-tls-openssl-module
+    - opensips-tlsmgm-module
+    - rtpengine-daemon
+
+- name: Inspect installed edge package metadata
+  ansible.builtin.command:
+    argv:
+      - dpkg-query
+      - --show
+      - '--showformat=${Package}|${Version}|${Architecture}|${db:Status-Status}\n'
+      - opensips
+      - opensips-tls-module
+      - opensips-tls-openssl-module
+      - opensips-tlsmgm-module
+      - rtpengine-daemon
+  register: edge_installed_package_metadata
+  changed_when: false
+
+- name: Require the exact installed native AMD64 DEBs
+  ansible.builtin.assert:
+    that:
+      - >-
+        ('opensips|' ~ edge_opensips_version_required ~ '|amd64|installed') in
+        edge_installed_package_metadata.stdout_lines
+      - >-
+        ('opensips-tls-module|' ~ edge_opensips_version_required ~ '|amd64|installed') in
+        edge_installed_package_metadata.stdout_lines
+      - >-
+        ('opensips-tls-openssl-module|' ~ edge_opensips_version_required ~ '|amd64|installed') in
+        edge_installed_package_metadata.stdout_lines
+      - >-
+        ('opensips-tlsmgm-module|' ~ edge_opensips_version_required ~ '|amd64|installed') in
+        edge_installed_package_metadata.stdout_lines
+      - >-
+        ('rtpengine-daemon|' ~ edge_rtpengine_version_required ~ '|amd64|installed') in
+        edge_installed_package_metadata.stdout_lines
+    fail_msg: An installed OpenSIPS, TLS, or RTPengine package does not match the exact AMD64 contract.
+
+- name: Inspect the package-pinned OpenSIPS xlog module
+  ansible.builtin.stat:
+    path: /usr/lib/x86_64-linux-gnu/opensips/modules/xlog.so
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: edge_opensips_xlog_module
+
+- name: Resolve the package owning the OpenSIPS xlog module
+  ansible.builtin.command:
+    argv:
+      - dpkg-query
+      - --search
+      - /usr/lib/x86_64-linux-gnu/opensips/modules/xlog.so
+  register: edge_opensips_xlog_owner
+  changed_when: false
+
+- name: Require the synthetic CDR logger to come only from the pinned OpenSIPS DEB
+  ansible.builtin.assert:
+    that:
+      - edge_opensips_xlog_module.stat.exists
+      - edge_opensips_xlog_module.stat.isreg | default(false)
+      - not (edge_opensips_xlog_module.stat.islnk | default(false))
+      - edge_opensips_xlog_module.stat.nlink | int == 1
+      - edge_opensips_xlog_module.stat.pw_name == 'root'
+      - edge_opensips_xlog_module.stat.gr_name == 'root'
+      - edge_opensips_xlog_module.stat.mode == '0644'
+      - edge_opensips_xlog_module.stat.size | int > 0
+      - edge_opensips_xlog_module.stat.checksum is match('^[0-9a-f]{64}$')
+      - >-
+        edge_opensips_xlog_owner.stdout | trim ==
+        'opensips: /usr/lib/x86_64-linux-gnu/opensips/modules/xlog.so'
+    fail_msg: The synthetic CDR xlog module is absent, linked, permissive, or not owned by the pinned OpenSIPS package.
+
+- name: Inspect prohibited meta, kernel, and container packages
+  ansible.builtin.command:
+    argv:
+      - dpkg-query
+      - --show
+      - '--showformat=${db:Status-Abbrev}'
+      - "{{ item }}"
+  loop:
+    - rtpengine
+    - rtpengine-kernel-dkms
+    - ngcp-rtpengine-kernel-dkms
+    - docker.io
+    - docker-ce
+    - containerd
+    - podman
+  register: edge_prohibited_package_state
+  changed_when: false
+  failed_when: false
+
+- name: Require an entirely native userspace deployment
+  ansible.builtin.assert:
+    that:
+      - >-
+        edge_prohibited_package_state.results |
+        selectattr('stdout', 'match', '^ii') | list | length == 0
+    fail_msg: A prohibited RTPengine metapackage, DKMS package, or container runtime is installed.
+
+- name: Inspect held edge packages
+  ansible.builtin.command:
+    argv: [apt-mark, showhold]
+  register: edge_held_packages
+  changed_when: false
+
+- name: Require every data-plane package to be held
+  ansible.builtin.assert:
+    that:
+      - item in edge_held_packages.stdout_lines
+    fail_msg: "The exact {{ item }} package must remain held for controlled upgrades."
+  loop:
+    - opensips
+    - opensips-tls-module
+    - opensips-tls-openssl-module
+    - opensips-tlsmgm-module
+    - rtpengine-daemon

@@ -1,0 +1,157 @@
+---
+- name: Require the exact live synthetic fixture rotation boundary
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname in ['sbc1', 'sbc2']
+      - edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+      - edge_generation | int == 1
+      - edge_fixture_rotation_acknowledgement == 'ROTATE_SYNTHETIC_FIXTURE_PKI_ON_BOTH_EDGES'
+      - edge_fixture_rotation_controller_staging_root is match('^/')
+      - edge_fixture_rotation_ca_src == edge_fixture_rotation_controller_staging_root ~ '/fixture-ca.crt'
+      - edge_fixture_rotation_client_certificate_src == edge_fixture_rotation_controller_staging_root ~ '/' ~ inventory_hostname ~ '.crt'
+      - edge_fixture_rotation_client_key_src == edge_fixture_rotation_controller_staging_root ~ '/' ~ inventory_hostname ~ '.key'
+      - edge_fixture_rotation_ca_sha256 is match('^[0-9a-f]{64}$')
+      - edge_fixture_rotation_client_certificate_sha256 is match('^[0-9a-f]{64}$')
+      - edge_fixture_rotation_client_key_sha256 is match('^[0-9a-f]{64}$')
+    fail_msg: >-
+      Fixture PKI rotation is limited to the exact active generation-1
+      synthetic nodes, protected controller staging paths, reviewed digests,
+      and the explicit two-node acknowledgement.
+
+- name: Define the exact controller-side fixture rotation inputs
+  ansible.builtin.set_fact:
+    edge_fixture_rotation_inputs:
+      - name: fixtureCaCrt
+        src: "{{ edge_fixture_rotation_ca_src }}"
+        dest: /var/lib/vivolution-edge/fixture-pki-rotation/incoming/fixture-ca.crt
+        sha256: "{{ edge_fixture_rotation_ca_sha256 }}"
+        private: false
+      - name: fixtureClientCrt
+        src: "{{ edge_fixture_rotation_client_certificate_src }}"
+        dest: /var/lib/vivolution-edge/fixture-pki-rotation/incoming/fixture-client.crt
+        sha256: "{{ edge_fixture_rotation_client_certificate_sha256 }}"
+        private: false
+      - name: fixtureClientKey
+        src: "{{ edge_fixture_rotation_client_key_src }}"
+        dest: /var/lib/vivolution-edge/fixture-pki-rotation/incoming/fixture-client.key
+        sha256: "{{ edge_fixture_rotation_client_key_sha256 }}"
+        private: true
+
+- name: Inspect the exact fixture rotation inputs on the controller
+  ansible.builtin.stat:
+    path: "{{ item.src }}"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  loop: "{{ edge_fixture_rotation_inputs }}"
+  delegate_to: localhost
+  become: false
+  register: edge_fixture_rotation_source_stats
+  no_log: true
+
+- name: Require single-link digest-pinned controller inputs
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg | default(false)
+      - not (item.stat.islnk | default(false))
+      - item.stat.nlink | int == 1
+      - item.stat.size | int > 0
+      - item.stat.size | int <= 1048576
+      - item.stat.checksum == item.item.sha256
+      - (not (item.item.private | bool)) or item.stat.mode in ['0400', '0600']
+    fail_msg: >-
+      A controller-side fixture rotation input is missing, linked, permissive,
+      oversized, or differs from its reviewed SHA-256.
+  loop: "{{ edge_fixture_rotation_source_stats.results }}"
+  no_log: true
+
+- name: Create protected fixture rotation directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop:
+    - /var/lib/vivolution-edge/fixture-pki-rotation
+    - /var/lib/vivolution-edge/fixture-pki-rotation/incoming
+    - /var/lib/vivolution-edge/fixture-pki-rotation/backup
+    - /var/lib/vivolution-edge/fixture-pki-rotation/evidence
+
+- name: Install the fixed crash-recoverable fixture rotation helper
+  ansible.builtin.copy:
+    src: rotate_synthetic_fixture_pki.py
+    dest: /usr/local/libexec/vivolution-edge/rotate-synthetic-fixture-pki
+    owner: root
+    group: root
+    mode: '0550'
+
+- name: Stage exact per-node fixture credentials
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: '0400'
+    force: true
+  loop: "{{ edge_fixture_rotation_inputs }}"
+  no_log: true
+
+- name: Re-pin fixture credentials and runtime authority transactionally
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-edge/rotate-synthetic-fixture-pki
+  register: edge_fixture_rotation_result
+  changed_when: >-
+    (edge_fixture_rotation_result.stdout | from_json).status == 'FIXTURE_PKI_ROTATED'
+  no_log: true
+
+- name: Require exact fixture rotation evidence
+  ansible.builtin.assert:
+    that:
+      - >-
+        (edge_fixture_rotation_result.stdout | from_json).status in
+        ['FIXTURE_PKI_ROTATED', 'FIXTURE_PKI_UNCHANGED']
+      - (edge_fixture_rotation_result.stdout | from_json).nodeId == inventory_hostname
+      - (edge_fixture_rotation_result.stdout | from_json).authorityDigest is match('^sha256:[0-9a-f]{64}$')
+      - (edge_fixture_rotation_result.stdout | from_json).evidenceDigest is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: The fixture rotation helper did not return exact non-secret evidence.
+
+- name: Reprove runtime transaction and active service state
+  ansible.builtin.command:
+    argv:
+      - /usr/local/sbin/vivolution-edge-runtime
+      - status
+  register: edge_fixture_rotation_runtime_status
+  changed_when: false
+
+- name: Require a healthy transaction-free active runtime
+  ansible.builtin.assert:
+    that:
+      - not ((edge_fixture_rotation_runtime_status.stdout | from_json).journalPresent | bool)
+      - (edge_fixture_rotation_runtime_status.stdout | from_json).active.kind == 'CANDIDATE'
+      - (edge_fixture_rotation_runtime_status.stdout | from_json).active.sequence | int >= 1
+    fail_msg: Fixture rotation left an incomplete or non-candidate runtime.
+
+- name: Require OpenSIPS to remain active after serialized rotation
+  ansible.builtin.command:
+    argv: [systemctl, is-active, --quiet, opensips.service]
+  changed_when: false
+
+- name: Protect the local fixture rotation evidence directory
+  ansible.builtin.file:
+    path: "{{ edge_fixture_rotation_local_evidence_root }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+
+- name: Retain canonical non-secret per-node rotation evidence locally
+  ansible.builtin.copy:
+    content: >-
+      {{ (edge_fixture_rotation_result.stdout | from_json) | to_nice_json }}
+    dest: "{{ edge_fixture_rotation_local_evidence_root }}/{{ inventory_hostname }}.json"
+    mode: '0600'
+  delegate_to: localhost
+  become: false

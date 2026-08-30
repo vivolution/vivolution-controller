@@ -1,0 +1,670 @@
+---
+- name: Require the fixed signed Edge runtime identity and allocation
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname is match('^sbc[12]$')
+      - edge_cluster_id is match('^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$')
+      - edge_customer_account_id is match('^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$')
+      - edge_tenant_context_id is match('^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$')
+      - edge_service_instance_id is match('^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$')
+      - edge_allocation_id is match('^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$')
+      - edge_signing_key_id is match('^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$')
+      - edge_m365_tenant_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+      - edge_m365_tenant_id != '00000000-0000-0000-0000-000000000000'
+      - edge_generation is number
+      - edge_runtime_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING']
+      - (inventory_hostname == 'sbc1' and edge_slot == 'A') or (inventory_hostname == 'sbc2' and edge_slot == 'B')
+      - edge_private_ipv4 == edge_effective_private_ipv4
+      - edge_cluster_media_port_start | int == 20000
+      - edge_cluster_media_port_end | int == 29999
+      - edge_tls_signaling_port | int == 5061
+      - edge_pbx_tls_signaling_port | int == 15061
+      - edge_rtp_port_start | int == 20000
+      - edge_rtp_port_end | int == 20255
+      - edge_pbx_media_destination_port_start is number
+      - edge_pbx_media_destination_port_end is number
+      - edge_pbx_media_destination_port_start | int >= 1024
+      - edge_pbx_media_destination_port_end | int <= 65535
+      - edge_pbx_media_destination_port_start | int % 2 == 0
+      - edge_pbx_media_destination_port_end | int % 2 == 1
+      - edge_pbx_media_destination_port_start | int <= edge_pbx_media_destination_port_end | int
+      - edge_pbx_media_destination_port_end | int - edge_pbx_media_destination_port_start | int + 1 <= 4096
+      - edge_rtpengine_ng_port | int == 2223
+      - edge_firewall_dhcp_server_ipv4 | string == '168.63.129.16'
+      - edge_system_ca_bundle_remote_src == '/etc/ssl/certs/ca-certificates.crt'
+    fail_msg: >-
+      Signed runtime installation requires an exact first-tenant identity,
+      supported fail-closed runtime profile, and the fixed port allocation.
+
+- name: Require the exact synthetic first-generation fixture boundary
+  ansible.builtin.assert:
+    that:
+      - edge_generation | int == 1
+      - edge_synthetic_teams_source_ipv4_cidrs == []
+      - edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32']
+      - edge_pbx_media_destination_port_start | int == 21000
+      - edge_pbx_media_destination_port_end | int == 21127
+      - edge_fixture_ca_src == inventory_dir ~ '/generated/fixture/fixture-ca.crt'
+      - edge_fixture_client_certificate_src == inventory_dir ~ '/generated/fixture/' ~ inventory_hostname ~ '.crt'
+      - edge_fixture_client_key_src == inventory_dir ~ '/generated/fixture/' ~ inventory_hostname ~ '.key'
+    fail_msg: >-
+      SYNTHETIC_PRIVATE is restricted to generation 1, empty compiler
+      synthetic-source facts, and the fixed CP1 fixture identity.
+  when: edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+
+- name: Require an explicit Direct Routing replacement generation
+  ansible.builtin.assert:
+    that:
+      - edge_generation | int >= 2
+      - edge_synthetic_teams_source_ipv4_cidrs == []
+      - edge_pbx_source_ipv4_cidrs is sequence
+      - edge_pbx_source_ipv4_cidrs | length >= 1
+      - edge_pbx_source_ipv4_cidrs | length <= 8
+      - edge_pbx_media_destination_port_end | int - edge_pbx_media_destination_port_start | int + 1 >= 100
+      - >-
+        not (edge_pbx_media_destination_port_start | int == 21000 and
+             edge_pbx_media_destination_port_end | int == 21127)
+      - edge_direct_install_acknowledgement == 'INSTALL_DIRECT_ROUTING_REPLACEMENT_GENERATION'
+      - edge_direct_pbx_ca_bundle_src is match('^/')
+      - edge_direct_pbx_ca_bundle_sha256 is match('^[0-9a-f]{64}$')
+    fail_msg: >-
+      DIRECT_ROUTING may be installed only on an explicitly acknowledged
+      replacement/new-generation node with exact PBX trust and source inputs.
+  when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+- name: Validate canonical globally routable Direct Routing PBX source CIDRs
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -I
+      - -B
+      - -c
+      - |
+        import ipaddress, json, sys
+        values = json.loads(sys.argv[1])
+        assert isinstance(values, list) and 1 <= len(values) <= 8
+        networks = [ipaddress.ip_network(value, strict=True) for value in values]
+        assert all(isinstance(network, ipaddress.IPv4Network) for network in networks)
+        assert all(str(network) == value for network, value in zip(networks, values))
+        assert all(network.prefixlen >= 24 for network in networks)
+        assert all(network.network_address.is_global and network.broadcast_address.is_global for network in networks)
+        assert len(set(values)) == len(values)
+        assert values == sorted(values, key=lambda value: (int(ipaddress.ip_network(value).network_address), ipaddress.ip_network(value).prefixlen))
+      - "{{ edge_pbx_source_ipv4_cidrs | to_json }}"
+  changed_when: false
+  when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+- name: Inspect forbidden synthetic TLS paths on a Direct Routing replacement
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /etc/vivolution-edge/tls/fixture-ca.crt
+    - /etc/vivolution-edge/tls/fixture-client.crt
+    - /etc/vivolution-edge/tls/fixture-client.key
+  register: edge_runtime_direct_forbidden_fixture_paths
+  when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+- name: Refuse Direct Routing installation over retained synthetic secrets
+  ansible.builtin.assert:
+    that:
+      - not (item.stat.exists | default(false))
+      - not (item.stat.islnk | default(false))
+    fail_msg: >-
+      A synthetic fixture credential exists on the Direct Routing target.
+      Reimage the replacement instead of converting this node in place.
+  loop: "{{ edge_runtime_direct_forbidden_fixture_paths.results | default([]) }}"
+  when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+- name: Validate the pinned raw Ed25519 public key
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - >-
+        import base64, binascii, sys;
+        raw=base64.b64decode(sys.argv[1], validate=True);
+        assert len(raw) == 32 and base64.b64encode(raw).decode('ascii') == sys.argv[1]
+      - "{{ edge_signing_public_key_base64 }}"
+  changed_when: false
+
+- name: Define the protected per-node fixture inputs
+  ansible.builtin.set_fact:
+    edge_runtime_fixture_inputs:
+      - name: fixtureCaCrt
+        src: "{{ edge_fixture_ca_src }}"
+        dest: /etc/vivolution-edge/tls/fixture-ca.crt
+        sha256: "{{ edge_fixture_ca_sha256 }}"
+        private: false
+      - name: fixtureClientCrt
+        src: "{{ edge_fixture_client_certificate_src }}"
+        dest: /etc/vivolution-edge/tls/fixture-client.crt
+        sha256: "{{ edge_fixture_client_certificate_sha256 }}"
+        private: false
+      - name: fixtureClientKey
+        src: "{{ edge_fixture_client_key_src }}"
+        dest: /etc/vivolution-edge/tls/fixture-client.key
+        sha256: "{{ edge_fixture_client_key_sha256 }}"
+        private: true
+  when: edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+
+- name: Inspect protected fixture inputs on the deployment controller
+  ansible.builtin.stat:
+    path: "{{ item.src }}"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  loop: "{{ edge_runtime_fixture_inputs | default([]) }}"
+  delegate_to: localhost
+  become: false
+  register: edge_runtime_fixture_source_stats
+  no_log: true
+  when: edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+
+- name: Require exact, single-link fixture inputs and their reviewed SHA-256 values
+  ansible.builtin.assert:
+    that:
+      - item.item.src is match('^/')
+      - item.item.sha256 is match('^[0-9a-f]{64}$')
+      - item.stat.exists
+      - item.stat.isreg | default(false)
+      - not (item.stat.islnk | default(false))
+      - item.stat.nlink | int == 1
+      - item.stat.size | int > 0
+      - item.stat.size | int <= 1048576
+      - item.stat.checksum == item.item.sha256
+      - (not (item.item.private | bool)) or item.stat.mode in ['0400', '0600']
+    fail_msg: A protected fixture input is missing, linked, permissive, oversized, or differs from its reviewed digest.
+  loop: "{{ edge_runtime_fixture_source_stats.results | default([]) }}"
+  no_log: true
+  when: edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+
+- name: Inspect the exact Direct Routing PBX trust bundle on the controller
+  ansible.builtin.stat:
+    path: "{{ edge_direct_pbx_ca_bundle_src }}"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: edge_runtime_direct_pbx_ca_source
+  when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+- name: Require the exact single-link Direct Routing PBX trust bundle
+  ansible.builtin.assert:
+    that:
+      - edge_runtime_direct_pbx_ca_source.stat.exists
+      - edge_runtime_direct_pbx_ca_source.stat.isreg | default(false)
+      - not (edge_runtime_direct_pbx_ca_source.stat.islnk | default(false))
+      - edge_runtime_direct_pbx_ca_source.stat.nlink | int == 1
+      - edge_runtime_direct_pbx_ca_source.stat.size | int > 0
+      - edge_runtime_direct_pbx_ca_source.stat.size | int <= 1048576
+      - edge_runtime_direct_pbx_ca_source.stat.checksum == edge_direct_pbx_ca_bundle_sha256
+    fail_msg: >-
+      Direct Routing PBX trust is missing, linked, oversized, or differs from
+      its reviewed controller-side SHA-256 digest.
+  no_log: true
+  when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+- name: Create the dedicated unprivileged Edge Agent group
+  ansible.builtin.group:
+    name: vivolution-edge-agent
+    system: true
+    state: present
+
+- name: Create the dedicated non-login Edge Agent account
+  ansible.builtin.user:
+    name: vivolution-edge-agent
+    group: vivolution-edge-agent
+    home: /var/lib/vivolution-edge/agent-home
+    create_home: false
+    shell: /usr/sbin/nologin
+    system: true
+    password_lock: true
+    state: present
+
+- name: Create fixed runtime, inbox, state, and evidence directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: /var/lib/vivolution-edge/agent-state
+      owner: root
+      group: root
+      mode: '0755'
+    - path: /var/lib/vivolution-edge/agent-state/tenant
+      owner: vivolution-edge-agent
+      group: vivolution-edge-agent
+      mode: '0700'
+    - path: /var/lib/vivolution-edge/agent-work
+      owner: root
+      group: root
+      mode: '0755'
+    - path: /var/lib/vivolution-edge/runtime
+      owner: root
+      group: root
+      mode: '0755'
+    - path: /var/lib/vivolution-edge/runtime/evidence
+      owner: root
+      group: vivolution-edge-agent
+      mode: '0750'
+    - path: /var/lib/vivolution-edge/synthetic-cdr-evidence
+      owner: root
+      group: root
+      mode: '0700'
+    - path: /var/lib/vivolution-edge/runtime-inbox
+      owner: root
+      group: root
+      mode: '0700'
+    - path: /var/lib/vivolution-edge/activation-evidence
+      owner: root
+      group: root
+      mode: '0700'
+    - path: /etc/vivolution-edge
+      owner: root
+      group: root
+      mode: '0755'
+    - path: /etc/vivolution-edge/tls
+      owner: root
+      group: opensips
+      mode: '0750'
+    - path: /usr/local/libexec/vivolution-edge
+      owner: root
+      group: root
+      mode: '0755'
+
+- name: Create the root-owned Python package hierarchy for installation
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - /usr/lib/vivolution-edge
+    - /usr/lib/vivolution-edge/python
+    - /usr/lib/vivolution-edge/python/edge
+    - /usr/lib/vivolution-edge/python/edge/schema
+    - /usr/lib/vivolution-edge/python/edge/agent
+    - /usr/lib/vivolution-edge/python/edge/compiler
+    - /usr/lib/vivolution-edge/python/edge/runtime
+    - /usr/lib/vivolution-edge/config
+
+- name: Install only the reviewed schema, Agent, compiler, and runtime Python sources
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../{{ item.src }}"
+    dest: "/usr/lib/vivolution-edge/python/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: '0444'
+  loop:
+    - { src: edge/schema/manifest_tool.py, dest: edge/schema/manifest_tool.py }
+    - { src: edge/schema/edge-desired-state-v0.1.schema.json, dest: edge/schema/edge-desired-state-v0.1.schema.json }
+    - { src: edge/agent/__init__.py, dest: edge/agent/__init__.py }
+    - { src: edge/agent/__main__.py, dest: edge/agent/__main__.py }
+    - { src: edge/agent/cli.py, dest: edge/agent/cli.py }
+    - { src: edge/agent/security_core.py, dest: edge/agent/security_core.py }
+    - { src: edge/compiler/__init__.py, dest: edge/compiler/__init__.py }
+    - { src: edge/compiler/__main__.py, dest: edge/compiler/__main__.py }
+    - { src: edge/compiler/core.py, dest: edge/compiler/core.py }
+    - { src: edge/runtime/__init__.py, dest: edge/runtime/__init__.py }
+    - { src: edge/runtime/__main__.py, dest: edge/runtime/__main__.py }
+    - { src: edge/runtime/cli.py, dest: edge/runtime/cli.py }
+    - { src: edge/runtime/contracts.py, dest: edge/runtime/contracts.py }
+    - { src: edge/runtime/core.py, dest: edge/runtime/core.py }
+  loop_control:
+    label: "{{ item.dest }}"
+
+- name: Render immutable node facts for the privileged runtime
+  ansible.builtin.template:
+    src: node-facts.json.j2
+    dest: /etc/vivolution-edge/node-facts.json
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Render the root-owned read-only node facts used by the unprivileged compiler
+  ansible.builtin.template:
+    src: node-facts.json.j2
+    dest: /usr/lib/vivolution-edge/config/node-facts.json
+    owner: root
+    group: root
+    mode: '0444'
+
+- name: Install the pinned signing public key only
+  ansible.builtin.template:
+    src: signing-public-key.json.j2
+    dest: /usr/lib/vivolution-edge/config/signing-public-key.json
+    owner: root
+    group: root
+    mode: '0444'
+
+- name: Copy protected per-node fixture identity material
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: opensips
+    mode: '0440'
+    force: true
+  loop: "{{ edge_runtime_fixture_inputs | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+  when: edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+
+- name: Install the fixed Microsoft SIP root bundle builder
+  ansible.builtin.copy:
+    src: build_microsoft_sip_bundle.py
+    dest: /usr/local/libexec/vivolution-edge/build-microsoft-sip-bundle.py
+    owner: root
+    group: root
+    mode: '0444'
+
+- name: Install the bounded root-only synthetic Edge CDR exporter
+  ansible.builtin.copy:
+    src: edge_synthetic_cdr_export.py
+    dest: /usr/local/sbin/vivolution-edge-synthetic-cdr-export
+    owner: root
+    group: root
+    mode: '0500'
+
+- name: Provision public certificate trust from the Debian trust store
+  ansible.builtin.copy:
+    src: "{{ edge_system_ca_bundle_remote_src }}"
+    dest: /etc/vivolution-edge/tls/public-ca-bundle.pem
+    remote_src: true
+    owner: root
+    group: opensips
+    mode: '0440'
+    force: true
+
+- name: Provision synthetic compatibility PBX trust from the Debian trust store
+  ansible.builtin.copy:
+    src: "{{ edge_system_ca_bundle_remote_src }}"
+    dest: /etc/vivolution-edge/tls/pbx-ca-bundle.pem
+    remote_src: true
+    owner: root
+    group: opensips
+    mode: '0440'
+    force: true
+  when: edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+
+- name: Provision the exact reviewed Direct Routing PBX trust bundle
+  ansible.builtin.copy:
+    src: "{{ edge_direct_pbx_ca_bundle_src }}"
+    dest: /etc/vivolution-edge/tls/pbx-ca-bundle.pem
+    owner: root
+    group: opensips
+    mode: '0440'
+    force: true
+  no_log: true
+  when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+- name: Extract the exact seven reviewed Microsoft SIP roots
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -I
+      - -B
+      - /usr/local/libexec/vivolution-edge/build-microsoft-sip-bundle.py
+  register: edge_runtime_microsoft_root_bundle
+  changed_when: (edge_runtime_microsoft_root_bundle.stdout | from_json).changed | bool
+
+- name: Require exact Microsoft SIP root extraction evidence
+  ansible.builtin.assert:
+    that:
+      - (edge_runtime_microsoft_root_bundle.stdout | from_json).status == 'MICROSOFT_SIP_ROOT_BUNDLE_READY'
+      - (edge_runtime_microsoft_root_bundle.stdout | from_json).rootCount | int == 7
+      - (edge_runtime_microsoft_root_bundle.stdout | from_json).sha1Identifiers == [
+          '17F3DE5E9F0F19E98EF61F32266E20C407AE30EE',
+          '73A5E64A3BFF8316FF0EDCCC618A906E4EAE4D74',
+          '7E04DE896A3E666D00E687D33FFAD93BE83D349E',
+          '999A64C37FF47D9FAB95F14769891460EEC4C3C5',
+          'A78849DC5D7C758C8CDE399856B3AAD0B2A57135',
+          'A8985D3A65E5E5C4B2D7D66D40C6DD2FB19C5436',
+          'DF3C24F9BFD666761B268073FE06D1CC8D4F82A4'
+        ]
+    fail_msg: The Debian trust store cannot provide the exact reviewed Microsoft SIP root set.
+
+- name: Define common and synthetic runtime TLS inventories
+  ansible.builtin.set_fact:
+    edge_runtime_common_tls_inventory:
+      - { name: edgeCertificateChainPem, path: /etc/vivolution-edge/tls/teams-fullchain.pem }
+      - { name: edgePrivateKeyPem, path: /etc/vivolution-edge/tls/teams-key.pem }
+      - { name: microsoftCaBundlePem, path: /etc/vivolution-edge/tls/microsoft-ca-bundle.pem }
+      - { name: pbxCaBundlePem, path: /etc/vivolution-edge/tls/pbx-ca-bundle.pem }
+      - { name: publicCaBundlePem, path: /etc/vivolution-edge/tls/public-ca-bundle.pem }
+    edge_runtime_synthetic_tls_inventory:
+      - { name: fixtureCaCrt, path: /etc/vivolution-edge/tls/fixture-ca.crt }
+      - { name: fixtureClientCrt, path: /etc/vivolution-edge/tls/fixture-client.crt }
+      - { name: fixtureClientKey, path: /etc/vivolution-edge/tls/fixture-client.key }
+
+- name: Select the exact profile-specific runtime TLS inventory
+  ansible.builtin.set_fact:
+    edge_runtime_tls_inventory: >-
+      {{ edge_runtime_common_tls_inventory +
+         (edge_runtime_synthetic_tls_inventory if edge_runtime_profile == 'SYNTHETIC_PRIVATE' else []) }}
+
+- name: Calculate remote SHA-256 digests without following TLS links
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  loop: "{{ edge_runtime_tls_inventory }}"
+  register: edge_runtime_tls_stats
+
+- name: Require all runtime TLS material to be root OpenSIPS single-link files
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg | default(false)
+      - not (item.stat.islnk | default(false))
+      - item.stat.nlink | int == 1
+      - item.stat.pw_name == 'root'
+      - item.stat.gr_name == 'opensips'
+      - item.stat.mode == '0440'
+      - item.stat.size | int > 0
+      - item.stat.size | int <= 1048576
+      - item.stat.checksum is match('^[0-9a-f]{64}$')
+    fail_msg: "Runtime TLS file {{ item.item.path }} violates its fixed ownership, mode, type, size, or digest contract."
+  loop: "{{ edge_runtime_tls_stats.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Build the remote-calculated immutable TLS digest authority
+  ansible.builtin.set_fact:
+    edge_runtime_secret_digests: {}
+
+- name: Pin each profile-selected runtime TLS digest
+  ansible.builtin.set_fact:
+    edge_runtime_secret_digests: >-
+      {{ edge_runtime_secret_digests | default({}) |
+         combine({item.item.name: 'sha256:' ~ item.stat.checksum}) }}
+  loop: "{{ edge_runtime_tls_stats.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Render the root-only runtime authority with profile-specific remote SHA-256 pins
+  ansible.builtin.template:
+    src: runtime-authority.json.j2
+    dest: /etc/vivolution-edge/runtime-authority.json
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Confirm the runtime and compiler node-facts copies are byte-identical
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - /etc/vivolution-edge/node-facts.json
+    - /usr/lib/vivolution-edge/config/node-facts.json
+  register: edge_runtime_node_fact_stats
+
+- name: Reject node-facts drift between root runtime and unprivileged compiler inputs
+  ansible.builtin.assert:
+    that:
+      - edge_runtime_node_fact_stats.results[0].stat.checksum == edge_runtime_node_fact_stats.results[1].stat.checksum
+    fail_msg: Runtime and compiler node facts differ.
+
+- name: Make the installed Python hierarchy immutable to unprivileged accounts
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0555'
+  loop:
+    - /usr/lib/vivolution-edge/python/edge/schema
+    - /usr/lib/vivolution-edge/python/edge/agent
+    - /usr/lib/vivolution-edge/python/edge/compiler
+    - /usr/lib/vivolution-edge/python/edge/runtime
+    - /usr/lib/vivolution-edge/python/edge
+    - /usr/lib/vivolution-edge/python
+    - /usr/lib/vivolution-edge/config
+    - /usr/lib/vivolution-edge
+
+- name: Install isolated root-owned Agent, compiler, and runtime wrappers
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - { src: vivolution-edge-agent.j2, dest: /usr/local/bin/vivolution-edge-agent }
+    - { src: vivolution-edge-compiler.j2, dest: /usr/local/bin/vivolution-edge-compiler }
+    - { src: vivolution-edge-runtime.j2, dest: /usr/local/sbin/vivolution-edge-runtime }
+
+- name: Validate exact node facts, runtime authority, TLS chains, SANs, and key pairs
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -I
+      - -B
+      - -c
+      - |
+        import json
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, "/usr/lib/vivolution-edge/python")
+        from edge.compiler.core import NodeFacts
+        from edge.runtime.contracts import RuntimeAuthority, SecretPaths, validate_secret_material
+        facts = NodeFacts.from_mapping(json.loads(Path("/etc/vivolution-edge/node-facts.json").read_text()))
+        authority = RuntimeAuthority.from_mapping(json.loads(Path("/etc/vivolution-edge/runtime-authority.json").read_text()))
+        paths = SecretPaths(
+            Path("/etc/vivolution-edge/tls/teams-fullchain.pem"),
+            Path("/etc/vivolution-edge/tls/teams-key.pem"),
+            Path("/etc/vivolution-edge/tls/fixture-ca.crt"),
+            Path("/etc/vivolution-edge/tls/fixture-client.crt"),
+            Path("/etc/vivolution-edge/tls/fixture-client.key"),
+            Path("/etc/vivolution-edge/tls/microsoft-ca-bundle.pem"),
+            Path("/etc/vivolution-edge/tls/pbx-ca-bundle.pem"),
+            Path("/etc/vivolution-edge/tls/public-ca-bundle.pem"),
+        )
+        material = {name: path.read_bytes() for name, path in paths.as_mapping(authority.profile).items()}
+        validate_secret_material(facts, authority, material)
+  changed_when: false
+
+- name: Initialize or inspect the protected runtime before boot ownership changes
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+  register: edge_runtime_initial_status
+  changed_when: false
+
+- name: Require the fixed runtime status contract
+  ansible.builtin.assert:
+    that:
+      - (edge_runtime_initial_status.stdout | from_json).apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+      - (edge_runtime_initial_status.stdout | from_json).kind == 'EdgeRuntimeStatus'
+      - not ((edge_runtime_initial_status.stdout | from_json).journalPresent | bool)
+    fail_msg: Protected runtime initialization returned an unexpected or pending state.
+
+- name: Install the recovery-managed data-plane target
+  ansible.builtin.template:
+    src: vivolution-edge-dataplane.target.j2
+    dest: /etc/systemd/system/vivolution-edge-dataplane.target
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install the boot recovery service
+  ansible.builtin.template:
+    src: vivolution-edge-runtime-recover.service.j2
+    dest: /etc/systemd/system/vivolution-edge-runtime-recover.service
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Create the runtime-managed data-plane drop-in directories
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}.service.d"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - opensips
+    - rtpengine-daemon
+
+- name: Bind both data-plane services to the recovery-managed target
+  ansible.builtin.template:
+    src: 20-vivolution-runtime-managed.conf.j2
+    dest: "/etc/systemd/system/{{ item }}.service.d/20-vivolution-runtime-managed.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - opensips
+    - rtpengine-daemon
+
+- name: Reload systemd for protected runtime boot ownership
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Remove direct boot enablement while keeping the current data plane active
+  ansible.builtin.systemd_service:
+    name: "{{ item }}.service"
+    enabled: false
+    state: started
+  loop:
+    - opensips
+    - rtpengine-daemon
+
+- name: Enable the sole boot entry point for runtime recovery
+  ansible.builtin.systemd_service:
+    name: vivolution-edge-runtime-recover.service
+    enabled: true
+
+- name: Require the recovery service to own the next boot transaction
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemctl
+      - is-enabled
+      - "{{ item }}"
+  loop:
+    - vivolution-edge-runtime-recover.service
+    - opensips.service
+    - rtpengine-daemon.service
+  register: edge_runtime_boot_enablement
+  changed_when: false
+  failed_when: false
+
+- name: Verify only the recovery unit is enabled for boot
+  ansible.builtin.assert:
+    that:
+      - edge_runtime_boot_enablement.results[0].stdout | trim == 'enabled'
+      - edge_runtime_boot_enablement.results[1].stdout | trim in ['disabled', 'static']
+      - edge_runtime_boot_enablement.results[2].stdout | trim in ['disabled', 'static']
+    fail_msg: OpenSIPS or RTPengine can bypass the enabled boot recovery unit.
+
+- name: Enable certificate renewal only after protected authority initialization
+  ansible.builtin.systemd_service:
+    name: vivolution-edge-certificate.timer
+    enabled: true
+    state: started

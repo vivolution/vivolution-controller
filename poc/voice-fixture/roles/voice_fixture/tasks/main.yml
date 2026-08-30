@@ -1,0 +1,1117 @@
+---
+- name: Require the explicit isolated no-PSTN deployment acknowledgement
+  ansible.builtin.assert:
+    that:
+      - voice_fixture_acknowledge_no_pstn == 'NO_PSTN_SYNTHETIC_ONLY'
+      - voice_fixture_firewall_contract_acknowledged | bool
+    fail_msg: >-
+      Refusing fixture deployment until the no-PSTN acknowledgement and the
+      independently checked private NSG/nftables contract are explicit.
+
+- name: Require the fixed Debian 13 AMD64 CP1 identity
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == 'Debian'
+      - ansible_distribution_major_version == '13'
+      - ansible_architecture == 'x86_64'
+      - ansible_service_mgr == 'systemd'
+      - voice_fixture_controller_ipv4 in ansible_all_ipv4_addresses
+    fail_msg: >-
+      The synthetic fixture is restricted to Debian 13 AMD64 CP1 at its fixed
+      private address. It must not be redirected to a public or unknown host.
+
+- name: Require the immutable fixture and Edge allocations
+  ansible.builtin.assert:
+    that:
+      - voice_fixture_controller_ipv4 == '10.20.1.4'
+      - voice_fixture_edge_subnet_ipv4 == '10.20.2.0/24'
+      - voice_fixture_sbc1_ipv4 == '10.20.2.4'
+      - voice_fixture_sbc2_ipv4 == '10.20.2.5'
+      - voice_fixture_sbc1_server_name == 'sbc1.voice.vivolution.ae'
+      - voice_fixture_sbc2_server_name == 'sbc2.voice.vivolution.ae'
+      - voice_fixture_edge_teams_tls_port | int == 5061
+      - voice_fixture_edge_pbx_mtls_port | int == 15061
+      - voice_fixture_edge_rtp_start | int == 20000
+      - voice_fixture_edge_rtp_end | int == 20255
+      - voice_fixture_asterisk_tls_port | int == 16061
+      - voice_fixture_asterisk_uac_tls_port | int == 16062
+      - voice_fixture_asterisk_rtp_start | int == 21000
+      - voice_fixture_asterisk_rtp_end | int == 21127
+      - voice_fixture_sipp_uas_tls_port | int == 25061
+      - voice_fixture_sipp_uac_tls_port | int == 25062
+      - voice_fixture_sipp_probe_tls_port | int == 25063
+      - voice_fixture_sipp_rtp_start | int == 22000
+      - voice_fixture_sipp_rtp_end | int == 22063
+      - voice_fixture_sipp_uas_rtp_port | int == 22000
+      - voice_fixture_sipp_uac_rtp_port | int == 22032
+      - voice_fixture_asterisk_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061]
+      - voice_fixture_asterisk_uac_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061, 16061]
+      - voice_fixture_sipp_uas_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061, 16061, 16062]
+      - voice_fixture_sipp_probe_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061, 16061, 16062, 25061, 25062]
+      - voice_fixture_asterisk_rtp_end | int < voice_fixture_sipp_rtp_start | int
+    fail_msg: A fixture address/port drifted from the reviewed isolated allocation.
+
+- name: Require unified cgroup v2
+  ansible.builtin.stat:
+    path: /sys/fs/cgroup/cgroup.controllers
+  register: voice_fixture_cgroup_v2
+
+- name: Reject a host without cgroup v2 policy inheritance
+  ansible.builtin.assert:
+    that:
+      - voice_fixture_cgroup_v2.stat.exists
+      - voice_fixture_cgroup_v2.stat.isreg | default(false)
+    fail_msg: Runtime IP isolation requires unified cgroup v2.
+
+- name: Install bounded fixture host dependencies
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - iproute2
+      - jq
+      - nftables
+      - openssl
+      - podman
+      - util-linux
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 120
+
+- name: Prove systemd cgroup socket-bind denial is enforced
+  ansible.builtin.command:
+    argv:
+      - systemd-run
+      - --wait
+      - --collect
+      - --pipe
+      - --quiet
+      - --service-type=exec
+      - --unit=vivolution-fixture-bind-policy-probe
+      - --property=SocketBindDeny=any
+      - /usr/bin/python3
+      - -c
+      - |
+        import errno
+        import socket
+
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(('127.0.0.1', 0))
+        except OSError as error:
+            raise SystemExit(0 if error.errno in (errno.EACCES, errno.EPERM) else 2)
+        raise SystemExit(1)
+  changed_when: false
+
+- name: Prove systemd cgroup IP egress denial is enforced
+  ansible.builtin.command:
+    argv:
+      - systemd-run
+      - --wait
+      - --collect
+      - --pipe
+      - --quiet
+      - --service-type=exec
+      - --unit=vivolution-fixture-ip-policy-probe
+      - --property=IPAddressDeny=any
+      - /usr/bin/python3
+      - -c
+      - |
+        import errno
+        import socket
+
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.sendto(b'fixture-policy-probe', ('127.0.0.1', 9))
+        except OSError as error:
+            raise SystemExit(0 if error.errno in (errno.EACCES, errno.EPERM) else 2)
+        raise SystemExit(1)
+  changed_when: false
+
+- name: Create fixture directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: /usr/local/libexec
+      owner: root
+      group: root
+      mode: '0755'
+    - path: /etc/containers/systemd
+      owner: root
+      group: root
+      mode: '0755'
+    - path: "{{ voice_fixture_root }}"
+      owner: root
+      group: root
+      mode: '0750'
+    - path: "{{ voice_fixture_root }}/build"
+      owner: root
+      group: root
+      mode: '0755'
+    - path: "{{ voice_fixture_config_root }}"
+      owner: root
+      group: root
+      mode: '0750'
+    - path: "{{ voice_fixture_config_root }}/asterisk"
+      owner: root
+      group: root
+      mode: '0755'
+    - path: "{{ voice_fixture_pki_generations_root }}"
+      owner: root
+      group: root
+      # Runtime identities can traverse this mount, while every private key
+      # remains protected by its own root/numeric-group mode below.
+      mode: '0755'
+    - path: "{{ voice_fixture_pki_extensions_root }}"
+      owner: root
+      group: root
+      mode: '0755'
+    - path: "{{ voice_fixture_state_root }}"
+      owner: root
+      group: root
+      mode: '0750'
+    - path: "{{ voice_fixture_state_root }}/asterisk-log"
+      owner: '10001'
+      group: '10001'
+      mode: '0750'
+    - path: "{{ voice_fixture_state_root }}/sipp"
+      owner: '10002'
+      group: '10002'
+      mode: '0750'
+    - path: "{{ voice_fixture_state_root }}/sipp/runtime"
+      owner: '10002'
+      group: '10002'
+      mode: '0750'
+    - path: "{{ voice_fixture_results_root }}"
+      owner: root
+      group: root
+      mode: '0750'
+    - path: "{{ voice_fixture_edge_export_root }}"
+      owner: root
+      group: root
+      mode: '0700'
+
+- name: Install the pinned Asterisk build context
+  ansible.builtin.copy:
+    src: asterisk/
+    dest: "{{ voice_fixture_root }}/build/asterisk/"
+    owner: root
+    group: root
+    mode: preserve
+    directory_mode: '0755'
+
+- name: Install the pinned SIPp build context
+  ansible.builtin.copy:
+    src: sipp/
+    dest: "{{ voice_fixture_root }}/build/sipp/"
+    owner: root
+    group: root
+    mode: preserve
+    directory_mode: '0755'
+
+- name: Install immutable Asterisk fixture configuration
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ voice_fixture_config_root }}/asterisk/{{ item }}"
+    owner: root
+    group: root
+    mode: '0444'
+  loop:
+    - asterisk.conf
+    - cdr.conf
+    - cdr_custom.conf
+    - extensions.conf
+    - http.conf
+    - logger.conf
+    - manager.conf
+    - modules.conf
+    - pjsip.conf
+    - rtp.conf
+  notify: Restart voice fixture services
+
+- name: Define private fixture certificate identities
+  ansible.builtin.set_fact:
+    voice_fixture_leaf_certificates:
+      - name: asterisk
+        dns: pbx-fixture.invalid
+        ip: "{{ voice_fixture_controller_ipv4 }}"
+        key_group: '10001'
+        extended_key_usage: serverAuth,clientAuth
+      - name: sipp
+        dns: teams-fixture.invalid
+        ip: "{{ voice_fixture_controller_ipv4 }}"
+        key_group: '10002'
+        extended_key_usage: serverAuth,clientAuth
+      - name: sbc1
+        dns: sbc1-fixture.invalid
+        ip: "{{ voice_fixture_sbc1_ipv4 }}"
+        key_group: root
+        extended_key_usage: clientAuth
+      - name: sbc2
+        dns: sbc2-fixture.invalid
+        ip: "{{ voice_fixture_sbc2_ipv4 }}"
+        key_group: root
+        extended_key_usage: clientAuth
+
+- name: Install leaf certificate extension profiles
+  ansible.builtin.template:
+    src: leaf-extensions.cnf.j2
+    dest: "{{ voice_fixture_pki_extensions_root }}/{{ item.name }}-extensions.cnf"
+    owner: root
+    group: root
+    mode: '0444'
+  loop: "{{ voice_fixture_leaf_certificates }}"
+
+- name: Inspect the atomic current-PKI pointer
+  ansible.builtin.stat:
+    path: "{{ voice_fixture_pki_root }}"
+    follow: false
+  register: voice_fixture_current_pki_link
+
+- name: Reject legacy, linked-through, or non-atomic PKI state
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (voice_fixture_current_pki_link.stat.exists | default(false)) or
+        (voice_fixture_current_pki_link.stat.islnk | default(false))
+    fail_msg: >-
+      The fixture PKI path is not its atomic generation symlink. Rebuild this
+      disposable synthetic fixture rather than overwriting legacy keys in place.
+
+- name: Resolve the current PKI generation without accepting a broken link
+  ansible.builtin.command:
+    argv:
+      - readlink
+      - --canonicalize-existing
+      - "{{ voice_fixture_pki_root }}"
+  register: voice_fixture_current_pki_generation
+  changed_when: false
+  when: voice_fixture_current_pki_link.stat.exists | default(false)
+
+- name: Require the current pointer to target an immutable generation
+  ansible.builtin.assert:
+    that:
+      - >-
+        voice_fixture_current_pki_generation.stdout is
+        match('^' ~ (voice_fixture_pki_generations_root | regex_escape) ~
+              '/generation-[0-9a-f]{32}$')
+    fail_msg: The current fixture PKI pointer escapes its fixed generation root.
+  when: voice_fixture_current_pki_link.stat.exists | default(false)
+
+- name: Check whether the current fixture CA needs renewal
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -in
+      - "{{ voice_fixture_pki_root }}/ca.crt"
+      - -noout
+      - -checkend
+      - "{{ voice_fixture_ca_renewal_seconds | string }}"
+  register: voice_fixture_current_ca_validity
+  changed_when: false
+  failed_when: false
+  when: voice_fixture_current_pki_link.stat.exists | default(false)
+
+- name: Check whether any fixture leaf is inside its renewal window
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -in
+      - "{{ voice_fixture_pki_root }}/{{ item.name }}.crt"
+      - -noout
+      - -checkend
+      - "{{ voice_fixture_leaf_renewal_seconds | string }}"
+  loop: "{{ voice_fixture_leaf_certificates }}"
+  register: voice_fixture_current_leaf_validity
+  changed_when: false
+  failed_when: false
+  when: voice_fixture_current_pki_link.stat.exists | default(false)
+
+- name: Hash the Debian public trust input
+  ansible.builtin.stat:
+    path: /etc/ssl/certs/ca-certificates.crt
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: voice_fixture_system_public_ca
+
+- name: Hash the generation-pinned public trust bundle
+  ansible.builtin.stat:
+    path: "{{ voice_fixture_pki_root }}/public-ca.crt"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: voice_fixture_generation_public_ca
+  when: voice_fixture_current_pki_link.stat.exists | default(false)
+
+- name: Decide whether a complete fixture PKI generation is required
+  ansible.builtin.set_fact:
+    voice_fixture_pki_rotation_required: >-
+      {{ not (voice_fixture_current_pki_link.stat.exists | default(false)) or
+         (voice_fixture_current_ca_validity.rc | default(1) | int != 0) or
+         ((voice_fixture_current_leaf_validity.results | default([]) |
+           selectattr('rc', 'ne', 0) | list | length) > 0) or
+         (voice_fixture_generation_public_ca.stat.checksum | default('') !=
+          voice_fixture_system_public_ca.stat.checksum) }}
+    voice_fixture_ca_rotation_required: >-
+      {{ not (voice_fixture_current_pki_link.stat.exists | default(false)) or
+         (voice_fixture_current_ca_validity.rc | default(1) | int != 0) }}
+
+- name: Read the current per-issuer leaf serial inventory
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -in
+      - "{{ voice_fixture_pki_root }}/{{ item.name }}.crt"
+      - -noout
+      - -serial
+  loop: "{{ voice_fixture_leaf_certificates }}"
+  register: voice_fixture_current_leaf_serials
+  changed_when: false
+  when:
+    - voice_fixture_current_pki_link.stat.exists | default(false)
+    - voice_fixture_pki_rotation_required | bool
+
+- name: Build and atomically select a renewed fixture PKI generation
+  when: voice_fixture_pki_rotation_required | bool
+  block:
+    - name: Inspect a stale fixed PKI staging directory
+      ansible.builtin.stat:
+        path: "{{ voice_fixture_pki_staging_root }}"
+        follow: false
+      register: voice_fixture_pki_staging_state
+
+    - name: Refuse an unsafe PKI staging object
+      ansible.builtin.assert:
+        that:
+          - >-
+            not (voice_fixture_pki_staging_state.stat.exists | default(false)) or
+            ((voice_fixture_pki_staging_state.stat.isdir | default(false)) and
+             not (voice_fixture_pki_staging_state.stat.islnk | default(false)) and
+             voice_fixture_pki_staging_state.stat.pw_name == 'root' and
+             voice_fixture_pki_staging_state.stat.gr_name == 'root')
+        fail_msg: The fixed fixture PKI staging path is unsafe.
+
+    - name: Remove only an abandoned fixed PKI staging directory
+      ansible.builtin.file:
+        path: "{{ voice_fixture_pki_staging_root }}"
+        state: absent
+
+    - name: Create a protected empty PKI staging directory
+      ansible.builtin.file:
+        path: "{{ voice_fixture_pki_staging_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Reuse current private keys without exposing them
+      ansible.builtin.copy:
+        src: "{{ voice_fixture_pki_root }}/{{ item }}.key"
+        dest: "{{ voice_fixture_pki_staging_root }}/{{ item }}.key"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0600'
+      loop: "{{ ['ca'] + (voice_fixture_leaf_certificates | map(attribute='name') | list) }}"
+      no_log: true
+      when: voice_fixture_current_pki_link.stat.exists | default(false)
+
+    - name: Continue the current CA serial counter without reuse
+      ansible.builtin.copy:
+        src: "{{ voice_fixture_pki_root }}/ca.srl"
+        dest: "{{ voice_fixture_pki_staging_root }}/ca.srl"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0600'
+      when: voice_fixture_current_pki_link.stat.exists | default(false)
+
+    - name: Generate missing first-generation private keys
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - genpkey
+          - -algorithm
+          - EC
+          - -pkeyopt
+          - ec_paramgen_curve:P-256
+          - -out
+          - "{{ voice_fixture_pki_staging_root }}/{{ item }}.key"
+      loop: "{{ ['ca'] + (voice_fixture_leaf_certificates | map(attribute='name') | list) }}"
+      no_log: true
+      when: not (voice_fixture_current_pki_link.stat.exists | default(false))
+
+    - name: Seed the first CA serial counter with 128 random bits
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - rand
+          - -hex
+          - -out
+          - "{{ voice_fixture_pki_staging_root }}/ca.srl"
+          - '16'
+      no_log: true
+      when: not (voice_fixture_current_pki_link.stat.exists | default(false))
+
+    - name: Retain the current CA certificate when it is outside renewal
+      ansible.builtin.copy:
+        src: "{{ voice_fixture_pki_root }}/ca.crt"
+        dest: "{{ voice_fixture_pki_staging_root }}/ca.crt"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      when: not (voice_fixture_ca_rotation_required | bool)
+
+    - name: Renew the fixture CA certificate with its existing protected key
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -new
+          - -sha256
+          - -days
+          - "{{ voice_fixture_ca_days | string }}"
+          - -key
+          - "{{ voice_fixture_pki_staging_root }}/ca.key"
+          - -out
+          - "{{ voice_fixture_pki_staging_root }}/ca.crt"
+          - -subj
+          - /CN=Vivolution Synthetic No-PSTN Fixture CA
+          - -addext
+          - basicConstraints=critical,CA:TRUE,pathlen:0
+          - -addext
+          - keyUsage=critical,keyCertSign,cRLSign
+          - -addext
+          - subjectKeyIdentifier=hash
+      no_log: true
+      when: voice_fixture_ca_rotation_required | bool
+
+    - name: Generate renewed fixture leaf certificate requests
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -new
+          - -sha256
+          - -key
+          - "{{ voice_fixture_pki_staging_root }}/{{ item.name }}.key"
+          - -out
+          - "{{ voice_fixture_pki_staging_root }}/{{ item.name }}.csr"
+          - -subj
+          - "/CN={{ item.dns }}"
+      loop: "{{ voice_fixture_leaf_certificates }}"
+      no_log: true
+
+    - name: Sign renewed fixture leaves from the persistent unique CA counter
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -req
+          - -sha256
+          - -days
+          - "{{ voice_fixture_leaf_days | string }}"
+          - -in
+          - "{{ voice_fixture_pki_staging_root }}/{{ item.name }}.csr"
+          - -CA
+          - "{{ voice_fixture_pki_staging_root }}/ca.crt"
+          - -CAkey
+          - "{{ voice_fixture_pki_staging_root }}/ca.key"
+          - -CAserial
+          - "{{ voice_fixture_pki_staging_root }}/ca.srl"
+          - -extfile
+          - "{{ voice_fixture_pki_extensions_root }}/{{ item.name }}-extensions.cnf"
+          - -out
+          - "{{ voice_fixture_pki_staging_root }}/{{ item.name }}.crt"
+      loop: "{{ voice_fixture_leaf_certificates }}"
+      no_log: true
+
+    - name: Read the renewed per-issuer leaf serial inventory
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ voice_fixture_pki_staging_root }}/{{ item.name }}.crt"
+          - -noout
+          - -serial
+      loop: "{{ voice_fixture_leaf_certificates }}"
+      register: voice_fixture_renewed_leaf_serials
+      changed_when: false
+
+    - name: Prove renewed serials are unique and never reused from the prior generation
+      ansible.builtin.assert:
+        that:
+          - >-
+            (voice_fixture_renewed_leaf_serials.results |
+             map(attribute='stdout') | list | unique | length) ==
+            (voice_fixture_leaf_certificates | length)
+          - >-
+            (voice_fixture_renewed_leaf_serials.results |
+             map(attribute='stdout') | select('match', '^serial=[0-9A-F]{1,40}$') |
+             list | length) == (voice_fixture_leaf_certificates | length)
+          - >-
+            not (voice_fixture_current_pki_link.stat.exists | default(false)) or
+            (((voice_fixture_renewed_leaf_serials.results |
+               map(attribute='stdout') | list) |
+              intersect(voice_fixture_current_leaf_serials.results |
+                        map(attribute='stdout') | list)) | length == 0)
+        fail_msg: Fixture leaf serials were invalid, duplicated, or reused by the same CA identity.
+
+    - name: Stage the current Debian public CA bundle
+      ansible.builtin.copy:
+        src: /etc/ssl/certs/ca-certificates.crt
+        dest: "{{ voice_fixture_pki_staging_root }}/public-ca.crt"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify staged fixture leaves before selection
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - verify
+          - -CAfile
+          - "{{ voice_fixture_pki_staging_root }}/ca.crt"
+          - "{{ voice_fixture_pki_staging_root }}/{{ item.name }}.crt"
+      loop: "{{ voice_fixture_leaf_certificates }}"
+      changed_when: false
+
+    - name: Require the staged CA and leaves to exceed their renewal windows
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ voice_fixture_pki_staging_root }}/{{ item.path }}"
+          - -noout
+          - -checkend
+          - "{{ item.seconds | string }}"
+      loop:
+        - { path: ca.crt, seconds: "{{ voice_fixture_ca_renewal_seconds }}" }
+        - { path: asterisk.crt, seconds: "{{ voice_fixture_leaf_renewal_seconds }}" }
+        - { path: sipp.crt, seconds: "{{ voice_fixture_leaf_renewal_seconds }}" }
+        - { path: sbc1.crt, seconds: "{{ voice_fixture_leaf_renewal_seconds }}" }
+        - { path: sbc2.crt, seconds: "{{ voice_fixture_leaf_renewal_seconds }}" }
+      changed_when: false
+
+    - name: Calculate staged PKI content digests
+      ansible.builtin.stat:
+        path: "{{ voice_fixture_pki_staging_root }}/{{ item }}"
+        follow: false
+        get_checksum: true
+        checksum_algorithm: sha256
+      loop:
+        - ca.crt
+        - asterisk.crt
+        - sipp.crt
+        - sbc1.crt
+        - sbc2.crt
+        - public-ca.crt
+      register: voice_fixture_staged_public_digests
+
+    - name: Derive the immutable generation path from all public certificates
+      ansible.builtin.set_fact:
+        voice_fixture_new_pki_generation: >-
+          {{ voice_fixture_pki_generations_root }}/generation-{{
+             (voice_fixture_staged_public_digests.results |
+              map(attribute='stat.checksum') | join(':') | hash('sha256'))[0:32] }}
+
+    - name: Prove the immutable generation path is unused
+      ansible.builtin.stat:
+        path: "{{ voice_fixture_new_pki_generation }}"
+        follow: false
+      register: voice_fixture_new_generation_state
+
+    - name: Refuse to overwrite any prior PKI generation
+      ansible.builtin.assert:
+        that:
+          - not (voice_fixture_new_generation_state.stat.exists | default(false))
+        fail_msg: A content-addressed fixture PKI generation already exists.
+
+    - name: Seal private-key ownership before generation selection
+      ansible.builtin.file:
+        path: "{{ voice_fixture_pki_staging_root }}/{{ item.name }}.key"
+        owner: root
+        group: "{{ item.key_group }}"
+        mode: "{{ '0640' if item.name in ['asterisk', 'sipp'] else '0600' }}"
+      loop: "{{ voice_fixture_leaf_certificates }}"
+      no_log: true
+
+    - name: Seal the staged CA private key
+      ansible.builtin.file:
+        path: "{{ voice_fixture_pki_staging_root }}/ca.key"
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+
+    - name: Seal the persistent CA serial counter
+      ansible.builtin.file:
+        path: "{{ voice_fixture_pki_staging_root }}/ca.srl"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Seal staged public certificate and request permissions
+      ansible.builtin.file:
+        path: "{{ voice_fixture_pki_staging_root }}/{{ item.0 }}.{{ item.1 }}"
+        owner: root
+        group: root
+        mode: "{{ '0644' if item.1 == 'crt' else '0600' }}"
+      loop: >-
+        {{ (voice_fixture_leaf_certificates | map(attribute='name') | list) |
+           product(['crt', 'csr']) | list }}
+
+    - name: Make the complete staged generation traversable to fixture identities
+      ansible.builtin.file:
+        path: "{{ voice_fixture_pki_staging_root }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Move the complete generation into its immutable digest path
+      ansible.builtin.command:
+        argv:
+          - mv
+          - --no-target-directory
+          - "{{ voice_fixture_pki_staging_root }}"
+          - "{{ voice_fixture_new_pki_generation }}"
+      changed_when: true
+
+    - name: Remove only an abandoned next-pointer symlink
+      ansible.builtin.file:
+        path: "{{ voice_fixture_pki_root }}.next"
+        state: absent
+
+    - name: Prepare the next immutable PKI pointer
+      ansible.builtin.file:
+        src: "{{ voice_fixture_new_pki_generation }}"
+        dest: "{{ voice_fixture_pki_root }}.next"
+        state: link
+        owner: root
+        group: root
+
+    - name: Atomically select the complete PKI generation
+      ansible.builtin.command:
+        argv:
+          - mv
+          - --force
+          - --no-target-directory
+          - "{{ voice_fixture_pki_root }}.next"
+          - "{{ voice_fixture_pki_root }}"
+      changed_when: true
+      notify: Restart voice fixture services
+
+- name: Apply private-key ownership for the consuming identity
+  ansible.builtin.file:
+    path: "{{ voice_fixture_pki_root }}/{{ item.name }}.key"
+    owner: root
+    group: "{{ item.key_group }}"
+    mode: "{{ '0640' if item.name in ['asterisk', 'sipp'] else '0600' }}"
+  loop: "{{ voice_fixture_leaf_certificates }}"
+
+- name: Protect fixture public certificates and requests
+  ansible.builtin.file:
+    path: "{{ voice_fixture_pki_root }}/{{ item.0.name }}.{{ item.1 }}"
+    owner: root
+    group: root
+    mode: "{{ '0644' if item.1 == 'crt' else '0600' }}"
+  loop: "{{ voice_fixture_leaf_certificates | product(['crt', 'csr']) | list }}"
+
+- name: Protect the fixture CA certificate
+  ansible.builtin.file:
+    path: "{{ voice_fixture_pki_root }}/ca.crt"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Protect the persistent fixture CA serial counter
+  ansible.builtin.file:
+    path: "{{ voice_fixture_pki_root }}/ca.srl"
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Protect the generation-pinned Debian public CA bundle
+  ansible.builtin.file:
+    path: "{{ voice_fixture_pki_root }}/public-ca.crt"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Require every fixture leaf to be valid for client authentication
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - verify
+      - -purpose
+      - sslclient
+      - -CAfile
+      - "{{ voice_fixture_pki_root }}/ca.crt"
+      - "{{ voice_fixture_pki_root }}/{{ item.name }}.crt"
+  loop: "{{ voice_fixture_leaf_certificates }}"
+  changed_when: false
+
+- name: Require only the CP1 fixture leaves to be valid server certificates
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - verify
+      - -purpose
+      - sslserver
+      - -CAfile
+      - "{{ voice_fixture_pki_root }}/ca.crt"
+      - "{{ voice_fixture_pki_root }}/{{ item }}.crt"
+  loop:
+    - asterisk
+    - sipp
+  changed_when: false
+
+- name: Reject Edge client identities as fixture server certificates
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - verify
+      - -purpose
+      - sslserver
+      - -CAfile
+      - "{{ voice_fixture_pki_root }}/ca.crt"
+      - "{{ voice_fixture_pki_root }}/{{ item }}.crt"
+  loop:
+    - sbc1
+    - sbc2
+  register: voice_fixture_edge_server_certificate_rejection
+  changed_when: false
+  failed_when: voice_fixture_edge_server_certificate_rejection.rc == 0
+
+- name: Require at least one day of fixture leaf validity
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -in
+      - "{{ voice_fixture_pki_root }}/{{ item.name }}.crt"
+      - -noout
+      - -checkend
+      - "{{ voice_fixture_minimum_certificate_seconds | string }}"
+  loop: "{{ voice_fixture_leaf_certificates }}"
+  changed_when: false
+
+- name: Read leaf certificate public keys
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -in
+      - "{{ voice_fixture_pki_root }}/{{ item.name }}.crt"
+      - -pubkey
+      - -noout
+  loop: "{{ voice_fixture_leaf_certificates }}"
+  register: voice_fixture_certificate_public_keys
+  changed_when: false
+
+- name: Read leaf private-key public components
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - pkey
+      - -in
+      - "{{ voice_fixture_pki_root }}/{{ item.name }}.key"
+      - -pubout
+  loop: "{{ voice_fixture_leaf_certificates }}"
+  register: voice_fixture_private_key_public_components
+  changed_when: false
+  no_log: true
+
+- name: Require every fixture certificate to match its private key
+  ansible.builtin.assert:
+    that:
+      - item.0.stdout == item.1.stdout
+    fail_msg: A fixture certificate does not match its protected private key.
+  loop: >-
+    {{ voice_fixture_certificate_public_keys.results |
+       zip(voice_fixture_private_key_public_components.results) | list }}
+  no_log: true
+
+- name: Export the test CA and node-specific Edge identities
+  ansible.builtin.copy:
+    src: "{{ voice_fixture_pki_root }}/{{ item.src }}"
+    dest: "{{ voice_fixture_edge_export_root }}/{{ item.dest }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - src: ca.crt
+      dest: fixture-ca.crt
+      mode: '0400'
+    - src: sbc1.crt
+      dest: sbc1.crt
+      mode: '0400'
+    - src: sbc1.key
+      dest: sbc1.key
+      mode: '0400'
+    - src: sbc2.crt
+      dest: sbc2.crt
+      mode: '0400'
+    - src: sbc2.key
+      dest: sbc2.key
+      mode: '0400'
+  no_log: true
+
+- name: Collect public fixture certificate identities
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -in
+      - "{{ voice_fixture_pki_root }}/{{ item }}.crt"
+      - -noout
+      - -subject
+      - -issuer
+      - -serial
+      - -enddate
+      - -fingerprint
+      - -sha256
+  loop: "{{ ['ca'] + (voice_fixture_leaf_certificates | map(attribute='name') | list) }}"
+  register: voice_fixture_public_certificate_identities
+  changed_when: false
+
+- name: Record the public certificate inventory without private material
+  ansible.builtin.copy:
+    content: |
+      scope=vivolution-synthetic-no-pstn
+      {% for certificate in voice_fixture_public_certificate_identities.results %}
+      [{{ certificate.item }}]
+      {{ certificate.stdout }}
+      {% endfor %}
+    dest: "{{ voice_fixture_edge_export_root }}/CERTIFICATE-INVENTORY"
+    owner: root
+    group: root
+    mode: '0400'
+
+- name: Inspect the pinned base images
+  ansible.builtin.command:
+    argv: [podman, image, exists, "{{ item }}"]
+  loop:
+    - "{{ voice_fixture_base_image }}"
+    - "{{ voice_fixture_python_base_image }}"
+  register: voice_fixture_base_images
+  changed_when: false
+  failed_when: false
+
+- name: Pull missing base images by immutable digest
+  ansible.builtin.command:
+    argv: [podman, pull, "{{ item.item }}"]
+  loop: "{{ voice_fixture_base_images.results }}"
+  when: item.rc != 0
+  register: voice_fixture_pulled_base_images
+  retries: 3
+  delay: 5
+  until: voice_fixture_pulled_base_images is succeeded
+
+- name: Inspect existing fixture image tags
+  ansible.builtin.command:
+    argv: [podman, image, exists, "{{ item }}"]
+  loop:
+    - "{{ voice_fixture_asterisk_image_tag }}"
+    - "{{ voice_fixture_sipp_image_tag }}"
+  register: voice_fixture_existing_images
+  changed_when: false
+  failed_when: false
+
+- name: Build the pinned Asterisk fixture image once per immutable version tag
+  ansible.builtin.command:
+    argv:
+      - podman
+      - build
+      - --pull=never
+      - --build-arg
+      - "BASE_IMAGE={{ voice_fixture_base_image }}"
+      - --build-arg
+      - "ASTERISK_VERSION={{ voice_fixture_asterisk_version }}"
+      - --build-arg
+      - "ASTERISK_SOURCE_SHA256={{ voice_fixture_asterisk_source_sha256 }}"
+      - --tag
+      - "{{ voice_fixture_asterisk_image_tag }}"
+      - "{{ voice_fixture_root }}/build/asterisk"
+  when: voice_fixture_existing_images.results[0].rc != 0
+  notify: Restart voice fixture services
+
+- name: Build the exact Debian SIPp fixture image once per immutable version tag
+  ansible.builtin.command:
+    argv:
+      - podman
+      - build
+      - --pull=never
+      - --build-arg
+      - "BASE_IMAGE={{ voice_fixture_python_base_image }}"
+      - --build-arg
+      - "SIPP_DEBIAN_VERSION={{ voice_fixture_sipp_debian_version }}"
+      - --tag
+      - "{{ voice_fixture_sipp_image_tag }}"
+      - "{{ voice_fixture_root }}/build/sipp"
+  when: voice_fixture_existing_images.results[1].rc != 0
+  notify: Restart voice fixture services
+
+- name: Resolve local fixture images to immutable content IDs
+  ansible.builtin.command:
+    argv:
+      - podman
+      - image
+      - inspect
+      - --format
+      - '{{ "{{.Id}}" }}'
+      - "{{ item }}"
+  loop:
+    - "{{ voice_fixture_asterisk_image_tag }}"
+    - "{{ voice_fixture_sipp_image_tag }}"
+  register: voice_fixture_image_ids
+  changed_when: false
+
+- name: Remember immutable fixture image IDs
+  ansible.builtin.set_fact:
+    voice_fixture_asterisk_image_id: "{{ voice_fixture_image_ids.results[0].stdout | trim }}"
+    voice_fixture_sipp_image_id: "{{ voice_fixture_image_ids.results[1].stdout | trim }}"
+
+- name: Require content-addressed fixture images
+  ansible.builtin.assert:
+    that:
+      - voice_fixture_asterisk_image_id is regex('^sha256:[0-9a-f]{64}$')
+      - voice_fixture_sipp_image_id is regex('^sha256:[0-9a-f]{64}$')
+    fail_msg: A fixture image did not resolve to an immutable local content ID.
+
+- name: Verify the built Asterisk version
+  ansible.builtin.command:
+    argv:
+      - podman
+      - run
+      - --rm
+      - --network=none
+      - --read-only
+      - --cap-drop=all
+      - "{{ voice_fixture_asterisk_image_id }}"
+      - -V
+  register: voice_fixture_asterisk_version_output
+  changed_when: false
+
+- name: Verify the built SIPp version
+  ansible.builtin.command:
+    argv:
+      - podman
+      - run
+      - --rm
+      - --network=none
+      - --read-only
+      - --cap-drop=all
+      - --entrypoint
+      - /usr/bin/sipp
+      - "{{ voice_fixture_sipp_image_id }}"
+      - -v
+  register: voice_fixture_sipp_version_output
+  changed_when: false
+
+- name: Require the declared runtime component versions
+  ansible.builtin.assert:
+    that:
+      - voice_fixture_asterisk_version in (voice_fixture_asterisk_version_output.stdout + voice_fixture_asterisk_version_output.stderr)
+      - "'v3.7.3' in (voice_fixture_sipp_version_output.stdout + voice_fixture_sipp_version_output.stderr)"
+    fail_msg: A built fixture component does not report its pinned version.
+
+- name: Record immutable fixture image IDs
+  ansible.builtin.copy:
+    content: "{{ item.content }}\n"
+    dest: "{{ voice_fixture_config_root }}/{{ item.name }}-image-id"
+    owner: root
+    group: root
+    mode: '0444'
+  loop:
+    - name: asterisk
+      content: "{{ voice_fixture_asterisk_image_id }}"
+    - name: sipp
+      content: "{{ voice_fixture_sipp_image_id }}"
+
+- name: Install the isolated fixture Quadlets
+  ansible.builtin.template:
+    src: "{{ item }}.container.j2"
+    dest: "/etc/containers/systemd/{{ item }}.container"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - vivolution-voice-fixture-asterisk
+    - vivolution-voice-fixture-sipp
+  notify: Restart voice fixture services
+
+- name: Install the fixture readiness verifier
+  ansible.builtin.template:
+    src: vivolution-voice-fixture-readiness.j2
+    dest: /usr/local/libexec/vivolution-voice-fixture-readiness
+    owner: root
+    group: root
+    mode: '0550'
+
+- name: Install the serialized synthetic call runner
+  ansible.builtin.template:
+    src: vivolution-voice-fixture-test.j2
+    dest: /usr/local/sbin/vivolution-voice-fixture-test
+    owner: root
+    group: root
+    mode: '0550'
+
+- name: Install the exact fixture CDR normalizer and offline reconciler
+  ansible.builtin.copy:
+    src: bin/synthetic_cdr_evidence.py
+    dest: /usr/local/libexec/vivolution-synthetic-cdr-evidence
+    owner: root
+    group: root
+    mode: '0550'
+
+- name: Record the reviewed private firewall contract acknowledgement
+  ansible.builtin.copy:
+    content: |
+      scope=no-pstn
+      controller={{ voice_fixture_controller_ipv4 }}
+      edge_source={{ voice_fixture_edge_subnet_ipv4 }}
+      tcp={{ voice_fixture_asterisk_tls_port }},{{ voice_fixture_sipp_uas_tls_port }}
+      udp={{ voice_fixture_asterisk_rtp_start }}-{{ voice_fixture_asterisk_rtp_end }},{{ voice_fixture_sipp_rtp_start }}-{{ voice_fixture_sipp_rtp_end }}
+    dest: "{{ voice_fixture_config_root }}/firewall-contract"
+    owner: root
+    group: root
+    mode: '0444'
+
+- name: Apply fixture service changes before readiness
+  ansible.builtin.meta: flush_handlers
+
+- name: Restart the isolated fixture services onto the selected PKI generation
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: restarted
+  loop:
+    - vivolution-voice-fixture-asterisk.service
+    - vivolution-voice-fixture-sipp.service
+
+- name: Verify local fixture readiness and isolation
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/vivolution-voice-fixture-readiness]
+  register: voice_fixture_readiness
+  changed_when: false
+
+- name: Require the explicit no-PSTN readiness result
+  ansible.builtin.assert:
+    that:
+      - voice_fixture_readiness.stdout is search('^READY no-pstn fixture=10.20.1.4 edges=10.20.2.0/24$')
+    fail_msg: The installed fixture did not reach its isolated readiness contract.

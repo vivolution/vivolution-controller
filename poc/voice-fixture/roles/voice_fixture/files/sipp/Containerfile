@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+ARG BASE_IMAGE=docker.io/library/python@sha256:7e3a6aca9d74f93cca21a91d86a8dad8c34749afd5b4a98ee481c9c47b9f5ed4
+FROM ${BASE_IMAGE}
+
+ARG SIPP_DEBIAN_VERSION=1:3.7.3-2
+ARG SIPP_UID=10002
+ARG SIPP_GID=10002
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install --yes --no-install-recommends \
+        "sip-tester=${SIPP_DEBIAN_VERSION}"; \
+    test "$(dpkg-query --show --showformat='${Version}' sip-tester)" = "${SIPP_DEBIAN_VERSION}"; \
+    rm -rf /var/lib/apt/lists/*; \
+    groupadd --gid "${SIPP_GID}" fixture-sipp; \
+    useradd --uid "${SIPP_UID}" --gid "${SIPP_GID}" \
+        --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin fixture-sipp; \
+    mkdir --parents /opt/fixture/scenarios /opt/fixture/bin /results; \
+    chown --recursive fixture-sipp:fixture-sipp /results
+
+COPY scenarios/ /opt/fixture/scenarios/
+COPY bin/ /opt/fixture/bin/
+RUN chmod 0555 /opt/fixture/bin/*.py \
+    && chmod 0444 /opt/fixture/scenarios/*.xml
+
+USER 10002:10002
+EXPOSE 25061/tcp 25062/tcp 25063/tcp 22000/udp 22032/udp
+
+LABEL org.opencontainers.image.title="Vivolution synthetic Teams-side fixture" \
+      org.opencontainers.image.version="3.7.3-2" \
+      ae.vivolution.fixture.scope="no-pstn"
+
+ENTRYPOINT ["/usr/local/bin/python"]

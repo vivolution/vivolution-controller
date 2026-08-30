@@ -1,0 +1,1984 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.voice.vivolution.ae/edge/desired-state/v0.1",
+  "title": "Vivolution Edge signed desired-state envelope v0.1",
+  "description": "Canonical, signed, node-targeted desired state. JSON Schema validates shape; target equality, tenant ownership, digests, time, sequence high-water state and reference integrity are mandatory semantic checks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "manifestDigest",
+    "manifest",
+    "signatures"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "edge.vivolution.ae/v0.1"
+    },
+    "kind": {
+      "const": "SignedDesiredState"
+    },
+    "manifestDigest": {
+      "$ref": "#/$defs/sha256Digest"
+    },
+    "manifest": {
+      "$ref": "#/$defs/manifest"
+    },
+    "signatures": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {
+        "$ref": "#/$defs/signature"
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._:-]{0,127}$"
+    },
+    "sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "utcTimestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "cidr": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 49,
+      "pattern": "^[0-9A-Fa-f:.]+/[0-9]{1,3}$",
+      "not": {
+        "enum": [
+          "0.0.0.0/0",
+          "::/0"
+        ]
+      }
+    },
+    "ipAddress": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 45,
+      "pattern": "^[0-9A-Fa-f:.]+$"
+    },
+    "hostNameOrAddress": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9.:-]*[A-Za-z0-9]$"
+    },
+    "tenantIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "customerAccountId",
+        "m365TenantId",
+        "tenantContextId",
+        "serviceInstanceId",
+        "allocationId"
+      ],
+      "properties": {
+        "customerAccountId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "m365TenantId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "tenantContextId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "serviceInstanceId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "allocationId": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "clusterTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "clusterId",
+        "nodeId",
+        "slot",
+        "generation"
+      ],
+      "properties": {
+        "scope": {
+          "const": "CLUSTER"
+        },
+        "clusterId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "slot": {
+          "enum": [
+            "A",
+            "B"
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "tenantTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "clusterId",
+        "nodeId",
+        "slot",
+        "generation",
+        "tenant"
+      ],
+      "properties": {
+        "scope": {
+          "const": "TENANT"
+        },
+        "clusterId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "slot": {
+          "enum": [
+            "A",
+            "B"
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant": {
+          "$ref": "#/$defs/tenantIdentity"
+        }
+      }
+    },
+    "target": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/clusterTarget"
+        },
+        {
+          "$ref": "#/$defs/tenantTarget"
+        }
+      ]
+    },
+    "tenantArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "scope",
+        "tenantContextId",
+        "allocationId",
+        "kind",
+        "mediaType",
+        "sizeBytes",
+        "sha256",
+        "fetchPath",
+        "applyOrder"
+      ],
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "scope": {
+          "const": "TENANT"
+        },
+        "tenantContextId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "allocationId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "kind": {
+          "enum": [
+            "OPENSIPS_TENANT_CONFIG",
+            "RTPENGINE_TENANT_CONFIG",
+            "NFTABLES_TENANT_POLICY"
+          ]
+        },
+        "mediaType": {
+          "enum": [
+            "application/json",
+            "application/toml",
+            "text/plain"
+          ]
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256Digest"
+        },
+        "fetchPath": {
+          "type": "string",
+          "pattern": "^/v0\\.1/artifacts/sha256/[0-9a-f]{64}$"
+        },
+        "applyOrder": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      }
+    },
+    "clusterArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "scope",
+        "kind",
+        "mediaType",
+        "sizeBytes",
+        "sha256",
+        "fetchPath",
+        "applyOrder"
+      ],
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "scope": {
+          "const": "CLUSTER"
+        },
+        "kind": {
+          "enum": [
+            "SOFTWARE_PACKAGE",
+            "OPENSIPS_SHARED_CONFIG",
+            "NFTABLES_CLUSTER_POLICY",
+            "TRUST_BUNDLE"
+          ]
+        },
+        "mediaType": {
+          "enum": [
+            "application/json",
+            "application/octet-stream",
+            "application/toml",
+            "text/plain"
+          ]
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 536870912
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256Digest"
+        },
+        "fetchPath": {
+          "type": "string",
+          "pattern": "^/v0\\.1/artifacts/sha256/[0-9a-f]{64}$"
+        },
+        "applyOrder": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      }
+    },
+    "tenantSecretReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "secretRefId",
+        "scope",
+        "tenantContextId",
+        "allocationId",
+        "purpose",
+        "version",
+        "requiredOnNode",
+        "offlineValiditySeconds"
+      ],
+      "properties": {
+        "secretRefId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "scope": {
+          "const": "TENANT"
+        },
+        "tenantContextId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "allocationId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "purpose": {
+          "enum": [
+            "PBX_CLIENT_MTLS_IDENTITY",
+            "PBX_SERVER_TLS_IDENTITY",
+            "PBX_CLIENT_CA_BUNDLE",
+            "RTPENGINE_CONTROL_CREDENTIAL"
+          ]
+        },
+        "version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "requiredOnNode": {
+          "type": "boolean"
+        },
+        "offlineValiditySeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31536000
+        }
+      }
+    },
+    "clusterSecretReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "secretRefId",
+        "scope",
+        "purpose",
+        "version",
+        "requiredOnNode",
+        "offlineValiditySeconds"
+      ],
+      "properties": {
+        "secretRefId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "scope": {
+          "const": "CLUSTER"
+        },
+        "purpose": {
+          "enum": [
+            "TEAMS_TLS_IDENTITY",
+            "NODE_MANAGEMENT_IDENTITY",
+            "RTPENGINE_CONTROL_CREDENTIAL"
+          ]
+        },
+        "version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "requiredOnNode": {
+          "type": "boolean"
+        },
+        "offlineValiditySeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31536000
+        }
+      }
+    },
+    "connectorSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "transport",
+        "remoteHost",
+        "remotePort",
+        "mediaDestinationPortStart",
+        "mediaDestinationPortEnd",
+        "tlsServerName",
+        "sourceCidrs",
+        "authentication",
+        "credentialSecretRef",
+        "optionsIntervalSeconds"
+      ],
+      "properties": {
+        "role": {
+          "const": "PBX"
+        },
+        "transport": {
+          "const": "TLS"
+        },
+        "remoteHost": {
+          "$ref": "#/$defs/hostNameOrAddress"
+        },
+        "remotePort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "mediaDestinationPortStart": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65534,
+          "multipleOf": 2
+        },
+        "mediaDestinationPortEnd": {
+          "type": "integer",
+          "minimum": 1025,
+          "maximum": 65535
+        },
+        "tlsServerName": {
+          "$ref": "#/$defs/hostNameOrAddress"
+        },
+        "sourceCidrs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/cidr"
+          }
+        },
+        "authentication": {
+          "enum": [
+            "MTLS",
+            "MTLS_AND_IP_ACL"
+          ]
+        },
+        "credentialSecretRef": {
+          "$ref": "#/$defs/identifier"
+        },
+        "optionsIntervalSeconds": {
+          "type": "integer",
+          "minimum": 15,
+          "maximum": 300
+        }
+      }
+    },
+    "listenerSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "transport",
+        "bindAddress",
+        "port",
+        "allowedSourceCidrs",
+        "certificateSecretRef",
+        "mutualTls",
+        "clientCaSecretRef"
+      ],
+      "properties": {
+        "role": {
+          "const": "PBX"
+        },
+        "transport": {
+          "const": "TLS"
+        },
+        "bindAddress": {
+          "enum": [
+            "0.0.0.0",
+            "::"
+          ]
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535,
+          "not": {
+            "const": 5061
+          }
+        },
+        "allowedSourceCidrs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/cidr"
+          }
+        },
+        "certificateSecretRef": {
+          "$ref": "#/$defs/identifier"
+        },
+        "mutualTls": {
+          "const": true
+        },
+        "clientCaSecretRef": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "routeSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "direction",
+        "priority",
+        "calledNumberPrefix",
+        "connectorRef",
+        "enabled"
+      ],
+      "properties": {
+        "direction": {
+          "enum": [
+            "TEAMS_TO_PBX",
+            "PBX_TO_TEAMS"
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "calledNumberPrefix": {
+          "type": "string",
+          "pattern": "^\\+[1-9][0-9]{0,14}$"
+        },
+        "connectorRef": {
+          "$ref": "#/$defs/identifier"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "mediaSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine",
+        "unitKey",
+        "advertisedAddress",
+        "portStart",
+        "portEnd",
+        "rtcpMux",
+        "codecs",
+        "maxSessions"
+      ],
+      "properties": {
+        "engine": {
+          "const": "RTPENGINE"
+        },
+        "unitKey": {
+          "$ref": "#/$defs/identifier"
+        },
+        "advertisedAddress": {
+          "$ref": "#/$defs/ipAddress"
+        },
+        "portStart": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65534,
+          "multipleOf": 2
+        },
+        "portEnd": {
+          "type": "integer",
+          "minimum": 1025,
+          "maximum": 65535
+        },
+        "rtcpMux": {
+          "type": "boolean"
+        },
+        "codecs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "PCMA",
+              "PCMU"
+            ]
+          }
+        },
+        "maxSessions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        }
+      }
+    },
+    "capacitySpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reservedConcurrentSessions",
+        "maxConcurrentSessions",
+        "maxCallsPerSecond",
+        "maxBandwidthKbps"
+      ],
+      "properties": {
+        "reservedConcurrentSessions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "maxConcurrentSessions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "maxCallsPerSecond": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "maxBandwidthKbps": {
+          "type": "integer",
+          "minimum": 128,
+          "maximum": 100000000
+        }
+      }
+    },
+    "tenantResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "resourceId",
+        "tenantContextId",
+        "allocationId",
+        "artifactIds",
+        "spec"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "tenant.connector",
+            "tenant.listener",
+            "tenant.route",
+            "tenant.media",
+            "tenant.capacity"
+          ]
+        },
+        "resourceId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "tenantContextId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "allocationId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "artifactIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "spec": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "tenant.connector"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "spec": {
+                "$ref": "#/$defs/connectorSpec"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "tenant.listener"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "spec": {
+                "$ref": "#/$defs/listenerSpec"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "tenant.route"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "spec": {
+                "$ref": "#/$defs/routeSpec"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "tenant.media"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "spec": {
+                "$ref": "#/$defs/mediaSpec"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "tenant.capacity"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "spec": {
+                "$ref": "#/$defs/capacitySpec"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "softwareSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "version",
+        "artifactId"
+      ],
+      "properties": {
+        "component": {
+          "enum": [
+            "EDGE_AGENT",
+            "ROOT_HELPER",
+            "OPENSIPS",
+            "RTPENGINE"
+          ]
+        },
+        "version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "artifactId": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "sharedListenerSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "transport",
+        "bindAddress",
+        "port",
+        "allowedSourceCidrs",
+        "certificateSecretRef"
+      ],
+      "properties": {
+        "role": {
+          "const": "TEAMS"
+        },
+        "transport": {
+          "const": "TLS"
+        },
+        "bindAddress": {
+          "enum": [
+            "0.0.0.0",
+            "::"
+          ]
+        },
+        "port": {
+          "const": 5061
+        },
+        "allowedSourceCidrs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/cidr"
+          }
+        },
+        "certificateSecretRef": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "firewallPolicySpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "teamsSourceCidrs",
+        "managementEgressHosts"
+      ],
+      "properties": {
+        "policy": {
+          "const": "DEFAULT_DENY"
+        },
+        "teamsSourceCidrs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/cidr"
+          }
+        },
+        "managementEgressHosts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/hostNameOrAddress"
+          }
+        }
+      }
+    },
+    "clusterResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "resourceId",
+        "artifactIds",
+        "spec"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "cluster.software",
+            "cluster.shared-listener",
+            "cluster.firewall-policy"
+          ]
+        },
+        "resourceId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "artifactIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "spec": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "cluster.software"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "spec": {
+                "$ref": "#/$defs/softwareSpec"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "cluster.shared-listener"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "spec": {
+                "$ref": "#/$defs/sharedListenerSpec"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "cluster.firewall-policy"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "spec": {
+                "$ref": "#/$defs/firewallPolicySpec"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "tenantHealthGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gateId",
+        "type",
+        "tenantContextId",
+        "allocationId",
+        "resourceRefs",
+        "timeoutSeconds",
+        "maxAttempts",
+        "onFailure"
+      ],
+      "properties": {
+        "gateId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "type": {
+          "enum": [
+            "ARTIFACT_DIGESTS",
+            "OPENSIPS_CONFIG",
+            "RTPENGINE_READY",
+            "TENANT_RESOURCES_ABSENT"
+          ]
+        },
+        "tenantContextId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "allocationId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "resourceRefs": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600
+        },
+        "maxAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "onFailure": {
+          "const": "ROLLBACK_TO_TARGET"
+        }
+      }
+    },
+    "clusterHealthGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gateId",
+        "type",
+        "resourceRefs",
+        "timeoutSeconds",
+        "maxAttempts",
+        "onFailure"
+      ],
+      "properties": {
+        "gateId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "type": {
+          "enum": [
+            "NODE_BASELINE",
+            "ARTIFACT_DIGESTS",
+            "OPENSIPS_CONFIG",
+            "RTPENGINE_READY",
+            "PEER_N_MINUS_ONE_CAPACITY",
+            "NODE_DECOMMISSIONED"
+          ]
+        },
+        "resourceRefs": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600
+        },
+        "maxAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "onFailure": {
+          "const": "ROLLBACK_TO_TARGET"
+        }
+      }
+    },
+    "tenantRollbackTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "clusterId",
+        "nodeId",
+        "generation",
+        "tenantContextId",
+        "allocationId",
+        "sequence",
+        "manifestDigest",
+        "artifactDigests"
+      ],
+      "properties": {
+        "scope": {
+          "const": "TENANT"
+        },
+        "clusterId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenantContextId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "allocationId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "manifestDigest": {
+          "$ref": "#/$defs/sha256Digest"
+        },
+        "artifactDigests": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sha256Digest"
+          }
+        }
+      }
+    },
+    "clusterRollbackTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "clusterId",
+        "nodeId",
+        "generation",
+        "sequence",
+        "manifestDigest",
+        "artifactDigests"
+      ],
+      "properties": {
+        "scope": {
+          "const": "CLUSTER"
+        },
+        "clusterId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "manifestDigest": {
+          "$ref": "#/$defs/sha256Digest"
+        },
+        "artifactDigests": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sha256Digest"
+          }
+        }
+      }
+    },
+    "tenantCleanupIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "tenantContextId",
+        "allocationId"
+      ],
+      "properties": {
+        "type": {
+          "const": "TENANT_RESOURCES_ABSENT"
+        },
+        "tenantContextId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "allocationId": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "clusterDecommissionIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "clusterId",
+        "nodeId",
+        "generation"
+      ],
+      "properties": {
+        "type": {
+          "const": "NODE_DECOMMISSION"
+        },
+        "clusterId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "cleanupIntent": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/tenantCleanupIntent"
+        },
+        {
+          "$ref": "#/$defs/clusterDecommissionIntent"
+        }
+      ]
+    },
+    "resourceSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "cleanupIntent",
+        "artifacts",
+        "secretReferences",
+        "resources"
+      ],
+      "properties": {
+        "mode": {
+          "const": "COMPLETE"
+        },
+        "cleanupIntent": {
+          "$ref": "#/$defs/cleanupIntent"
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 64,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/tenantArtifact"
+              },
+              {
+                "$ref": "#/$defs/clusterArtifact"
+              }
+            ]
+          }
+        },
+        "secretReferences": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/tenantSecretReference"
+              },
+              {
+                "$ref": "#/$defs/clusterSecretReference"
+              }
+            ]
+          }
+        },
+        "resources": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 256,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/tenantResource"
+              },
+              {
+                "$ref": "#/$defs/clusterResource"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "tenantActiveResourceSet": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resourceSet"
+        },
+        {
+          "properties": {
+            "cleanupIntent": {
+              "type": "null"
+            },
+            "artifacts": {
+              "minItems": 1
+            },
+            "resources": {
+              "minItems": 5,
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "const": "tenant.connector"
+                      }
+                    },
+                    "required": ["type"]
+                  }
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "const": "tenant.listener"
+                      }
+                    },
+                    "required": ["type"]
+                  }
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "const": "tenant.route"
+                      }
+                    },
+                    "required": ["type"]
+                  }
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "const": "tenant.media"
+                      }
+                    },
+                    "required": ["type"]
+                  }
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "const": "tenant.capacity"
+                      }
+                    },
+                    "required": ["type"]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "tenantAbsentResourceSet": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resourceSet"
+        },
+        {
+          "properties": {
+            "cleanupIntent": {
+              "$ref": "#/$defs/tenantCleanupIntent"
+            },
+            "artifacts": {
+              "maxItems": 0
+            },
+            "secretReferences": {
+              "maxItems": 0
+            },
+            "resources": {
+              "maxItems": 0
+            }
+          }
+        }
+      ]
+    },
+    "clusterActiveResourceSet": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resourceSet"
+        },
+        {
+          "properties": {
+            "cleanupIntent": {
+              "type": "null"
+            },
+            "artifacts": {
+              "minItems": 1
+            },
+            "resources": {
+              "minItems": 6,
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "const": "cluster.shared-listener"
+                      }
+                    },
+                    "required": ["type"]
+                  }
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "const": "cluster.firewall-policy"
+                      }
+                    },
+                    "required": ["type"]
+                  }
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "const": "cluster.software"
+                      },
+                      "spec": {
+                        "properties": {
+                          "component": {
+                            "const": "EDGE_AGENT"
+                          }
+                        },
+                        "required": ["component"]
+                      }
+                    },
+                    "required": ["type", "spec"]
+                  }
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "const": "cluster.software"
+                      },
+                      "spec": {
+                        "properties": {
+                          "component": {
+                            "const": "ROOT_HELPER"
+                          }
+                        },
+                        "required": ["component"]
+                      }
+                    },
+                    "required": ["type", "spec"]
+                  }
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "const": "cluster.software"
+                      },
+                      "spec": {
+                        "properties": {
+                          "component": {
+                            "const": "OPENSIPS"
+                          }
+                        },
+                        "required": ["component"]
+                      }
+                    },
+                    "required": ["type", "spec"]
+                  }
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "const": "cluster.software"
+                      },
+                      "spec": {
+                        "properties": {
+                          "component": {
+                            "const": "RTPENGINE"
+                          }
+                        },
+                        "required": ["component"]
+                      }
+                    },
+                    "required": ["type", "spec"]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "clusterDecommissionResourceSet": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resourceSet"
+        },
+        {
+          "properties": {
+            "cleanupIntent": {
+              "$ref": "#/$defs/clusterDecommissionIntent"
+            },
+            "artifacts": {
+              "maxItems": 0
+            },
+            "secretReferences": {
+              "maxItems": 0
+            },
+            "resources": {
+              "maxItems": 0
+            }
+          }
+        }
+      ]
+    },
+    "tenantActiveHealthGates": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 32,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/tenantHealthGate"
+          },
+          {
+            "properties": {
+              "resourceRefs": {
+                "minItems": 1
+              }
+            }
+          }
+        ]
+      },
+      "allOf": [
+        {
+          "contains": {"properties": {"type": {"const": "ARTIFACT_DIGESTS"}}, "required": ["type"]},
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {"properties": {"type": {"const": "OPENSIPS_CONFIG"}}, "required": ["type"]},
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {"properties": {"type": {"const": "RTPENGINE_READY"}}, "required": ["type"]},
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    },
+    "tenantAbsentHealthGates": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/tenantHealthGate"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "TENANT_RESOURCES_ABSENT"
+              },
+              "resourceRefs": {
+                "maxItems": 0
+              }
+            }
+          }
+        ]
+      }
+    },
+    "clusterActiveHealthGates": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 32,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/clusterHealthGate"
+          },
+          {
+            "properties": {
+              "resourceRefs": {
+                "minItems": 1
+              }
+            }
+          }
+        ]
+      },
+      "allOf": [
+        {
+          "contains": {"properties": {"type": {"const": "NODE_BASELINE"}}, "required": ["type"]},
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {"properties": {"type": {"const": "ARTIFACT_DIGESTS"}}, "required": ["type"]},
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {"properties": {"type": {"const": "OPENSIPS_CONFIG"}}, "required": ["type"]},
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {"properties": {"type": {"const": "RTPENGINE_READY"}}, "required": ["type"]},
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {"properties": {"type": {"const": "PEER_N_MINUS_ONE_CAPACITY"}}, "required": ["type"]},
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    },
+    "clusterDecommissionHealthGates": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/clusterHealthGate"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "NODE_DECOMMISSIONED"
+              },
+              "resourceRefs": {
+                "maxItems": 0
+              }
+            }
+          }
+        ]
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifestId",
+        "target",
+        "lifecycle",
+        "sequence",
+        "issuedAt",
+        "expiresAt",
+        "previousDigest",
+        "resourceSet",
+        "healthGates",
+        "rollbackTarget"
+      ],
+      "properties": {
+        "manifestId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "lifecycle": {
+          "enum": [
+            "ACTIVE",
+            "ABSENT",
+            "DECOMMISSION"
+          ]
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "issuedAt": {
+          "$ref": "#/$defs/utcTimestamp"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/utcTimestamp"
+        },
+        "previousDigest": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/sha256Digest"
+            }
+          ]
+        },
+        "resourceSet": {
+          "$ref": "#/$defs/resourceSet"
+        },
+        "healthGates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/tenantHealthGate"
+              },
+              {
+                "$ref": "#/$defs/clusterHealthGate"
+              }
+            ]
+          }
+        },
+        "rollbackTarget": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/tenantRollbackTarget"
+            },
+            {
+              "$ref": "#/$defs/clusterRollbackTarget"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "sequence": {
+                "const": 1
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "previousDigest": {
+                "type": "null"
+              },
+              "rollbackTarget": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "previousDigest": {
+                "$ref": "#/$defs/sha256Digest"
+              },
+              "rollbackTarget": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "target": {
+                "properties": {
+                  "scope": {
+                    "const": "TENANT"
+                  }
+                },
+                "required": [
+                  "scope"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "lifecycle": {
+                "enum": [
+                  "ACTIVE",
+                  "ABSENT"
+                ]
+              },
+              "resourceSet": {
+                "properties": {
+                  "artifacts": {
+                    "items": {
+                      "$ref": "#/$defs/tenantArtifact"
+                    }
+                  },
+                  "secretReferences": {
+                    "items": {
+                      "$ref": "#/$defs/tenantSecretReference"
+                    }
+                  },
+                  "resources": {
+                    "items": {
+                      "$ref": "#/$defs/tenantResource"
+                    }
+                  }
+                }
+              },
+              "healthGates": {
+                "items": {
+                  "$ref": "#/$defs/tenantHealthGate"
+                }
+              },
+              "rollbackTarget": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/$defs/tenantRollbackTarget"
+                  }
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "lifecycle": {
+                "enum": [
+                  "ACTIVE",
+                  "DECOMMISSION"
+                ]
+              },
+              "resourceSet": {
+                "properties": {
+                  "artifacts": {
+                    "items": {
+                      "$ref": "#/$defs/clusterArtifact"
+                    }
+                  },
+                  "secretReferences": {
+                    "items": {
+                      "$ref": "#/$defs/clusterSecretReference"
+                    }
+                  },
+                  "resources": {
+                    "items": {
+                      "$ref": "#/$defs/clusterResource"
+                    }
+                  }
+                }
+              },
+              "healthGates": {
+                "items": {
+                  "$ref": "#/$defs/clusterHealthGate"
+                }
+              },
+              "rollbackTarget": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/$defs/clusterRollbackTarget"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "target": {
+                "properties": {
+                  "scope": {
+                    "const": "TENANT"
+                  }
+                },
+                "required": ["scope"]
+              },
+              "lifecycle": {
+                "const": "ACTIVE"
+              }
+            },
+            "required": ["target", "lifecycle"]
+          },
+          "then": {
+            "properties": {
+              "resourceSet": {
+                "$ref": "#/$defs/tenantActiveResourceSet"
+              },
+              "healthGates": {
+                "$ref": "#/$defs/tenantActiveHealthGates"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "target": {
+                "properties": {
+                  "scope": {
+                    "const": "TENANT"
+                  }
+                },
+                "required": ["scope"]
+              },
+              "lifecycle": {
+                "const": "ABSENT"
+              }
+            },
+            "required": ["target", "lifecycle"]
+          },
+          "then": {
+            "properties": {
+              "resourceSet": {
+                "$ref": "#/$defs/tenantAbsentResourceSet"
+              },
+              "healthGates": {
+                "$ref": "#/$defs/tenantAbsentHealthGates"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "target": {
+                "properties": {
+                  "scope": {
+                    "const": "CLUSTER"
+                  }
+                },
+                "required": ["scope"]
+              },
+              "lifecycle": {
+                "const": "ACTIVE"
+              }
+            },
+            "required": ["target", "lifecycle"]
+          },
+          "then": {
+            "properties": {
+              "resourceSet": {
+                "$ref": "#/$defs/clusterActiveResourceSet"
+              },
+              "healthGates": {
+                "$ref": "#/$defs/clusterActiveHealthGates"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "target": {
+                "properties": {
+                  "scope": {
+                    "const": "CLUSTER"
+                  }
+                },
+                "required": ["scope"]
+              },
+              "lifecycle": {
+                "const": "DECOMMISSION"
+              }
+            },
+            "required": ["target", "lifecycle"]
+          },
+          "then": {
+            "properties": {
+              "resourceSet": {
+                "$ref": "#/$defs/clusterDecommissionResourceSet"
+              },
+              "healthGates": {
+                "$ref": "#/$defs/clusterDecommissionHealthGates"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "keyId",
+        "algorithm",
+        "createdAt",
+        "value"
+      ],
+      "properties": {
+        "keyId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "algorithm": {
+          "const": "Ed25519"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/utcTimestamp"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{86}==$"
+        }
+      }
+    }
+  }
+}

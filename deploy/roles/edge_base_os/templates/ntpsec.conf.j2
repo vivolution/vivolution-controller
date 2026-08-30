@@ -1,0 +1,13 @@
+# Managed by the Vivolution Open Edge bootstrap.
+# Literal anycast IPv4 endpoints keep the corresponding nftables and NSG
+# allowance deterministic; do not replace these with an unresolved pool.
+driftfile /var/lib/ntpsec/ntp.drift
+leapfile /usr/share/zoneinfo/leap-seconds.list
+
+{% for endpoint in edge_ntp_server_ipv4_cidrs %}
+server {{ endpoint | regex_replace('/32$', '') }} iburst
+{% endfor %}
+
+restrict default kod nomodify nopeer noquery limited
+restrict 127.0.0.1
+restrict ::1

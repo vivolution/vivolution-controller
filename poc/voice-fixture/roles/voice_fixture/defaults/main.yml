@@ -1,0 +1,51 @@
+---
+voice_fixture_acknowledge_no_pstn: ''
+voice_fixture_firewall_contract_acknowledged: false
+
+voice_fixture_controller_ipv4: 10.20.1.4
+voice_fixture_edge_subnet_ipv4: 10.20.2.0/24
+voice_fixture_sbc1_ipv4: 10.20.2.4
+voice_fixture_sbc2_ipv4: 10.20.2.5
+voice_fixture_sbc1_server_name: sbc1.voice.vivolution.ae
+voice_fixture_sbc2_server_name: sbc2.voice.vivolution.ae
+
+voice_fixture_edge_teams_tls_port: 5061
+voice_fixture_edge_pbx_mtls_port: 15061
+voice_fixture_edge_rtp_start: 20000
+voice_fixture_edge_rtp_end: 20255
+
+voice_fixture_asterisk_tls_port: 16061
+voice_fixture_asterisk_uac_tls_port: 16062
+voice_fixture_asterisk_rtp_start: 21000
+voice_fixture_asterisk_rtp_end: 21127
+voice_fixture_sipp_uas_tls_port: 25061
+voice_fixture_sipp_uac_tls_port: 25062
+voice_fixture_sipp_probe_tls_port: 25063
+voice_fixture_sipp_uas_rtp_port: 22000
+voice_fixture_sipp_uac_rtp_port: 22032
+voice_fixture_sipp_rtp_start: 22000
+voice_fixture_sipp_rtp_end: 22063
+
+voice_fixture_root: /opt/vivolution/voice-fixture
+voice_fixture_config_root: /etc/vivolution/voice-fixture
+voice_fixture_state_root: /var/lib/vivolution/voice-fixture
+voice_fixture_results_root: /var/lib/vivolution/voice-fixture/results
+voice_fixture_pki_root: /etc/vivolution/voice-fixture/pki-current
+voice_fixture_pki_generations_root: /etc/vivolution/voice-fixture/pki-generations
+voice_fixture_pki_staging_root: /etc/vivolution/voice-fixture/pki-staging
+voice_fixture_pki_extensions_root: /etc/vivolution/voice-fixture/pki-extensions
+voice_fixture_edge_export_root: /var/lib/vivolution/voice-fixture/edge-export
+
+voice_fixture_base_image: docker.io/library/debian@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+voice_fixture_python_base_image: docker.io/library/python@sha256:7e3a6aca9d74f93cca21a91d86a8dad8c34749afd5b4a98ee481c9c47b9f5ed4
+voice_fixture_asterisk_version: 22.10.1
+voice_fixture_asterisk_source_sha256: 373c98f4d4a1b923b42def0aee03f4e36aca9d1c244a8eeda646da8a97f89663
+voice_fixture_sipp_debian_version: '1:3.7.3-2'
+voice_fixture_asterisk_image_tag: localhost/vivolution/voice-fixture-asterisk:22.10.1
+voice_fixture_sipp_image_tag: localhost/vivolution/voice-fixture-sipp:3.7.3-2
+
+voice_fixture_ca_days: 30
+voice_fixture_leaf_days: 7
+voice_fixture_minimum_certificate_seconds: 86400
+voice_fixture_leaf_renewal_seconds: 259200
+voice_fixture_ca_renewal_seconds: 1209600

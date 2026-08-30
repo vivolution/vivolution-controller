@@ -1,0 +1,115 @@
+#!/usr/sbin/nft -f
+# Managed by the Vivolution Open Edge bootstrap.
+
+# `destroy` is idempotent when the table is absent. Both statements are one
+# atomic nft batch, so only the table owned by this role is replaced.
+destroy table inet vivolution_edge_filter
+
+table inet vivolution_edge_filter {
+    set admin_source_ipv4 {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        elements = { {{ edge_admin_source_ipv4_cidrs | join(', ') }} }
+    }
+
+    set microsoft_signaling_source_ipv4 {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        elements = { {{ edge_microsoft_signaling_source_ipv4_cidrs | join(', ') }} }
+    }
+
+    set microsoft_media_source_ipv4 {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        elements = { {{ edge_microsoft_media_source_ipv4_cidrs | join(', ') }} }
+    }
+
+{% if edge_runtime_profile == 'SYNTHETIC_PRIVATE' and edge_synthetic_teams_source_ipv4_cidrs | length > 0 %}
+    set synthetic_teams_source_ipv4 {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        elements = { {{ edge_synthetic_teams_source_ipv4_cidrs | join(', ') }} }
+    }
+
+{% endif %}
+    set pbx_source_ipv4 {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        elements = { {{ edge_pbx_source_ipv4_cidrs | join(', ') }} }
+    }
+
+    set control_plane_ipv4 {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        elements = { {{ edge_control_plane_ipv4_cidrs | join(', ') }} }
+    }
+
+    set ntp_server_ipv4 {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        elements = { {{ edge_ntp_server_ipv4_cidrs | join(', ') }} }
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        iifname "lo" accept
+        ct state invalid drop
+        ct state established,related accept
+
+        ip protocol icmp accept
+        ip6 nexthdr ipv6-icmp accept
+
+{% if edge_firewall_dhcp_server_ipv4 | default('') | length > 0 %}
+        ip saddr {{ edge_firewall_dhcp_server_ipv4 }} udp sport 67 udp dport 68 accept
+{% endif %}
+        ip saddr @admin_source_ipv4 tcp dport 22 ct state new accept
+
+{% if edge_runtime_profile == 'DIRECT_ROUTING' %}
+        ip saddr @microsoft_signaling_source_ipv4 tcp dport {{ edge_tls_signaling_port }} ct state new accept
+        ip saddr @microsoft_media_source_ipv4 udp sport { {{ edge_microsoft_media_processor_remote_port_ranges | join(', ') }} } udp dport {{ edge_rtp_port_start }}-{{ edge_rtp_port_end }} accept
+{% elif edge_synthetic_teams_source_ipv4_cidrs | length > 0 %}
+        ip saddr @synthetic_teams_source_ipv4 tcp dport {{ edge_tls_signaling_port }} ct state new accept
+        ip saddr @synthetic_teams_source_ipv4 udp dport {{ edge_rtp_port_start }}-{{ edge_rtp_port_end }} accept
+{% endif %}
+        ip saddr @pbx_source_ipv4 tcp dport {{ edge_pbx_tls_signaling_port }} ct state new accept
+        ip saddr @pbx_source_ipv4 udp sport {{ edge_pbx_media_destination_port_start }}-{{ edge_pbx_media_destination_port_end }} udp dport {{ edge_rtp_port_start }}-{{ edge_rtp_port_end }} accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority filter; policy drop;
+
+        oifname "lo" accept
+        ct state invalid drop
+        ct state established,related accept
+
+        ip daddr {{ edge_azure_wire_server_ipv4 }} udp sport 68 udp dport 67 accept
+        ip daddr {{ edge_azure_wire_server_ipv4 }} udp dport 53 accept
+        ip daddr {{ edge_azure_wire_server_ipv4 }} tcp dport 53 ct state new accept
+        ip daddr {{ edge_azure_wire_server_ipv4 }} tcp dport { 80, 32526 } ct state new accept
+        ip daddr {{ edge_azure_imds_ipv4 }} tcp dport 80 ct state new accept
+        ip daddr @ntp_server_ipv4 udp dport 123 accept
+        ip daddr @control_plane_ipv4 tcp dport 443 ct state new accept
+        meta nfproto ipv4 tcp dport { 80, 443 } ct state new accept
+{% if edge_runtime_profile == 'SYNTHETIC_PRIVATE' %}
+        ip daddr @control_plane_ipv4 tcp dport { 16061, 25061 } ct state new accept
+        ip daddr @control_plane_ipv4 udp sport {{ edge_rtp_port_start }}-{{ edge_rtp_port_end }} udp dport { 21000-21127, 22000-22063 } accept
+{% elif edge_runtime_profile == 'DIRECT_ROUTING' %}
+        ip daddr @microsoft_signaling_source_ipv4 tcp dport 5061 ct state new accept
+        ip daddr @microsoft_media_source_ipv4 udp sport {{ edge_rtp_port_start }}-{{ edge_rtp_port_end }} udp dport { {{ edge_microsoft_media_processor_remote_port_ranges | join(', ') }} } accept
+        ip daddr @pbx_source_ipv4 tcp dport 5061 ct state new accept
+        ip daddr @pbx_source_ipv4 udp sport {{ edge_rtp_port_start }}-{{ edge_rtp_port_end }} udp dport {{ edge_pbx_media_destination_port_start }}-{{ edge_pbx_media_destination_port_end }} accept
+{% endif %}
+    }
+}

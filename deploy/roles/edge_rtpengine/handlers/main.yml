@@ -1,0 +1,6 @@
+---
+- name: Restart edge RTPengine
+  ansible.builtin.systemd_service:
+    name: rtpengine-daemon.service
+    state: restarted
+    daemon_reload: true

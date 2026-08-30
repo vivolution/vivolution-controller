@@ -1,6 +1,7 @@
 # Vivolution SBC
 
-Status: CP1 management-plane foundation with signed local and Azure acceptance gates
+Status: three-node turnkey POC implementation candidate; offline qualification
+passing, Azure deployment and end-to-end acceptance pending
 
 ## Working hypothesis
 
@@ -44,9 +45,14 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
   VM, then run the signed current-release and distinct N-1 gates. The latest
   verified evidence, rather than this narrative, is authoritative for pass/fail
   status; the bridge itself is not the final isolation boundary.
-- This is a management-plane foundation POC, not a working SBC product. Edge
-  enrollment/PKI, signed configuration, telemetry, SIP signaling, RTP/media,
-  Teams onboarding, and carrier interworking are not implemented yet.
+- The authorized three-node POC implementation now includes a fail-closed
+  OpenSIPS/RTPengine Edge bootstrap, signed desired-state verifier/compiler,
+  transactional activation and rollback, public-certificate automation, a
+  private no-PSTN SIP/TLS/RTP fixture, first-tenant CP1 catalog reconciliation,
+  replacement-controller restore automation, and a guarded Microsoft 365
+  onboarding package. This is source readiness, not a deployment claim: Azure
+  host qualification, end-to-end calls, failover, and signed final evidence
+  remain pending until the new CP1/SBC1/SBC2 environment is built and tested.
 - Trivy is pinned for the replacement qualification. The signed gate blocks
   every fixable HIGH/CRITICAL finding in the committed source, exact running
   OCI image, and guest package database. It also retains the complete unfixed
@@ -63,6 +69,10 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 - No vendor purchase, customer pilot, live traffic, or production deployment is
   authorized. Microsoft supportability, certified-SBC licensing, carrier
   agreements, and UAE regulatory feasibility remain mandatory gates.
+- The private synthetic gate cannot be described as a live Teams/PSTN pass.
+  Live Direct Routing remains blocked by the unverified
+  `voice.vivolution.ae` Microsoft 365 domain, absent Teams/Phone System test
+  licenses and users, and acceptance of the non-certified support boundary.
 
 ## Working documents
 
@@ -86,6 +96,7 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 - [Commercial model](commercial-model.md)
 - [Discovery plan](discovery-plan.md)
 - [POC blueprint](poc/blueprint.md)
+- [Authorized turnkey first-tenant execution profile](poc/turnkey-first-tenant-execution.md)
 - [POC cluster enrollment](poc/cluster-enrollment.md)
 - [POC FQDN and tenant matrix](poc/fqdn-and-tenant-matrix.md)
 - [POC test matrix](poc/test-matrix.md)

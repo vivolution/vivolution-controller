@@ -1,0 +1,10 @@
+{
+  "administratorSourceIpv4Cidrs": {{ edge_admin_source_ipv4_cidrs | to_json }},
+  "apiVersion": "edge.vivolution.ae/runtime-authority/v0.1",
+  "azureDhcpServerIpv4": "168.63.129.16",
+  "generation": {{ edge_generation | int }},
+  "nodeId": {{ inventory_hostname | to_json }},
+  "profile": {{ edge_runtime_profile | to_json }},
+  "secretDigests": {{ edge_runtime_secret_digests | to_json }},
+  "slot": {{ edge_slot | to_json }}
+}

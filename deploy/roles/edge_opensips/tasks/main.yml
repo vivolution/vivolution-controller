@@ -1,0 +1,80 @@
+---
+- name: Resolve the dedicated OpenSIPS service account
+  ansible.builtin.command:
+    argv: [getent, passwd, opensips]
+  register: edge_opensips_account
+  changed_when: false
+
+- name: Require an unprivileged OpenSIPS system identity
+  ansible.builtin.assert:
+    that:
+      - edge_opensips_account.stdout_lines | length == 1
+      - edge_opensips_account.stdout.split(':') | length == 7
+      - edge_opensips_account.stdout.split(':')[2] | int > 0
+      - edge_opensips_account.stdout.split(':')[2] | int < 1000
+      - edge_opensips_account.stdout.split(':')[6] in ['/bin/false', '/usr/sbin/nologin']
+    fail_msg: OpenSIPS must run under its dedicated non-login system account.
+
+- name: Create the protected OpenSIPS state directory
+  ansible.builtin.file:
+    path: /var/lib/vivolution-edge/opensips
+    state: directory
+    owner: opensips
+    group: opensips
+    mode: '0750'
+
+- name: Install the fail-closed OpenSIPS bootstrap configuration
+  ansible.builtin.template:
+    src: opensips.cfg.j2
+    dest: /etc/opensips/opensips.cfg
+    owner: root
+    group: opensips
+    mode: '0640'
+    validate: /usr/sbin/opensips -C -f %s
+  notify: Restart edge OpenSIPS
+
+- name: Install the bounded OpenSIPS runtime defaults
+  ansible.builtin.template:
+    src: opensips.default.j2
+    dest: /etc/default/opensips
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart edge OpenSIPS
+
+- name: Create the OpenSIPS systemd override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/opensips.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Harden the unprivileged OpenSIPS service
+  ansible.builtin.template:
+    src: 10-vivolution-edge.conf.j2
+    dest: /etc/systemd/system/opensips.service.d/10-vivolution-edge.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart edge OpenSIPS
+
+- name: Enable and start OpenSIPS
+  ansible.builtin.systemd_service:
+    name: opensips.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply pending OpenSIPS changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Validate the active OpenSIPS configuration
+  ansible.builtin.command:
+    argv: [/usr/sbin/opensips, -C, -f, /etc/opensips/opensips.cfg]
+  changed_when: false
+
+- name: Require OpenSIPS to be active
+  ansible.builtin.command:
+    argv: [systemctl, is-active, opensips.service]
+  changed_when: false

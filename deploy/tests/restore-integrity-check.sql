@@ -5,7 +5,16 @@ SELECT
         SELECT 1 FROM django_migrations
         WHERE app = 'core' AND name = '0004_signed_only_rls_context'
     ))::text || '|' ||
-    ((SELECT count(*) FROM auth_user WHERE username = 'cpadmin' AND is_superuser) = 1)::text || '|' ||
+    ((
+        SELECT count(*)
+        FROM auth_user
+        WHERE username = 'cpadmin'
+          AND is_superuser
+          AND is_staff
+          AND is_active
+          AND password <> ''
+          AND password NOT LIKE '!%'
+    ) = 1)::text || '|' ||
     ((
         SELECT count(*) = 10
            AND count(DISTINCT c.relname) = 7

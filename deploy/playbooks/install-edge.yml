@@ -1,0 +1,238 @@
+---
+- name: Install the Vivolution Open Edge bootstrap
+  hosts: edge_nodes
+  become: true
+  gather_facts: true
+  vars:
+    # These are qualification inputs, not floating package selections.
+    edge_opensips_version_required: 3.6.8-1
+    edge_rtpengine_version_required: 26.0.1.22-1~bpo13+1
+    edge_opensips_keyring_sha256: ff596e24d67187fce2d6634a727a97693000d6a1acb3dd1615e89b76b06ae26d
+    edge_rtpengine_keyring_deb_sha256: 78fe26f0251138f4e3c749c88dc4df29666c8efe0823858d3a4ab49d2fa2e088
+    edge_rtpengine_keyring_sha256: 563b93c730ae8435c2b7d3492f819a5436c4451ca3230af967e9e059c0512b88
+    edge_lego_version_required: 5.4.0
+    edge_lego_linux_amd64_archive_sha256: d3adf89392d606ce84d485c1cc20832edd42ace6ff9ced9dd3670d9d8b8aca38
+    # Microsoft Direct Routing requires an RSA certificate and TLS 1.2
+    # ECDHE_RSA suites. Keep these play-level values above inventory precedence.
+    edge_acme_certificate_key_type: rsa2048
+    edge_microsoft_tls12_cipher_list: >-
+      ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256
+    edge_microsoft_media_processor_remote_port_ranges:
+      - '3478-3481'
+      - '49152-53247'
+    # Keep outbound platform dependencies deterministic so the host firewall
+    # can default-deny without breaking Azure DHCP/DNS/agent/IMDS, fixed NTP,
+    # CP1 HTTPS, package maintenance, or DNS-01 certificate renewal.
+    edge_azure_wire_server_ipv4: 168.63.129.16
+    edge_azure_imds_ipv4: 169.254.169.254
+    edge_control_plane_ipv4_cidrs:
+      - 10.20.1.4/32
+    edge_ntp_server_ipv4_cidrs:
+      - 162.159.200.1/32
+      - 162.159.200.123/32
+    # Direct data-plane DEBs are downloaded from their signed repositories and
+    # independently pinned to the SHA-256 values published in the reviewed
+    # signed Packages indexes. Dependencies remain resolved through APT.
+    edge_native_debs:
+      - name: opensips
+        version: 3.6.8-1
+        architecture: amd64
+        filename: opensips_3.6.8-1_amd64.deb
+        url: https://apt.opensips.org/pool/trixie/3.6-releases/o/opensips/opensips_3.6.8-1_amd64.deb
+        sha256: 29a2be1811bb70d9ab759fa1ec3e787207054558ed4c58646fdfa31923bc0f72
+      - name: opensips-tlsmgm-module
+        version: 3.6.8-1
+        architecture: amd64
+        filename: opensips-tlsmgm-module_3.6.8-1_amd64.deb
+        url: https://apt.opensips.org/pool/trixie/3.6-releases/o/opensips/opensips-tlsmgm-module_3.6.8-1_amd64.deb
+        sha256: 5fa6147a65389af44d73aafdcf731c023ff5b1645622d23a2d8360e0dddbd9d2
+      - name: opensips-tls-openssl-module
+        version: 3.6.8-1
+        architecture: amd64
+        filename: opensips-tls-openssl-module_3.6.8-1_amd64.deb
+        url: https://apt.opensips.org/pool/trixie/3.6-releases/o/opensips/opensips-tls-openssl-module_3.6.8-1_amd64.deb
+        sha256: 275ab8f8eb2167a6ce74186760d0cdaf866dca2f5da64150089fefe7417cd772
+      - name: opensips-tls-module
+        version: 3.6.8-1
+        architecture: amd64
+        filename: opensips-tls-module_3.6.8-1_amd64.deb
+        url: https://apt.opensips.org/pool/trixie/3.6-releases/o/opensips/opensips-tls-module_3.6.8-1_amd64.deb
+        sha256: 164c9fbb25dd0271362658b4b0d626f511ee9ff88cf5c4b1a937b408ce6a296e
+      - name: rtpengine-daemon
+        version: 26.0.1.22-1~bpo13+1
+        architecture: amd64
+        filename: rtpengine-daemon_26.0.1.22-1~bpo13+1_amd64.deb
+        url: https://rtpengine.dfx.at/26.0/pool/main/r/rtpengine/rtpengine-daemon_26.0.1.22-1~bpo13+1_amd64.deb
+        sha256: feeaaf78fc2b7581b914cb6051c3bebf3c80ac92ad0a20256b40516438bf70ca
+
+  pre_tasks:
+    - name: Inspect protected runtime state before any bootstrap role can mutate live paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - /var/lib/vivolution-edge/runtime/state.json
+        - /var/lib/vivolution-edge/runtime/transaction.json
+        - /etc/opensips/opensips.cfg
+        - /etc/rtpengine/rtpengine.conf
+        - /etc/nftables.conf
+        - /var/lib/vivolution-edge/agent-state/tenant/edge-state-v3.json
+        - /var/lib/vivolution-edge/agent-state/tenant/edge-state-v2.json
+        - /var/lib/vivolution-edge/agent-state/tenant/accepted-state-v1.json
+      register: edge_install_existing_runtime_paths
+
+    - name: Reject a linked or malformed protected runtime-state file
+      ansible.builtin.assert:
+        that:
+          - >-
+            not (edge_install_existing_runtime_paths.results[0].stat.exists | default(false)) or
+            (edge_install_existing_runtime_paths.results[0].stat.isreg | default(false))
+          - not (edge_install_existing_runtime_paths.results[0].stat.islnk | default(false))
+          - >-
+            not (edge_install_existing_runtime_paths.results[0].stat.exists | default(false)) or
+            edge_install_existing_runtime_paths.results[0].stat.pw_name == 'root'
+          - >-
+            not (edge_install_existing_runtime_paths.results[0].stat.exists | default(false)) or
+            edge_install_existing_runtime_paths.results[0].stat.mode == '0600'
+          - not (edge_install_existing_runtime_paths.results[1].stat.exists | default(false))
+          - not (edge_install_existing_runtime_paths.results[1].stat.islnk | default(false))
+        fail_msg: >-
+          A protected runtime transaction is pending or its state file is not an
+          exact root-owned regular file. Run the fixed recovery workflow first.
+
+    - name: Refuse bootstrap install over any protected Agent lifecycle state
+      ansible.builtin.assert:
+        that:
+          - not (edge_install_existing_runtime_paths.results[5].stat.exists | default(false))
+          - not (edge_install_existing_runtime_paths.results[5].stat.islnk | default(false))
+          - not (edge_install_existing_runtime_paths.results[6].stat.exists | default(false))
+          - not (edge_install_existing_runtime_paths.results[6].stat.islnk | default(false))
+          - not (edge_install_existing_runtime_paths.results[7].stat.exists | default(false))
+          - not (edge_install_existing_runtime_paths.results[7].stat.islnk | default(false))
+        fail_msg: >-
+          install-edge cannot overwrite protected Agent v3 state or silently
+          migrate legacy v1/v2 state. Use the exact activation recovery or a
+          separately reviewed state migration/reimage workflow.
+
+    - name: Read existing protected runtime state before bootstrap rendering
+      ansible.builtin.slurp:
+        src: /var/lib/vivolution-edge/runtime/state.json
+      register: edge_install_existing_runtime_state_raw
+      when: edge_install_existing_runtime_paths.results[0].stat.exists | default(false)
+
+    - name: Parse existing protected runtime state
+      ansible.builtin.set_fact:
+        edge_install_existing_runtime_state: >-
+          {{ edge_install_existing_runtime_state_raw.content | b64decode | from_json }}
+      when: edge_install_existing_runtime_paths.results[0].stat.exists | default(false)
+
+    - name: Refuse install-edge after any candidate became active
+      ansible.builtin.assert:
+        that:
+          - edge_install_existing_runtime_state.keys() | sort == ['active', 'formatVersion', 'highestSeenSequence', 'lastEvidenceDigest', 'previous']
+          - edge_install_existing_runtime_state.formatVersion | int == 1
+          - edge_install_existing_runtime_state.highestSeenSequence | int == 0
+          - edge_install_existing_runtime_state.active.kind == 'BOOTSTRAP'
+          - edge_install_existing_runtime_state.active.sequence | int == 0
+          - edge_install_existing_runtime_state.active.manifestDigest is none
+          - edge_install_existing_runtime_state.previous is none
+          - edge_install_existing_runtime_state.lastEvidenceDigest is none
+        fail_msg: >-
+          install-edge cannot rerender bootstrap live paths after a signed
+          candidate is active or its replay floor advanced. Use only a dedicated
+          reviewed runtime/certificate refresh workflow.
+      when: edge_install_existing_runtime_paths.results[0].stat.exists | default(false)
+
+    - name: Reject runtime-managed live symlinks without protected state
+      ansible.builtin.assert:
+        that:
+          - >-
+            (edge_install_existing_runtime_paths.results[0].stat.exists | default(false)) or
+            not (edge_install_existing_runtime_paths.results[2].stat.islnk | default(false))
+          - >-
+            (edge_install_existing_runtime_paths.results[0].stat.exists | default(false)) or
+            not (edge_install_existing_runtime_paths.results[3].stat.islnk | default(false))
+          - >-
+            (edge_install_existing_runtime_paths.results[0].stat.exists | default(false)) or
+            not (edge_install_existing_runtime_paths.results[4].stat.islnk | default(false))
+        fail_msg: Live configuration links exist without their protected runtime state.
+
+    - name: Inspect Direct Routing replacement authority and forbidden fixture paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - /etc/vivolution-edge/runtime-authority.json
+        - /etc/vivolution-edge/tls/fixture-ca.crt
+        - /etc/vivolution-edge/tls/fixture-client.crt
+        - /etc/vivolution-edge/tls/fixture-client.key
+      register: edge_install_direct_existing_identity
+      when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+    - name: Refuse Direct Routing bootstrap over any retained fixture material
+      ansible.builtin.assert:
+        that:
+          - not (item.stat.exists | default(false))
+          - not (item.stat.islnk | default(false))
+        fail_msg: >-
+          Direct Routing requires a clean replacement node; synthetic fixture
+          material will not be removed or overwritten in place.
+      loop: "{{ (edge_install_direct_existing_identity.results | default([]))[1:] }}"
+      when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+    - name: Read an existing Direct Routing replacement authority
+      ansible.builtin.slurp:
+        src: /etc/vivolution-edge/runtime-authority.json
+      register: edge_install_direct_existing_authority
+      when:
+        - edge_runtime_profile == 'DIRECT_ROUTING'
+        - edge_install_direct_existing_identity.results[0].stat.exists | default(false)
+
+    - name: Refuse a synthetic or different-generation authority before any role mutates the host
+      ansible.builtin.assert:
+        that:
+          - (edge_install_direct_existing_authority.content | b64decode | from_json).profile == 'DIRECT_ROUTING'
+          - (edge_install_direct_existing_authority.content | b64decode | from_json).generation | int == edge_generation | int
+          - (edge_install_direct_existing_authority.content | b64decode | from_json).nodeId == inventory_hostname
+        fail_msg: >-
+          Direct Routing will not rewrite a synthetic or different-generation
+          node authority. Use a distinct, clean replacement target.
+      when:
+        - edge_runtime_profile == 'DIRECT_ROUTING'
+        - edge_install_direct_existing_identity.results[0].stat.exists | default(false)
+
+  roles:
+    - role: edge_preflight
+    - role: edge_base_os
+    - role: ssh_hardening
+      vars:
+        cp_profile: azure
+        cp_expected_hostname: "{{ edge_expected_hostname }}"
+        cp_ssh_allowed_user: "{{ edge_ssh_allowed_user }}"
+    - role: edge_firewall
+    - role: edge_repositories
+    - role: edge_certificate
+    - role: edge_opensips
+    - role: edge_rtpengine
+    - role: edge_runtime_install
+    - role: edge_verify
+
+  post_tasks:
+    - name: Reboot the edge node for an explicitly enabled persistence check
+      ansible.builtin.reboot:
+        msg: Vivolution edge bootstrap persistence check
+        connect_timeout: 10
+        reboot_timeout: 600
+        pre_reboot_delay: 0
+        post_reboot_delay: 15
+        test_command: systemctl is-system-running --wait
+      when: edge_perform_reboot_check | bool
+
+    - name: Refresh facts after the persistence-check reboot
+      ansible.builtin.setup:
+      when: edge_perform_reboot_check | bool
+
+    - name: Re-run the complete edge verification after reboot
+      ansible.builtin.include_role:
+        name: edge_verify
+      when: edge_perform_reboot_check | bool

@@ -1,0 +1,6 @@
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage={{ item.extended_key_usage }}
+subjectAltName=DNS:{{ item.dns }},IP:{{ item.ip }}
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer

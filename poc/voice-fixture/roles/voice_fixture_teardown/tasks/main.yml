@@ -1,0 +1,103 @@
+---
+- name: Require exact acknowledgements for destructive fixture cleanup
+  ansible.builtin.assert:
+    that:
+      - >-
+        (not voice_fixture_remove_results | bool) or
+        voice_fixture_remove_results_acknowledgement == 'DELETE_SYNTHETIC_RESULTS_AND_CDRS'
+      - >-
+        (not voice_fixture_remove_pki | bool) or
+        voice_fixture_remove_pki_acknowledgement == 'DELETE_SYNTHETIC_PKI_AND_EDGE_KEYS'
+    fail_msg: >-
+      Results/CDRs and fixture PKI are preserved unless their exact destructive
+      acknowledgement is supplied.
+
+- name: Stop and disable fixture services if present
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  loop:
+    - vivolution-voice-fixture-asterisk.service
+    - vivolution-voice-fixture-sipp.service
+  failed_when: false
+
+- name: Remove only the named fixture containers
+  ansible.builtin.command:
+    argv: [podman, rm, --force, "{{ item }}"]
+  loop:
+    - vivolution-voice-fixture-asterisk
+    - vivolution-voice-fixture-sipp
+  register: voice_fixture_removed_containers
+  changed_when: voice_fixture_removed_containers.rc == 0
+  failed_when: false
+
+- name: Remove fixture Quadlets
+  ansible.builtin.file:
+    path: "/etc/containers/systemd/{{ item }}.container"
+    state: absent
+  loop:
+    - vivolution-voice-fixture-asterisk
+    - vivolution-voice-fixture-sipp
+
+- name: Reload systemd after fixture Quadlet removal
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Remove fixture executables
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /usr/local/libexec/vivolution-voice-fixture-readiness
+    - /usr/local/sbin/vivolution-voice-fixture-test
+
+- name: Remove non-secret fixture build and Asterisk configuration
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ voice_fixture_root }}"
+    - "{{ voice_fixture_config_root }}/asterisk"
+    - "{{ voice_fixture_config_root }}/asterisk-image-id"
+    - "{{ voice_fixture_config_root }}/sipp-image-id"
+    - "{{ voice_fixture_config_root }}/firewall-contract"
+
+- name: Remove immutable fixture image tags when explicitly requested
+  ansible.builtin.command:
+    argv: [podman, image, rm, "{{ item }}"]
+  loop:
+    - "{{ voice_fixture_asterisk_image_tag }}"
+    - "{{ voice_fixture_sipp_image_tag }}"
+  when: voice_fixture_remove_images | bool
+  register: voice_fixture_removed_images
+  changed_when: voice_fixture_removed_images.rc == 0
+  failed_when: false
+
+- name: Remove synthetic results, CDRs, and runtime counters when acknowledged
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  when: voice_fixture_remove_results | bool
+  loop:
+    - "{{ voice_fixture_results_root }}"
+    - "{{ voice_fixture_state_root }}/asterisk-log"
+    - "{{ voice_fixture_state_root }}/sipp"
+
+- name: Remove synthetic PKI generations and pointers when acknowledged
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  when: voice_fixture_remove_pki | bool
+  loop:
+    - "{{ voice_fixture_pki_root }}"
+    - "{{ voice_fixture_pki_root }}.next"
+    - "{{ voice_fixture_pki_staging_root }}"
+    - "{{ voice_fixture_pki_generations_root }}"
+    - "{{ voice_fixture_pki_extensions_root }}"
+
+- name: Remove exported Edge fixture identities with synthetic PKI
+  ansible.builtin.file:
+    path: "{{ voice_fixture_state_root }}/edge-export"
+    state: absent
+  when: voice_fixture_remove_pki | bool

@@ -1,0 +1,9 @@
+# Local deployment inputs may contain environment-specific addresses.
+main.bicepparam
+dns-acme.bicepparam
+*.local.bicepparam
+
+# Locally compiled ARM templates.
+main.json
+dns-acme.json
+modules/*.json

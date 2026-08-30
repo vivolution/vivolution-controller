@@ -1,0 +1,110 @@
+# syntax=docker/dockerfile:1
+ARG BASE_IMAGE=docker.io/library/debian@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+FROM ${BASE_IMAGE} AS builder
+
+ARG ASTERISK_VERSION=22.10.1
+ARG ASTERISK_SOURCE_SHA256=373c98f4d4a1b923b42def0aee03f4e36aca9d1c244a8eeda646da8a97f89663
+ARG PJPROJECT_VERSION=2.17
+ARG PJPROJECT_SOURCE_SHA256=04b2eb1f0f01aa0ad1945b167171843448a51aa6b7c3e806496d434f13a112b7
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install --yes --no-install-recommends \
+        autoconf \
+        automake \
+        bison \
+        build-essential \
+        bzip2 \
+        ca-certificates \
+        curl \
+        file \
+        flex \
+        libedit-dev \
+        libjansson-dev \
+        libncurses-dev \
+        libnewt-dev \
+        libsqlite3-dev \
+        libssl-dev \
+        libtool \
+        liburiparser-dev \
+        libxml2-dev \
+        patch \
+        pkg-config \
+        uuid-dev; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src
+
+RUN set -eux; \
+    curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+        --output asterisk.tar.gz \
+        "https://github.com/asterisk/asterisk/archive/refs/tags/${ASTERISK_VERSION}.tar.gz"; \
+    printf '%s  %s\n' "${ASTERISK_SOURCE_SHA256}" asterisk.tar.gz \
+        | sha256sum --check --strict; \
+    curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+        --output "pjproject-${PJPROJECT_VERSION}.tar.bz2" \
+        "https://raw.githubusercontent.com/asterisk/third-party/master/pjproject/${PJPROJECT_VERSION}/pjproject-${PJPROJECT_VERSION}.tar.bz2"; \
+    printf '%s  %s\n' "${PJPROJECT_SOURCE_SHA256}" "pjproject-${PJPROJECT_VERSION}.tar.bz2" \
+        | sha256sum --check --strict; \
+    tar --extract --gzip --file asterisk.tar.gz; \
+    mkdir --parents cache; \
+    cp "pjproject-${PJPROJECT_VERSION}.tar.bz2" cache/
+
+WORKDIR /usr/src/asterisk-${ASTERISK_VERSION}
+
+RUN set -eux; \
+    export EXTERNALS_CACHE_DIR=/usr/src/cache; \
+    ./configure \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --localstatedir=/var \
+        --with-jansson \
+        --with-pjproject-bundled; \
+    make menuselect.makeopts; \
+    menuselect/menuselect --disable BUILD_NATIVE menuselect.makeopts; \
+    make --jobs=2; \
+    make DESTDIR=/out install; \
+    test -x /out/usr/sbin/asterisk; \
+    test -f /out/usr/lib/asterisk/modules/chan_pjsip.so; \
+    test -f /out/usr/lib/asterisk/modules/res_rtp_asterisk.so; \
+    test -f /out/usr/lib/asterisk/modules/app_milliwatt.so; \
+    find /out/usr -type f -perm /111 -exec strip --strip-unneeded '{}' + 2>/dev/null || true; \
+    { ldd /out/usr/sbin/asterisk; \
+      find /out/usr/lib/asterisk/modules -type f -name '*.so' -exec ldd '{}' ';'; \
+    } | awk '/=> \/|^\// { for (i=1;i<=NF;i++) if ($i ~ /^\//) print $i }' \
+      | sort --unique > /tmp/runtime-libraries; \
+    mkdir --parents /runtime-libs; \
+    while IFS= read -r library; do cp --parents --dereference "$library" /runtime-libs; done \
+        < /tmp/runtime-libraries
+
+FROM ${BASE_IMAGE}
+
+ARG ASTERISK_UID=10001
+ARG ASTERISK_GID=10001
+ARG ASTERISK_VERSION=22.10.1
+
+RUN set -eux; \
+    groupadd --gid "${ASTERISK_GID}" asterisk; \
+    useradd --uid "${ASTERISK_UID}" --gid "${ASTERISK_GID}" \
+        --home-dir /var/lib/asterisk --no-create-home --shell /usr/sbin/nologin asterisk; \
+    mkdir --parents \
+        /etc/asterisk \
+        /var/lib/asterisk \
+        /var/log/asterisk/cdr-custom \
+        /var/run/asterisk \
+        /var/spool/asterisk; \
+    chown --recursive asterisk:asterisk \
+        /var/lib/asterisk /var/log/asterisk /var/run/asterisk /var/spool/asterisk
+
+COPY --from=builder /out/usr/ /usr/
+COPY --from=builder /runtime-libs/ /
+
+USER 10001:10001
+EXPOSE 16061/tcp 16062/tcp 21000-21127/udp
+
+LABEL org.opencontainers.image.title="Vivolution synthetic PBX fixture" \
+      org.opencontainers.image.version="${ASTERISK_VERSION}" \
+      ae.vivolution.fixture.scope="no-pstn"
+
+ENTRYPOINT ["/usr/sbin/asterisk"]
+CMD ["-f", "-C", "/etc/asterisk/asterisk.conf"]

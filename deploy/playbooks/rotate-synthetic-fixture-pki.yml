@@ -1,0 +1,137 @@
+---
+- name: Renew and export one complete CP1 synthetic fixture PKI generation
+  hosts: fixture_controller
+  become: true
+  gather_facts: true
+  serial: 1
+  vars:
+    edge_fixture_rotation_controller_staging_root: >-
+      {{ inventory_dir }}/generated/fixture-rotation
+  pre_tasks:
+    - name: Require the exact complete-fleet fixture rotation boundary
+      ansible.builtin.assert:
+        that:
+          - groups['fixture_controller'] | length == 1
+          - groups['edge_nodes'] | sort == ['sbc1', 'sbc2']
+          - voice_fixture_rotation_acknowledgement == 'ROTATE_SYNTHETIC_FIXTURE_PKI_ON_BOTH_EDGES'
+          - edge_fixture_rotation_controller_staging_root is match('^/')
+        fail_msg: >-
+          Fixture PKI rotation requires one fixed CP1, both exact Edge nodes,
+          an absolute protected controller staging root, and the explicit
+          complete-fleet acknowledgement.
+  tasks:
+    - name: Run expiry-aware atomic CP1 fixture generation selection
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../../poc/voice-fixture/roles/voice_fixture"
+
+    - name: Protect the controller-side rotation staging directory
+      ansible.builtin.file:
+        path: "{{ edge_fixture_rotation_controller_staging_root }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      become: false
+
+    - name: Fetch only the current CA and node-specific Edge credentials
+      ansible.builtin.fetch:
+        src: "/var/lib/vivolution/voice-fixture/edge-export/{{ item }}"
+        dest: "{{ edge_fixture_rotation_controller_staging_root }}/{{ item }}"
+        flat: true
+        fail_on_missing: true
+        validate_checksum: true
+      loop:
+        - fixture-ca.crt
+        - sbc1.crt
+        - sbc1.key
+        - sbc2.crt
+        - sbc2.key
+      no_log: true
+
+    - name: Protect fetched fixture rotation inputs on the controller
+      ansible.builtin.file:
+        path: "{{ edge_fixture_rotation_controller_staging_root }}/{{ item }}"
+        mode: '0400'
+      loop:
+        - fixture-ca.crt
+        - sbc1.crt
+        - sbc1.key
+        - sbc2.crt
+        - sbc2.key
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Pin fetched fixture rotation input digests
+      ansible.builtin.stat:
+        path: "{{ edge_fixture_rotation_controller_staging_root }}/{{ item }}"
+        follow: false
+        get_checksum: true
+        checksum_algorithm: sha256
+      loop:
+        - fixture-ca.crt
+        - sbc1.crt
+        - sbc1.key
+        - sbc2.crt
+        - sbc2.key
+      delegate_to: localhost
+      become: false
+      register: voice_fixture_rotation_export_stats
+      no_log: true
+
+    - name: Initialize the digest-bound exported credential map
+      ansible.builtin.set_fact:
+        voice_fixture_rotation_export_checksums: {}
+
+    - name: Build the digest-bound exported credential map
+      ansible.builtin.set_fact:
+        voice_fixture_rotation_export_checksums: >-
+          {{ voice_fixture_rotation_export_checksums |
+             combine({item.item: item.stat.checksum}) }}
+      loop: "{{ voice_fixture_rotation_export_stats.results }}"
+      no_log: true
+
+- name: Transactionally re-pin both Edge nodes one at a time
+  hosts: edge_nodes
+  become: true
+  gather_facts: false
+  serial: 1
+  vars:
+    voice_fixture_rotation_controller_host: "{{ groups['fixture_controller'][0] }}"
+    edge_fixture_rotation_acknowledgement: ROTATE_SYNTHETIC_FIXTURE_PKI_ON_BOTH_EDGES
+    edge_fixture_rotation_ca_sha256: >-
+      {{ hostvars[voice_fixture_rotation_controller_host].voice_fixture_rotation_export_checksums['fixture-ca.crt'] }}
+    edge_fixture_rotation_client_certificate_sha256: >-
+      {{ hostvars[voice_fixture_rotation_controller_host].voice_fixture_rotation_export_checksums[inventory_hostname ~ '.crt'] }}
+    edge_fixture_rotation_client_key_sha256: >-
+      {{ hostvars[voice_fixture_rotation_controller_host].voice_fixture_rotation_export_checksums[inventory_hostname ~ '.key'] }}
+  roles:
+    - role: edge_fixture_rotation
+
+- name: Reprove private fixture readiness and both call paths after re-pin
+  hosts: fixture_controller
+  become: true
+  gather_facts: false
+  serial: 1
+  tasks:
+    - name: Require final local fixture readiness
+      ansible.builtin.command:
+        argv: [/usr/local/libexec/vivolution-voice-fixture-readiness]
+      register: voice_fixture_rotation_final_readiness
+      changed_when: false
+
+    - name: Require the exact no-PSTN readiness result
+      ansible.builtin.assert:
+        that:
+          - >-
+            voice_fixture_rotation_final_readiness.stdout is
+            search('^READY no-pstn fixture=10.20.1.4 edges=10.20.2.0/24$')
+
+    - name: Reprove both bidirectional synthetic Edge paths after rotation
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/vivolution-voice-fixture-test
+          - "{{ item }}"
+      loop:
+        - sbc1
+        - sbc2
+      changed_when: false

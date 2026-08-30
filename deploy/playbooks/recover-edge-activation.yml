@@ -1,0 +1,739 @@
+---
+- name: Reconcile one exact interrupted Edge activation
+  hosts: edge_nodes
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars:
+    edge_agent_tenant_state_dir: /var/lib/vivolution-edge/agent-state/tenant
+    edge_runtime_authority_file: /etc/vivolution-edge/runtime-authority.json
+    edge_runtime_node_facts_file: /etc/vivolution-edge/node-facts.json
+
+  pre_tasks:
+    - name: Require explicit recovery and a second copy of the exact candidate identity
+      ansible.builtin.assert:
+        that:
+          - edge_activation_recovery_acknowledgement == 'RECOVER_EXACT_EDGE_ACTIVATION'
+          - edge_activation_recovery_node_id == inventory_hostname
+          - edge_activation_recovery_node_id == edge_expected_hostname
+          - edge_activation_recovery_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING']
+          - edge_activation_recovery_profile == edge_runtime_profile
+          - edge_activation_recovery_generation is number
+          - edge_activation_recovery_generation | int >= 1
+          - edge_activation_recovery_generation | int == edge_generation | int
+          - edge_activation_recovery_sequence is number
+          - edge_activation_recovery_sequence | int >= 1
+          - edge_activation_recovery_sequence | int <= 9007199254740991
+          - edge_activation_recovery_sequence | int == edge_activation_sequence | int
+          - edge_activation_recovery_manifest_digest is match('^sha256:[0-9a-f]{64}$')
+          - edge_activation_recovery_manifest_digest == edge_activation_manifest_digest
+          - edge_activation_local_evidence_dir is match('^/')
+          - edge_activation_local_evidence_dir == inventory_dir ~ '/generated/activation-evidence'
+          - >-
+            (edge_activation_recovery_profile == 'SYNTHETIC_PRIVATE' and
+             edge_activation_recovery_generation | int == 1 and
+             edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32']) or
+            (edge_activation_recovery_profile == 'DIRECT_ROUTING' and
+             edge_activation_recovery_generation | int >= 2)
+        fail_msg: >-
+          Recovery requires an explicit acknowledgement and a second exact copy
+          of the node, profile, generation, sequence, and manifest digest.
+
+    - name: Define only candidate-specific recovery and cleanup paths
+      ansible.builtin.set_fact:
+        edge_recovery_work_dir: >-
+          /var/lib/vivolution-edge/agent-work/{{ '%016d' | format(edge_activation_recovery_sequence | int) }}-{{ edge_activation_recovery_manifest_digest | regex_replace('^sha256:', '') }}
+        edge_recovery_inbox_dir: >-
+          /var/lib/vivolution-edge/runtime-inbox/{{ '%016d' | format(edge_activation_recovery_sequence | int) }}-{{ edge_activation_recovery_manifest_digest | regex_replace('^sha256:', '') }}
+        edge_recovery_remote_evidence_dir: >-
+          /var/lib/vivolution-edge/activation-evidence/{{ '%016d' | format(edge_activation_recovery_sequence | int) }}-{{ edge_activation_recovery_manifest_digest | regex_replace('^sha256:', '') }}
+        edge_recovery_local_evidence_dir: >-
+          {{ edge_activation_local_evidence_dir }}/{{ inventory_hostname }}/{{ '%016d' | format(edge_activation_recovery_sequence | int) }}-{{ edge_activation_recovery_manifest_digest | regex_replace('^sha256:', '') }}
+
+    - name: Read installed immutable runtime identity inputs
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ edge_runtime_authority_file }}"
+        - "{{ edge_runtime_node_facts_file }}"
+      register: edge_recovery_installed_identity_raw
+
+    - name: Parse installed immutable runtime identity inputs
+      ansible.builtin.set_fact:
+        edge_recovery_installed_authority: >-
+          {{ edge_recovery_installed_identity_raw.results[0].content | b64decode | from_json }}
+        edge_recovery_installed_facts: >-
+          {{ edge_recovery_installed_identity_raw.results[1].content | b64decode | from_json }}
+
+    - name: Bind recovery to the installed node and full tenant allocation identity
+      ansible.builtin.assert:
+        that:
+          - edge_recovery_installed_authority.apiVersion == 'edge.vivolution.ae/runtime-authority/v0.1'
+          - edge_recovery_installed_authority.nodeId == edge_activation_recovery_node_id
+          - edge_recovery_installed_authority.profile == edge_activation_recovery_profile
+          - edge_recovery_installed_authority.generation | int == edge_activation_recovery_generation | int
+          - edge_recovery_installed_authority.slot == edge_slot
+          - edge_recovery_installed_facts.nodeId == edge_activation_recovery_node_id
+          - edge_recovery_installed_facts.generation | int == edge_activation_recovery_generation | int
+          - edge_recovery_installed_facts.slot == edge_slot
+          - edge_recovery_installed_facts.clusterId == edge_cluster_id
+          - edge_recovery_installed_facts.customerAccountId == edge_customer_account_id
+          - edge_recovery_installed_facts.m365TenantId == edge_m365_tenant_id
+          - edge_recovery_installed_facts.tenantContextId == edge_tenant_context_id
+          - edge_recovery_installed_facts.serviceInstanceId == edge_service_instance_id
+          - edge_recovery_installed_facts.allocationId == edge_allocation_id
+          - edge_recovery_installed_facts.publicIpv4 == edge_public_ipv4
+          - edge_recovery_installed_facts.authorizedPbxSourceIpv4Cidrs == edge_pbx_source_ipv4_cidrs
+          - edge_recovery_installed_facts.tenantListenerPort | int == 15061
+          - edge_recovery_installed_facts.tenantMediaPortStart | int == 20000
+          - edge_recovery_installed_facts.tenantMediaPortEnd | int == 20255
+          - edge_recovery_installed_facts.pbxMediaDestinationPortStart | int == edge_pbx_media_destination_port_start | int
+          - edge_recovery_installed_facts.pbxMediaDestinationPortEnd | int == edge_pbx_media_destination_port_end | int
+          - edge_recovery_installed_facts.clusterMediaPortStart | int == 20000
+          - edge_recovery_installed_facts.clusterMediaPortEnd | int == 29999
+        fail_msg: Recovery inventory differs from the installed immutable runtime identity.
+
+    - name: Build the exact tenant-local Agent context arguments
+      ansible.builtin.set_fact:
+        edge_recovery_agent_context_argv:
+          - --state-dir
+          - "{{ edge_agent_tenant_state_dir }}"
+          - --scope
+          - TENANT
+          - --cluster-id
+          - "{{ edge_cluster_id }}"
+          - --node-id
+          - "{{ edge_activation_recovery_node_id }}"
+          - --generation
+          - "{{ edge_activation_recovery_generation | string }}"
+          - --slot
+          - "{{ edge_slot }}"
+          - --customer-account-id
+          - "{{ edge_customer_account_id }}"
+          - --m365-tenant-id
+          - "{{ edge_m365_tenant_id }}"
+          - --tenant-context-id
+          - "{{ edge_tenant_context_id }}"
+          - --service-instance-id
+          - "{{ edge_service_instance_id }}"
+          - --allocation-id
+          - "{{ edge_allocation_id }}"
+          - --tenant-listener-port
+          - '15061'
+          - --tenant-media-port-start
+          - '20000'
+          - --tenant-media-port-end
+          - '20255'
+          - --pbx-media-destination-port-start
+          - "{{ edge_pbx_media_destination_port_start | string }}"
+          - --pbx-media-destination-port-end
+          - "{{ edge_pbx_media_destination_port_end | string }}"
+          - --cluster-media-port-start
+          - '20000'
+          - --cluster-media-port-end
+          - '29999'
+          - --expected-advertised-public-ip
+          - "{{ edge_public_ipv4 }}"
+
+    - name: Add every exact PBX source authority to the Agent context
+      ansible.builtin.set_fact:
+        edge_recovery_agent_context_argv: >-
+          {{ edge_recovery_agent_context_argv + ['--authorized-pbx-source-cidr', item] }}
+      loop: "{{ edge_pbx_source_ipv4_cidrs }}"
+
+    - name: Inspect recovery evidence paths without following links
+      block:
+        - name: Inspect the remote recovery evidence path
+          ansible.builtin.stat:
+            path: "{{ edge_recovery_remote_evidence_dir }}"
+            follow: false
+          register: edge_recovery_remote_evidence_path
+
+        - name: Inspect the controller recovery evidence path
+          ansible.builtin.stat:
+            path: "{{ edge_recovery_local_evidence_dir }}"
+            follow: false
+          delegate_to: localhost
+          become: false
+          register: edge_recovery_local_evidence_path
+
+    - name: Refuse replaced or permissive evidence paths
+      ansible.builtin.assert:
+        that:
+          - >-
+            not (edge_recovery_remote_evidence_path.stat.exists | default(false)) or
+            (edge_recovery_remote_evidence_path.stat.isdir | default(false) and
+             not (edge_recovery_remote_evidence_path.stat.islnk | default(false)) and
+             edge_recovery_remote_evidence_path.stat.pw_name == 'root' and
+             edge_recovery_remote_evidence_path.stat.mode == '0700')
+          - >-
+            not (edge_recovery_local_evidence_path.stat.exists | default(false)) or
+            (edge_recovery_local_evidence_path.stat.isdir | default(false) and
+             not (edge_recovery_local_evidence_path.stat.islnk | default(false)) and
+             edge_recovery_local_evidence_path.stat.mode == '0700')
+        fail_msg: A recovery evidence path is linked, permissive, or has an unexpected type or owner.
+
+    - name: Create protected remote and controller recovery evidence directories
+      block:
+        - name: Create the root-only remote recovery evidence directory
+          ansible.builtin.file:
+            path: "{{ edge_recovery_remote_evidence_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: '0700'
+
+        - name: Create the protected controller recovery evidence directory
+          ansible.builtin.file:
+            path: "{{ edge_recovery_local_evidence_dir }}"
+            state: directory
+            mode: '0700'
+          delegate_to: localhost
+          become: false
+
+  tasks:
+    - name: Reconcile any durable runtime transaction journal first
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, recover]
+      register: edge_recovery_runtime_recover_raw
+      changed_when: >-
+        (edge_recovery_runtime_recover_raw.stdout | from_json).status != 'NO_RECOVERY_REQUIRED'
+
+    - name: Preserve runtime recovery output before classification
+      block:
+        - name: Preserve runtime recovery output remotely
+          ansible.builtin.copy:
+            content: "{{ edge_recovery_runtime_recover_raw.stdout | trim }}\n"
+            dest: >-
+              {{ edge_recovery_remote_evidence_dir }}/runtime-recovery-{{ (edge_recovery_runtime_recover_raw.stdout | from_json).status | lower | regex_replace('[^a-z0-9]+', '-') }}.json
+            owner: root
+            group: root
+            mode: '0600'
+
+        - name: Preserve runtime recovery output on the controller
+          ansible.builtin.copy:
+            content: "{{ edge_recovery_runtime_recover_raw.stdout | trim }}\n"
+            dest: >-
+              {{ edge_recovery_local_evidence_dir }}/runtime-recovery-{{ (edge_recovery_runtime_recover_raw.stdout | from_json).status | lower | regex_replace('[^a-z0-9]+', '-') }}.json
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+    - name: Parse runtime recovery output
+      ansible.builtin.set_fact:
+        edge_recovery_runtime_recover: >-
+          {{ edge_recovery_runtime_recover_raw.stdout | from_json }}
+
+    - name: Accept only exact activation recovery results
+      ansible.builtin.assert:
+        that:
+          - edge_recovery_runtime_recover.apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+          - >-
+            (edge_recovery_runtime_recover.status == 'NO_RECOVERY_REQUIRED' and
+             edge_recovery_runtime_recover.kind == 'EdgeRuntimeApplyEvidence' and
+             (edge_recovery_runtime_recover.keys() | list | sort) ==
+             ['apiVersion', 'kind', 'status']) or
+            (edge_recovery_runtime_recover.status == 'COMMITTED_TRANSACTION_RECOVERY_FINALIZED' and
+             edge_recovery_runtime_recover.kind == 'EdgeRuntimeRecoveryResult' and
+             edge_recovery_runtime_recover.operation == 'APPLY' and
+             edge_recovery_runtime_recover.agentAction == 'COMMIT_PENDING' and
+             edge_recovery_runtime_recover.active.kind == 'CANDIDATE' and
+             edge_recovery_runtime_recover.active.sequence | int == edge_activation_recovery_sequence | int and
+             edge_recovery_runtime_recover.active.manifestDigest == edge_activation_recovery_manifest_digest and
+             edge_recovery_runtime_recover.lastEvidenceDigest is match('^sha256:[0-9a-f]{64}$') and
+             edge_recovery_runtime_recover.localHealthGatePlanDigest is match('^sha256:[0-9a-f]{64}$') and
+             edge_recovery_runtime_recover.localHealthGatePlan.manifestDigest == edge_activation_recovery_manifest_digest and
+             edge_recovery_runtime_recover.localHealthGatePlan.healthGates | map(attribute='type') | list == ['ARTIFACT_DIGESTS', 'OPENSIPS_CONFIG', 'RTPENGINE_READY'] and
+             edge_recovery_runtime_recover.healthGates | map(attribute='type') | list == ['ARTIFACT_DIGESTS', 'OPENSIPS_CONFIG', 'RTPENGINE_READY'] and
+             (edge_recovery_runtime_recover.keys() | list | sort) ==
+             ['active', 'agentAction', 'apiVersion', 'healthGates', 'kind',
+              'lastEvidenceDigest', 'localHealthGatePlan',
+              'localHealthGatePlanDigest', 'operation', 'runtimeChecks',
+              'status']) or
+            (edge_recovery_runtime_recover.status == 'CRASH_RECOVERED_TO_PRIOR_LKG' and
+             edge_recovery_runtime_recover.kind == 'EdgeRuntimeApplyEvidence' and
+             edge_recovery_runtime_recover.agentAction == 'ABORT_PENDING' and
+             not (edge_recovery_runtime_recover.runtimeApplied | bool) and
+             edge_recovery_runtime_recover.rollback.performed | bool and
+             edge_recovery_runtime_recover.rollback.status == 'HEALTHY' and
+             edge_recovery_runtime_recover.sequence | int == edge_activation_recovery_sequence | int and
+             edge_recovery_runtime_recover.manifestDigest == edge_activation_recovery_manifest_digest and
+             edge_recovery_runtime_recover.nodeId == edge_activation_recovery_node_id and
+             edge_recovery_runtime_recover.evidenceDigest is match('^sha256:[0-9a-f]{64}$') and
+             (edge_recovery_runtime_recover.keys() | list | sort) ==
+             ['agentAction', 'apiVersion', 'evidenceDigest', 'healthGates', 'kind',
+              'liveTeamsInteroperability', 'manifestDigest', 'nodeId', 'rollback',
+              'runtimeApplied', 'runtimeChecks', 'runtimeReleaseDigest',
+              'sequence', 'status', 'timestamp'])
+          - edge_recovery_runtime_recover.get('healthGates', []) | rejectattr('status', 'equalto', 'PASSED') | list | length == 0
+          - edge_recovery_runtime_recover.get('runtimeChecks', []) | rejectattr('status', 'equalto', 'PASSED') | list | length == 0
+        fail_msg: Runtime recovery did not produce one exact activation recovery contract.
+
+    - name: Read the protected runtime status after journal recovery
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+      register: edge_recovery_runtime_status_raw
+      changed_when: false
+
+    - name: Parse the exact runtime status and bounded candidate replay floor
+      ansible.builtin.set_fact:
+        edge_recovery_runtime_status: "{{ edge_recovery_runtime_status_raw.stdout | from_json }}"
+
+    - name: Require a journal-free exact runtime status
+      ansible.builtin.assert:
+        that:
+          - (edge_recovery_runtime_status.keys() | list | sort) == ['active', 'apiVersion', 'highestSeenSequence', 'journalPresent', 'kind', 'lastEvidenceDigest', 'previous']
+          - edge_recovery_runtime_status.apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+          - edge_recovery_runtime_status.kind == 'EdgeRuntimeStatus'
+          - not (edge_recovery_runtime_status.journalPresent | bool)
+          - (edge_recovery_runtime_status.active.keys() | list | sort) == ['kind', 'manifestDigest', 'relativePath', 'releaseDigest', 'sequence', 'slot']
+          - edge_recovery_runtime_status.active.releaseDigest is match('^sha256:[0-9a-f]{64}$')
+          - edge_recovery_runtime_status.highestSeenSequence | int >= edge_recovery_runtime_status.active.sequence | int
+          - edge_recovery_runtime_status.highestSeenSequence | int <= edge_activation_recovery_sequence | int
+          - >-
+            edge_recovery_runtime_recover.status == 'NO_RECOVERY_REQUIRED' or
+            edge_recovery_runtime_status.highestSeenSequence | int == edge_activation_recovery_sequence | int
+        fail_msg: Runtime status does not bind the exact recovery candidate replay floor.
+
+    - name: Prove baseline health under the runtime lock before any Agent transition
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+      register: edge_recovery_runtime_health_raw
+      changed_when: false
+
+    - name: Parse the runtime health result
+      ansible.builtin.set_fact:
+        edge_recovery_runtime_health: "{{ edge_recovery_runtime_health_raw.stdout | from_json }}"
+
+    - name: Require exact healthy identity equal to runtime status
+      ansible.builtin.assert:
+        that:
+          - (edge_recovery_runtime_health.keys() | list | sort) == ['active', 'apiVersion', 'highestSeenSequence', 'kind', 'runtimeChecks']
+          - edge_recovery_runtime_health.apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+          - edge_recovery_runtime_health.kind == 'EdgeRuntimeHealth'
+          - edge_recovery_runtime_health.active == edge_recovery_runtime_status.active
+          - edge_recovery_runtime_health.highestSeenSequence | int == edge_recovery_runtime_status.highestSeenSequence | int
+          - edge_recovery_runtime_health.runtimeChecks | length > 0
+          - edge_recovery_runtime_health.runtimeChecks | rejectattr('status', 'equalto', 'PASSED') | list | length == 0
+        fail_msg: The protected active runtime did not pass the exact locked health contract.
+
+    - name: Inspect every protected Agent state generation without following links
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - /var/lib/vivolution-edge/agent-state/tenant/edge-state-v3.json
+        - /var/lib/vivolution-edge/agent-state/tenant/edge-state-v2.json
+        - /var/lib/vivolution-edge/agent-state/tenant/accepted-state-v1.json
+      register: edge_recovery_agent_state_paths
+
+    - name: Refuse legacy, linked, or malformed protected Agent state
+      ansible.builtin.assert:
+        that:
+          - not (edge_recovery_agent_state_paths.results[1].stat.exists | default(false))
+          - not (edge_recovery_agent_state_paths.results[1].stat.islnk | default(false))
+          - not (edge_recovery_agent_state_paths.results[2].stat.exists | default(false))
+          - not (edge_recovery_agent_state_paths.results[2].stat.islnk | default(false))
+          - >-
+            not (edge_recovery_agent_state_paths.results[0].stat.exists | default(false)) or
+            (edge_recovery_agent_state_paths.results[0].stat.isreg | default(false) and
+             not (edge_recovery_agent_state_paths.results[0].stat.islnk | default(false)) and
+             edge_recovery_agent_state_paths.results[0].stat.nlink | int == 1 and
+             edge_recovery_agent_state_paths.results[0].stat.pw_name == 'vivolution-edge-agent' and
+             edge_recovery_agent_state_paths.results[0].stat.mode == '0600')
+        fail_msg: Protected Agent state is legacy, linked, or violates the exact v3 file boundary.
+
+    - name: Record whether a protected Agent v3 state exists
+      ansible.builtin.set_fact:
+        edge_recovery_agent_state_present: >-
+          {{ edge_recovery_agent_state_paths.results[0].stat.exists | default(false) }}
+
+    - name: Inspect validated protected Agent state as its unprivileged owner
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/local/bin/vivolution-edge-agent', 'status'] +
+             edge_recovery_agent_context_argv }}
+      become_user: vivolution-edge-agent
+      register: edge_recovery_agent_before_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Require either exact Agent status or the exact never-staged absence result
+      ansible.builtin.assert:
+        that:
+          - >-
+            (edge_recovery_agent_state_present | bool and
+             edge_recovery_agent_before_raw.rc == 0 and
+             edge_recovery_agent_before_raw.stderr | trim == '') or
+            (not (edge_recovery_agent_state_present | bool) and
+             edge_recovery_agent_before_raw.rc == 1 and
+             edge_recovery_agent_before_raw.stdout | trim == '' and
+             edge_recovery_agent_before_raw.stderr | trim == 'ERROR: protected state does not exist')
+        fail_msg: Agent status does not agree with the securely inspected v3 state path.
+
+    - name: Parse protected Agent status
+      ansible.builtin.set_fact:
+        edge_recovery_agent_before: "{{ edge_recovery_agent_before_raw.stdout | from_json }}"
+      when: edge_recovery_agent_state_present | bool
+
+    - name: Define the exact never-staged Agent sentinel
+      ansible.builtin.set_fact:
+        edge_recovery_agent_before:
+          activeLastKnownGood: null
+          apiVersion: edge.vivolution.ae/agent-state/v0.1
+          highestSeenSequence: -1
+          kind: EdgeAgentProtectedStateAbsent
+          lastAbortedCandidate: null
+          pendingCandidate: null
+      when: not (edge_recovery_agent_state_present | bool)
+
+    - name: Require the exact Agent status and candidate replay floor
+      ansible.builtin.assert:
+        that:
+          - (edge_recovery_agent_before.keys() | list | sort) == ['activeLastKnownGood', 'apiVersion', 'highestSeenSequence', 'kind', 'lastAbortedCandidate', 'pendingCandidate']
+          - edge_recovery_agent_before.apiVersion == 'edge.vivolution.ae/agent-state/v0.1'
+          - >-
+            (edge_recovery_agent_state_present | bool and
+             edge_recovery_agent_before.kind == 'EdgeAgentProtectedStateStatus' and
+             edge_recovery_agent_before.highestSeenSequence | int >= 0 and
+             edge_recovery_agent_before.highestSeenSequence | int <= edge_activation_recovery_sequence | int and
+             (edge_recovery_agent_before.pendingCandidate is none or
+              (edge_recovery_agent_before.pendingCandidate.keys() | list | sort) == ['manifestDigest', 'sequence']) and
+             (edge_recovery_agent_before.activeLastKnownGood is none or
+              (edge_recovery_agent_before.activeLastKnownGood.keys() | list | sort) == ['manifestDigest', 'sequence']) and
+             (edge_recovery_agent_before.lastAbortedCandidate is none or
+              (edge_recovery_agent_before.lastAbortedCandidate.keys() | list | sort) == ['manifestDigest', 'sequence']) and
+             (edge_recovery_agent_before.pendingCandidate is none or
+              (edge_recovery_agent_before.highestSeenSequence | int == edge_activation_recovery_sequence | int and
+               edge_recovery_agent_before.pendingCandidate.sequence | int == edge_activation_recovery_sequence | int and
+               edge_recovery_agent_before.pendingCandidate.manifestDigest == edge_activation_recovery_manifest_digest))) or
+            (not (edge_recovery_agent_state_present | bool) and
+             edge_recovery_agent_before.kind == 'EdgeAgentProtectedStateAbsent' and
+             edge_recovery_agent_before.highestSeenSequence | int == -1 and
+             edge_recovery_agent_before.activeLastKnownGood is none and
+             edge_recovery_agent_before.lastAbortedCandidate is none and
+             edge_recovery_agent_before.pendingCandidate is none and
+             edge_recovery_runtime_recover.status == 'NO_RECOVERY_REQUIRED' and
+             edge_recovery_runtime_status.highestSeenSequence | int == 0 and
+             edge_recovery_runtime_status.active.kind == 'BOOTSTRAP' and
+             edge_recovery_runtime_status.active.sequence | int == 0 and
+             edge_recovery_runtime_status.active.manifestDigest is none)
+        fail_msg: Agent state does not contain the exact pending candidate or a reconciled exact replay floor.
+
+    - name: Derive exact runtime and Agent identity relationships
+      ansible.builtin.set_fact:
+        edge_recovery_runtime_is_candidate: >-
+          {{ edge_recovery_runtime_status.active.kind == 'CANDIDATE' and
+             edge_recovery_runtime_status.active.sequence | int == edge_activation_recovery_sequence | int and
+             edge_recovery_runtime_status.active.manifestDigest == edge_activation_recovery_manifest_digest }}
+        edge_recovery_agent_active_is_candidate: >-
+          {{ edge_recovery_agent_before.activeLastKnownGood is not none and
+             edge_recovery_agent_before.activeLastKnownGood.sequence | int == edge_activation_recovery_sequence | int and
+             edge_recovery_agent_before.activeLastKnownGood.manifestDigest == edge_activation_recovery_manifest_digest }}
+        edge_recovery_pending_is_candidate: >-
+          {{ edge_recovery_agent_before.pendingCandidate is not none and
+             edge_recovery_agent_before.pendingCandidate.sequence | int == edge_activation_recovery_sequence | int and
+             edge_recovery_agent_before.pendingCandidate.manifestDigest == edge_activation_recovery_manifest_digest }}
+        edge_recovery_last_aborted_is_candidate: >-
+          {{ edge_recovery_agent_before.lastAbortedCandidate is not none and
+             edge_recovery_agent_before.lastAbortedCandidate.sequence | int == edge_activation_recovery_sequence | int and
+             edge_recovery_agent_before.lastAbortedCandidate.manifestDigest == edge_activation_recovery_manifest_digest }}
+        edge_recovery_runtime_matches_agent_lkg: >-
+          {{ (edge_recovery_agent_before.activeLastKnownGood is none and
+              edge_recovery_runtime_status.active.kind == 'BOOTSTRAP' and
+              edge_recovery_runtime_status.active.sequence | int == 0 and
+              edge_recovery_runtime_status.active.manifestDigest is none) or
+             (edge_recovery_agent_before.activeLastKnownGood is not none and
+              edge_recovery_runtime_status.active.kind == 'CANDIDATE' and
+              edge_recovery_runtime_status.active.sequence | int == edge_recovery_agent_before.activeLastKnownGood.sequence | int and
+              edge_recovery_runtime_status.active.manifestDigest == edge_recovery_agent_before.activeLastKnownGood.manifestDigest) }}
+
+    - name: Classify exact never-staged candidate debris
+      ansible.builtin.set_fact:
+        edge_recovery_pre_stage_debris: >-
+          {{ edge_recovery_runtime_recover.status == 'NO_RECOVERY_REQUIRED' and
+             edge_recovery_runtime_status.highestSeenSequence | int < edge_activation_recovery_sequence | int and
+             edge_recovery_runtime_matches_agent_lkg | bool and
+             (not (edge_recovery_agent_state_present | bool) or
+              (edge_recovery_agent_before.pendingCandidate is none and
+               edge_recovery_agent_before.highestSeenSequence | int < edge_activation_recovery_sequence | int and
+               edge_recovery_runtime_status.highestSeenSequence | int == edge_recovery_agent_before.highestSeenSequence | int)) }}
+
+    - name: Select the only legal exact reconciliation outcome
+      ansible.builtin.set_fact:
+        edge_recovery_outcome: >-
+          {% if edge_recovery_pre_stage_debris | bool %}PRE_STAGE_CLEANUP{% elif edge_recovery_pending_is_candidate | bool and edge_recovery_runtime_is_candidate | bool %}COMMIT{% elif edge_recovery_pending_is_candidate | bool and edge_recovery_runtime_matches_agent_lkg | bool %}ABORT{% elif edge_recovery_agent_before.pendingCandidate is none and edge_recovery_agent_active_is_candidate | bool and edge_recovery_runtime_is_candidate | bool %}ALREADY_COMMITTED{% elif edge_recovery_agent_state_present | bool and edge_recovery_agent_before.pendingCandidate is none and edge_recovery_last_aborted_is_candidate | bool and edge_recovery_agent_before.highestSeenSequence | int == edge_activation_recovery_sequence | int and not (edge_recovery_agent_active_is_candidate | bool) and edge_recovery_runtime_matches_agent_lkg | bool %}ALREADY_ABORTED{% else %}INVALID{% endif %}
+
+    - name: Require one legal outcome and agreement with runtime recovery action
+      ansible.builtin.assert:
+        that:
+          - edge_recovery_outcome in ['PRE_STAGE_CLEANUP', 'COMMIT', 'ABORT', 'ALREADY_COMMITTED', 'ALREADY_ABORTED']
+          - >-
+            edge_recovery_outcome != 'COMMIT' or
+            edge_recovery_runtime_status.lastEvidenceDigest is match('^sha256:[0-9a-f]{64}$')
+          - >-
+            edge_recovery_runtime_recover.status == 'NO_RECOVERY_REQUIRED' or
+            (edge_recovery_runtime_recover.agentAction == 'COMMIT_PENDING' and
+             edge_recovery_outcome in ['COMMIT', 'ALREADY_COMMITTED']) or
+            (edge_recovery_runtime_recover.agentAction == 'ABORT_PENDING' and
+             edge_recovery_outcome in ['ABORT', 'ALREADY_ABORTED'])
+        fail_msg: Runtime and Agent protected states do not prove one safe exact reconciliation.
+
+    - name: Commit the exact pending Agent candidate from its original immutable signed-gate evidence
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/local/bin/vivolution-edge-agent', 'commit-pending'] +
+             edge_recovery_agent_context_argv +
+             ['--sequence', edge_activation_recovery_sequence | string,
+              '--manifest-digest', edge_activation_recovery_manifest_digest,
+              '--runtime-evidence-digest', edge_recovery_runtime_status.lastEvidenceDigest] }}
+      become_user: vivolution-edge-agent
+      register: edge_recovery_agent_reconcile_raw
+      changed_when: true
+      when: edge_recovery_outcome == 'COMMIT'
+
+    - name: Abort the exact pending Agent candidate after locked prior-LKG health
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/local/bin/vivolution-edge-agent', 'abort-pending'] +
+             edge_recovery_agent_context_argv +
+             ['--sequence', edge_activation_recovery_sequence | string,
+              '--manifest-digest', edge_activation_recovery_manifest_digest] }}
+      become_user: vivolution-edge-agent
+      register: edge_recovery_agent_reconcile_raw
+      changed_when: true
+      when: edge_recovery_outcome == 'ABORT'
+
+    - name: Parse and require exact Agent transition evidence
+      ansible.builtin.set_fact:
+        edge_recovery_agent_reconcile: "{{ edge_recovery_agent_reconcile_raw.stdout | from_json }}"
+      when: edge_recovery_outcome in ['COMMIT', 'ABORT']
+
+    - name: Require the exact Agent commit or abort evidence
+      ansible.builtin.assert:
+        that:
+          - >-
+            (edge_recovery_outcome == 'COMMIT' and
+             (edge_recovery_agent_reconcile.keys() | list | sort) ==
+             ['activeManifestDigest', 'activeSequence', 'healthGates',
+              'localHealthGatePlanDigest', 'runtimeEvidenceDigest',
+              'runtimeReleaseDigest', 'status'] and
+             edge_recovery_agent_reconcile.status == 'PENDING_COMMITTED_AFTER_SIGNED_LOCAL_HEALTH' and
+             edge_recovery_agent_reconcile.activeSequence | int == edge_activation_recovery_sequence | int and
+             edge_recovery_agent_reconcile.activeManifestDigest == edge_activation_recovery_manifest_digest and
+             edge_recovery_agent_reconcile.runtimeEvidenceDigest == edge_recovery_runtime_status.lastEvidenceDigest and
+             edge_recovery_agent_reconcile.runtimeReleaseDigest == edge_recovery_runtime_status.active.releaseDigest and
+             edge_recovery_agent_reconcile.localHealthGatePlanDigest is match('^sha256:[0-9a-f]{64}$') and
+             edge_recovery_agent_reconcile.healthGates | length == 3 and
+             edge_recovery_agent_reconcile.healthGates | rejectattr('status', 'equalto', 'PASSED') | list | length == 0) or
+            (edge_recovery_outcome == 'ABORT' and
+             (edge_recovery_agent_reconcile.keys() | list | sort) ==
+             ['abortedManifestDigest', 'abortedSequence', 'status'] and
+             edge_recovery_agent_reconcile.status == 'PENDING_ABORTED_ACTIVE_LKG_PRESERVED' and
+             edge_recovery_agent_reconcile.abortedSequence | int == edge_activation_recovery_sequence | int and
+             edge_recovery_agent_reconcile.abortedManifestDigest == edge_activation_recovery_manifest_digest)
+        fail_msg: Agent did not reconcile the exact protected pending candidate.
+      when: edge_recovery_outcome in ['COMMIT', 'ABORT']
+
+    - name: Preserve exact Agent transition evidence when state changed
+      block:
+        - name: Preserve Agent transition evidence remotely
+          ansible.builtin.copy:
+            content: "{{ edge_recovery_agent_reconcile_raw.stdout | trim }}\n"
+            dest: "{{ edge_recovery_remote_evidence_dir }}/agent-transition.json"
+            owner: root
+            group: root
+            mode: '0600'
+
+        - name: Preserve Agent transition evidence on the controller
+          ansible.builtin.copy:
+            content: "{{ edge_recovery_agent_reconcile_raw.stdout | trim }}\n"
+            dest: "{{ edge_recovery_local_evidence_dir }}/agent-transition.json"
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+      when: edge_recovery_outcome in ['COMMIT', 'ABORT']
+
+    - name: Reinspect protected Agent state after reconciliation
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/local/bin/vivolution-edge-agent', 'status'] +
+             edge_recovery_agent_context_argv }}
+      become_user: vivolution-edge-agent
+      register: edge_recovery_agent_after_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Require terminal Agent status or preserved never-staged absence
+      ansible.builtin.assert:
+        that:
+          - >-
+            (edge_recovery_agent_after_raw.rc == 0 and
+             edge_recovery_agent_after_raw.stderr | trim == '') or
+            (edge_recovery_outcome == 'PRE_STAGE_CLEANUP' and
+             not (edge_recovery_agent_state_present | bool) and
+             edge_recovery_agent_after_raw.rc == 1 and
+             edge_recovery_agent_after_raw.stdout | trim == '' and
+             edge_recovery_agent_after_raw.stderr | trim == 'ERROR: protected state does not exist')
+        fail_msg: Terminal Agent state does not match the selected recovery outcome.
+
+    - name: Record terminal Agent state presence
+      ansible.builtin.set_fact:
+        edge_recovery_agent_after_present: "{{ edge_recovery_agent_after_raw.rc == 0 }}"
+
+    - name: Recheck locked runtime health after Agent reconciliation
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+      register: edge_recovery_runtime_health_after_raw
+      changed_when: false
+
+    - name: Parse exact post-reconciliation runtime state
+      ansible.builtin.set_fact:
+        edge_recovery_runtime_health_after: "{{ edge_recovery_runtime_health_after_raw.stdout | from_json }}"
+
+    - name: Parse exact terminal Agent state when present
+      ansible.builtin.set_fact:
+        edge_recovery_agent_after: "{{ edge_recovery_agent_after_raw.stdout | from_json }}"
+      when: edge_recovery_agent_after_present | bool
+
+    - name: Preserve the exact never-staged Agent sentinel when still absent
+      ansible.builtin.set_fact:
+        edge_recovery_agent_after: "{{ edge_recovery_agent_before }}"
+      when: not (edge_recovery_agent_after_present | bool)
+
+    - name: Require exact terminal Agent and runtime postconditions
+      ansible.builtin.assert:
+        that:
+          - (edge_recovery_agent_after.keys() | list | sort) == ['activeLastKnownGood', 'apiVersion', 'highestSeenSequence', 'kind', 'lastAbortedCandidate', 'pendingCandidate']
+          - edge_recovery_agent_after.apiVersion == 'edge.vivolution.ae/agent-state/v0.1'
+          - >-
+            edge_recovery_agent_after.lastAbortedCandidate is none or
+            (edge_recovery_agent_after.lastAbortedCandidate.keys() | list | sort) == ['manifestDigest', 'sequence']
+          - >-
+            (edge_recovery_agent_after_present | bool and
+             edge_recovery_agent_after.kind == 'EdgeAgentProtectedStateStatus' and
+             edge_recovery_agent_after.pendingCandidate is none) or
+            (not (edge_recovery_agent_after_present | bool) and
+             edge_recovery_outcome == 'PRE_STAGE_CLEANUP' and
+             edge_recovery_agent_after.kind == 'EdgeAgentProtectedStateAbsent' and
+             edge_recovery_agent_after.activeLastKnownGood is none and
+             edge_recovery_agent_after.lastAbortedCandidate is none and
+             edge_recovery_agent_after.pendingCandidate is none)
+          - >-
+            (edge_recovery_outcome == 'PRE_STAGE_CLEANUP' and
+             edge_recovery_agent_after.highestSeenSequence | int == edge_recovery_agent_before.highestSeenSequence | int) or
+            (edge_recovery_outcome != 'PRE_STAGE_CLEANUP' and
+             edge_recovery_agent_after.highestSeenSequence | int == edge_activation_recovery_sequence | int)
+          - >-
+            (edge_recovery_outcome in ['ABORT', 'ALREADY_ABORTED'] and
+             edge_recovery_agent_after.lastAbortedCandidate is not none and
+             edge_recovery_agent_after.lastAbortedCandidate.sequence | int == edge_activation_recovery_sequence | int and
+             edge_recovery_agent_after.lastAbortedCandidate.manifestDigest == edge_activation_recovery_manifest_digest) or
+            (edge_recovery_outcome not in ['ABORT', 'ALREADY_ABORTED'] and
+             edge_recovery_agent_after.lastAbortedCandidate == edge_recovery_agent_before.lastAbortedCandidate)
+          - edge_recovery_runtime_health_after.apiVersion == 'edge.vivolution.ae/runtime/v0.1'
+          - edge_recovery_runtime_health_after.kind == 'EdgeRuntimeHealth'
+          - edge_recovery_runtime_health_after.highestSeenSequence | int == edge_recovery_runtime_status.highestSeenSequence | int
+          - edge_recovery_runtime_health_after.runtimeChecks | length > 0
+          - edge_recovery_runtime_health_after.runtimeChecks | rejectattr('status', 'equalto', 'PASSED') | list | length == 0
+          - >-
+            (edge_recovery_outcome in ['COMMIT', 'ALREADY_COMMITTED'] and
+             edge_recovery_agent_after.activeLastKnownGood is not none and
+             edge_recovery_agent_after.activeLastKnownGood.sequence | int == edge_activation_recovery_sequence | int and
+             edge_recovery_agent_after.activeLastKnownGood.manifestDigest == edge_activation_recovery_manifest_digest and
+             edge_recovery_runtime_health_after.active.kind == 'CANDIDATE' and
+             edge_recovery_runtime_health_after.active.sequence | int == edge_activation_recovery_sequence | int and
+             edge_recovery_runtime_health_after.active.manifestDigest == edge_activation_recovery_manifest_digest) or
+            (edge_recovery_outcome in ['PRE_STAGE_CLEANUP', 'ABORT', 'ALREADY_ABORTED'] and
+             ((edge_recovery_agent_after.activeLastKnownGood is none and
+               edge_recovery_runtime_health_after.active.kind == 'BOOTSTRAP' and
+               edge_recovery_runtime_health_after.active.sequence | int == 0 and
+               edge_recovery_runtime_health_after.active.manifestDigest is none) or
+              (edge_recovery_agent_after.activeLastKnownGood is not none and
+               edge_recovery_runtime_health_after.active.kind == 'CANDIDATE' and
+               edge_recovery_runtime_health_after.active.sequence | int == edge_recovery_agent_after.activeLastKnownGood.sequence | int and
+               edge_recovery_runtime_health_after.active.manifestDigest == edge_recovery_agent_after.activeLastKnownGood.manifestDigest)))
+        fail_msg: Exact terminal Agent/runtime identity or locked health postcondition failed.
+
+    - name: Build non-secret exact activation recovery evidence
+      ansible.builtin.set_fact:
+        edge_recovery_result:
+          apiVersion: edge.vivolution.ae/activation-recovery/v0.1
+          kind: EdgeActivationRecoveryResult
+          nodeId: "{{ edge_activation_recovery_node_id }}"
+          profile: "{{ edge_activation_recovery_profile }}"
+          generation: "{{ edge_activation_recovery_generation | int }}"
+          sequence: "{{ edge_activation_recovery_sequence | int }}"
+          manifestDigest: "{{ edge_activation_recovery_manifest_digest }}"
+          outcome: "{{ edge_recovery_outcome }}"
+          runtimeActive: "{{ edge_recovery_runtime_health_after.active }}"
+          runtimeHighestSeenSequence: "{{ edge_recovery_runtime_health_after.highestSeenSequence | int }}"
+          agentStatePresent: "{{ edge_recovery_agent_after_present | bool }}"
+          agentActiveLastKnownGood: "{{ edge_recovery_agent_after.activeLastKnownGood }}"
+          agentLastAbortedCandidate: "{{ edge_recovery_agent_after.lastAbortedCandidate }}"
+          agentHighestSeenSequence: >-
+            {{ (edge_recovery_agent_after.highestSeenSequence | int)
+               if edge_recovery_agent_after_present | bool else none }}
+          runtimeChecks: "{{ edge_recovery_runtime_health_after.runtimeChecks }}"
+
+    - name: Preserve exact terminal activation recovery evidence
+      block:
+        - name: Preserve terminal activation recovery evidence remotely
+          ansible.builtin.copy:
+            content: "{{ edge_recovery_result | to_json }}\n"
+            dest: >-
+              {{ edge_recovery_remote_evidence_dir }}/activation-recovery-{{ edge_recovery_outcome | lower | regex_replace('[^a-z0-9]+', '-') }}.json
+            owner: root
+            group: root
+            mode: '0600'
+
+        - name: Preserve terminal activation recovery evidence on the controller
+          ansible.builtin.copy:
+            content: "{{ edge_recovery_result | to_json }}\n"
+            dest: >-
+              {{ edge_recovery_local_evidence_dir }}/activation-recovery-{{ edge_recovery_outcome | lower | regex_replace('[^a-z0-9]+', '-') }}.json
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+    - name: Inspect only the exact abandoned candidate paths before cleanup
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+        follow: false
+      loop:
+        - { path: "{{ edge_recovery_work_dir }}", owner: vivolution-edge-agent }
+        - { path: "{{ edge_recovery_inbox_dir }}", owner: root }
+      register: edge_recovery_cleanup_paths
+
+    - name: Refuse cleanup if either exact candidate path was replaced
+      ansible.builtin.assert:
+        that:
+          - >-
+            not (item.stat.exists | default(false)) or
+            (item.stat.isdir | default(false) and
+             not (item.stat.islnk | default(false)) and
+             item.stat.pw_name == item.item.owner and
+             item.stat.mode == '0700')
+        fail_msg: >-
+          Exact candidate cleanup path {{ item.item.path }} is linked or has an
+          unexpected type, owner, or mode; it was intentionally preserved.
+      loop: "{{ edge_recovery_cleanup_paths.results }}"
+      loop_control:
+        label: "{{ item.item.path }}"
+
+    - name: Remove only reconciled candidate-specific abandoned handoff paths
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ edge_recovery_work_dir }}"
+        - "{{ edge_recovery_inbox_dir }}"
+
+    - name: Confirm exact idempotent activation recovery
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} recovery outcome {{ edge_recovery_outcome }}
+          for sequence {{ edge_activation_recovery_sequence }}
+          ({{ edge_activation_recovery_manifest_digest }}); protected evidence
+          remains and only candidate-specific abandoned handoff paths were removed.

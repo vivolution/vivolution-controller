@@ -1,0 +1,5 @@
+[Unit]
+Description=Vivolution Edge OpenSIPS and RTPengine data plane
+Requires=rtpengine-daemon.service opensips.service
+After=rtpengine-daemon.service opensips.service
+StopWhenUnneeded=false

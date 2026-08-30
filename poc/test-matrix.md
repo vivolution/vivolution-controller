@@ -51,7 +51,15 @@ Automatic failure: any cross-tenant signaling, media, route, configuration, secr
 
 ## 5. Failure and recovery
 
-- Stop signaling node 1 and confirm new calls use node 2.
+- Run `qualify-synthetic-node-failover.yml`: place the fixed two-direction
+  first-tenant call through SBC1, stop both SBC1 data-plane services, observe
+  TCP 5061 closed from CP1, and require a fresh same-route call through SBC2
+  within 120 monotonic seconds under a hard command timeout. Prove the protected
+  node-local injector armed the persisted deadman before either stop, restore
+  and re-test the exact SBC1 runtime, verify every manifested artifact, and
+  reconcile Edge/fixture CDRs for all three phases.
+  This private runner selects the alternate itself and must not be relabelled
+  as Microsoft OPTIONS/gateway-selection or live-Teams evidence.
 - Stop RTPengine on the selected node.
 - Stop the portal and control-plane database; new calls must continue on last-known-good configuration.
 - Restart an Azure VM and verify deterministic recovery.
@@ -92,7 +100,9 @@ The POC does not establish production capacity. B-series throttling and syntheti
 - All mandatory call features pass for both tenants or have a documented, commercially acceptable limitation.
 - 100% expected CDR reconciliation for the controlled test corpus.
 - At least 99% successful low-load calls after the environment is declared stable, excluding intentional negative tests.
-- New calls recover through the alternate node within 120 seconds of a tested node failure.
+- New calls recover through the alternate node within 120 seconds of beginning
+  the tested node failure. Private synthetic acceptance and live Microsoft
+  routing acceptance are recorded as separate gates.
 - Portal/database outage does not stop new calls using the last-known-good configuration.
 - Bad configuration is rejected or rolled back within five minutes.
 - Certificate replacement completes without an avoidable service outage.

@@ -1,0 +1,7 @@
+[Service]
+# Debian's stock nftables unit flushes the complete ruleset on stop. This edge
+# role owns one table only and must preserve tables installed by other agents.
+ExecStop=
+ExecStop=/usr/sbin/nft destroy table inet vivolution_edge_filter
+ExecReload=
+ExecReload=/usr/sbin/nft --file /etc/nftables.conf

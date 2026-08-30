@@ -1,0 +1,8 @@
+---
+- name: Remove the isolated Vivolution no-PSTN voice fixture
+  hosts: fixture_controller
+  become: true
+  gather_facts: false
+  serial: 1
+  roles:
+    - role: voice_fixture_teardown

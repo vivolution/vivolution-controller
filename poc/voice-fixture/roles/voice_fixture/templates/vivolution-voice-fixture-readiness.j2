@@ -1,0 +1,146 @@
+#!/bin/bash
+set -euo pipefail
+umask 027
+
+if [[ ${EUID} -ne 0 ]]; then
+    printf 'readiness must run as root\n' >&2
+    exit 2
+fi
+
+controller_ip={{ voice_fixture_controller_ipv4 | quote }}
+edge_subnet={{ voice_fixture_edge_subnet_ipv4 | quote }}
+pki_root={{ voice_fixture_pki_root | quote }}
+asterisk_image_file={{ (voice_fixture_config_root + '/asterisk-image-id') | quote }}
+sipp_image_file={{ (voice_fixture_config_root + '/sipp-image-id') | quote }}
+
+units=(vivolution-voice-fixture-asterisk.service vivolution-voice-fixture-sipp.service)
+for unit in "${units[@]}"; do
+    systemctl is-enabled --quiet "$unit"
+    systemctl is-active --quiet "$unit"
+    policy=$(systemctl show "$unit" --property=IPAddressAllow --property=IPAddressDeny --property=RestrictAddressFamilies --property=SocketBindAllow --property=SocketBindDeny)
+    grep -Fq 'IPAddressDeny=any' <<<"$policy"
+    grep -Fq "$controller_ip/32" <<<"$policy"
+    grep -Fq "$edge_subnet" <<<"$policy"
+    grep -Fq 'AF_INET' <<<"$policy"
+    if grep -Fq 'AF_INET6' <<<"$policy"; then
+        printf '%s unexpectedly permits IPv6\n' "$unit" >&2
+        exit 3
+    fi
+    [[ $(systemctl show "$unit" --property=SocketBindDeny --value) == any ]]
+    mapfile -t effective_socket_binds < <(
+        systemctl show "$unit" --property=SocketBindAllow --value \
+            | tr ' ' '\n' \
+            | sed '/^$/d' \
+            | sort --unique
+    )
+    effective_socket_bind_count=$(
+        printf '%s\n' "${effective_socket_binds[@]}" | sed '/^$/d' | wc -l
+    )
+    case "$unit" in
+        vivolution-voice-fixture-asterisk.service)
+            [[ $effective_socket_bind_count -eq 3 ]]
+            expected_socket_binds=(
+                'ipv4:tcp:{{ voice_fixture_asterisk_tls_port }}'
+                'ipv4:tcp:{{ voice_fixture_asterisk_uac_tls_port }}'
+                'ipv4:udp:{{ voice_fixture_asterisk_rtp_start }}-{{ voice_fixture_asterisk_rtp_end }}'
+            )
+            ;;
+        vivolution-voice-fixture-sipp.service)
+            [[ $effective_socket_bind_count -eq 2 ]]
+            expected_socket_binds=(
+                'ipv4:tcp:{{ voice_fixture_sipp_uas_tls_port }}'
+                'ipv4:udp:{{ voice_fixture_sipp_uas_rtp_port }}'
+            )
+            ;;
+    esac
+    for expected_bind in "${expected_socket_binds[@]}"; do
+        printf '%s\n' "${effective_socket_binds[@]}" \
+            | grep -Eq "^${expected_bind}(-${expected_bind##*:})?$"
+    done
+done
+
+mapfile -t tcp_listeners < <(ss -H -lnt4 | awk '{print $4}')
+for endpoint in "$controller_ip:{{ voice_fixture_asterisk_tls_port }}" "$controller_ip:{{ voice_fixture_asterisk_uac_tls_port }}" "$controller_ip:{{ voice_fixture_sipp_uas_tls_port }}"; do
+    printf '%s\n' "${tcp_listeners[@]}" | grep -Fxq "$endpoint"
+done
+if printf '%s\n' "${tcp_listeners[@]}" \
+    | grep -Eq '^(0\.0\.0\.0|\*):({{ voice_fixture_asterisk_tls_port }}|{{ voice_fixture_asterisk_uac_tls_port }}|{{ voice_fixture_sipp_uas_tls_port }})$'; then
+    printf 'a fixture TLS listener is public/wildcard-bound\n' >&2
+    exit 4
+fi
+
+mapfile -t udp_listeners < <(ss -H -lnu4 | awk '{print $4}')
+printf '%s\n' "${udp_listeners[@]}" \
+    | grep -Fxq "$controller_ip:{{ voice_fixture_sipp_uas_rtp_port }}"
+if printf '%s\n' "${udp_listeners[@]}" \
+    | grep -Eq '^(0\.0\.0\.0|\*):({{ voice_fixture_sipp_uas_rtp_port }})$'; then
+    printf 'the persistent fixture RTP listener is public/wildcard-bound\n' >&2
+    exit 5
+fi
+
+for certificate in ca asterisk sipp sbc1 sbc2; do
+    openssl x509 -in "$pki_root/$certificate.crt" -noout \
+        -checkend {{ voice_fixture_minimum_certificate_seconds }} >/dev/null
+done
+test -s "$pki_root/public-ca.crt"
+grep -Fq -- '-----BEGIN CERTIFICATE-----' "$pki_root/public-ca.crt"
+
+asterisk_tls_check=$(timeout 8 openssl s_client \
+    -connect "$controller_ip:{{ voice_fixture_asterisk_tls_port }}" \
+    -cert "$pki_root/sbc1.crt" \
+    -key "$pki_root/sbc1.key" \
+    -CAfile "$pki_root/ca.crt" \
+    -verify_ip "$controller_ip" \
+    -verify_return_error \
+    -brief </dev/null 2>&1)
+grep -Fq 'Verification: OK' <<<"$asterisk_tls_check"
+if timeout 8 openssl s_client \
+    -connect "$controller_ip:{{ voice_fixture_asterisk_tls_port }}" \
+    -CAfile "$pki_root/ca.crt" \
+    -verify_ip "$controller_ip" \
+    -verify_return_error \
+    -brief </dev/null >/dev/null 2>&1; then
+    printf 'Asterisk fixture accepted a TLS client without its fixture certificate\n' >&2
+    exit 6
+fi
+
+sipp_tls_check=$(timeout 8 openssl s_client \
+    -connect "$controller_ip:{{ voice_fixture_sipp_uas_tls_port }}" \
+    -cert "$pki_root/sbc1.crt" \
+    -key "$pki_root/sbc1.key" \
+    -CAfile "$pki_root/ca.crt" \
+    -verify_ip "$controller_ip" \
+    -verify_return_error \
+    -brief </dev/null 2>&1)
+grep -Fq 'Verification: OK' <<<"$sipp_tls_check"
+if timeout 8 openssl s_client \
+    -connect "$controller_ip:{{ voice_fixture_sipp_uas_tls_port }}" \
+    -CAfile "$pki_root/ca.crt" \
+    -verify_ip "$controller_ip" \
+    -verify_return_error \
+    -brief </dev/null >/dev/null 2>&1; then
+    printf 'SIPp fixture accepted a TLS client without its fixture certificate\n' >&2
+    exit 6
+fi
+
+asterisk_image=$(<"$asterisk_image_file")
+sipp_image=$(<"$sipp_image_file")
+[[ $asterisk_image =~ ^sha256:[0-9a-f]{64}$ ]]
+[[ $sipp_image =~ ^sha256:[0-9a-f]{64}$ ]]
+[[ $(podman inspect --format '{{ '{{' }}.Image{{ '}}' }}' vivolution-voice-fixture-asterisk) == "$asterisk_image" ]]
+[[ $(podman inspect --format '{{ '{{' }}.Image{{ '}}' }}' vivolution-voice-fixture-sipp) == "$sipp_image" ]]
+
+active_firewall=$(nft list ruleset)
+for token in \
+    '{{ voice_fixture_edge_subnet_ipv4 }}' \
+    '{{ voice_fixture_asterisk_tls_port }}' \
+    '{{ voice_fixture_sipp_uas_tls_port }}' \
+    '{{ voice_fixture_asterisk_rtp_start }}-{{ voice_fixture_asterisk_rtp_end }}' \
+    '{{ voice_fixture_sipp_rtp_start }}-{{ voice_fixture_sipp_rtp_end }}'; do
+    grep -Fq -- "$token" <<<"$active_firewall" || {
+        printf 'active nftables policy is missing fixture token: %s\n' "$token" >&2
+        exit 6
+    }
+done
+
+printf 'READY no-pstn fixture=%s edges=%s\n' "$controller_ip" "$edge_subnet"

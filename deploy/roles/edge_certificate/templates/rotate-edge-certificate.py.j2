@@ -1,0 +1,577 @@
+#!/usr/bin/python3
+"""Fixed-path, rollback-capable Edge certificate and authority rotation."""
+
+from __future__ import annotations
+
+import fcntl
+import grp
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, Mapping, Optional, Tuple
+
+
+NODE_FQDN = {{ edge_acme_node_fqdn | to_json }}
+WILDCARD_FQDN = {{ edge_acme_wildcard_fqdn | to_json }}
+ROTATION_ROOT = Path("/var/lib/vivolution-edge/certificate-rotation")
+INCOMING_CERT = ROTATION_ROOT / "incoming" / "teams-fullchain.pem"
+INCOMING_KEY = ROTATION_ROOT / "incoming" / "teams-key.pem"
+BACKUP_CERT = ROTATION_ROOT / "backup" / "teams-fullchain.pem"
+BACKUP_KEY = ROTATION_ROOT / "backup" / "teams-key.pem"
+BACKUP_AUTHORITY = ROTATION_ROOT / "backup" / "runtime-authority.json"
+JOURNAL = ROTATION_ROOT / "transaction.json"
+EVIDENCE_DIR = ROTATION_ROOT / "evidence"
+RUNTIME_ROOT = Path("/var/lib/vivolution-edge/runtime")
+RUNTIME_LOCK = RUNTIME_ROOT / "runtime.lock"
+RUNTIME_STATE = RUNTIME_ROOT / "state.json"
+LIVE_CERT = Path("/etc/vivolution-edge/tls/teams-fullchain.pem")
+LIVE_KEY = Path("/etc/vivolution-edge/tls/teams-key.pem")
+AUTHORITY = Path("/etc/vivolution-edge/runtime-authority.json")
+NODE_FACTS = Path("/etc/vivolution-edge/node-facts.json")
+PUBLIC_CA = Path("/etc/ssl/certs/ca-certificates.crt")
+PYTHON_ROOT = "/usr/lib/vivolution-edge/python"
+MAX_PEM_BYTES = 1024 * 1024
+MAX_JSON_BYTES = 256 * 1024
+JOURNAL_FIELDS = {"hadAuthority", "hadPair", "phase", "wasActive"}
+JOURNAL_PHASES = {
+    "PREPARED",
+    "SERVICE_STOPPED",
+    "PAIR_INSTALLED",
+    "AUTHORITY_RECONCILED",
+    "HEALTHY",
+}
+
+
+class RotationError(RuntimeError):
+    pass
+
+
+def _canonical(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+
+
+def _digest(content: bytes) -> str:
+    return "sha256:" + hashlib.sha256(content).hexdigest()
+
+
+def _fsync_dir(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _assert_dir(path: Path, mode: int) -> None:
+    record = path.lstat()
+    if (
+        not stat.S_ISDIR(record.st_mode)
+        or stat.S_ISLNK(record.st_mode)
+        or record.st_uid != 0
+        or record.st_gid != 0
+        or stat.S_IMODE(record.st_mode) != mode
+    ):
+        raise RotationError("unsafe rotation directory: {}".format(path))
+
+
+def _secure_read(
+    path: Path,
+    *,
+    modes: Tuple[int, ...],
+    maximum: int,
+    gid: Optional[int] = None,
+) -> bytes:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RotationError("secure read rejected {}: {}".format(path, exc)) from exc
+    try:
+        record = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(record.st_mode)
+            or record.st_nlink != 1
+            or record.st_uid != 0
+            or stat.S_IMODE(record.st_mode) not in modes
+            or (gid is not None and record.st_gid != gid)
+            or not 0 < record.st_size <= maximum
+        ):
+            raise RotationError("unsafe owner, mode, type, link count, or size: {}".format(path))
+        chunks = []
+        remaining = maximum + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        if len(content) != record.st_size or len(content) > maximum:
+            raise RotationError("file changed during secure read: {}".format(path))
+        return content
+    finally:
+        os.close(descriptor)
+
+
+def _exists_regular(path: Path) -> bool:
+    try:
+        record = path.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(record.st_mode) or not stat.S_ISREG(record.st_mode):
+        raise RotationError("unexpected non-regular path: {}".format(path))
+    return True
+
+
+def _atomic_write(path: Path, content: bytes, *, mode: int, gid: int) -> None:
+    temporary = path.parent / (".{}.{}.rotation".format(path.name, os.getpid()))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, mode)
+    try:
+        os.fchmod(descriptor, mode)
+        os.fchown(descriptor, 0, gid)
+        offset = 0
+        while offset < len(content):
+            offset += os.write(descriptor, content[offset:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    _fsync_dir(path.parent)
+
+
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _fsync_dir(path.parent)
+
+
+def _run(argv: Tuple[str, ...], name: str, *, allow_failure: bool = False) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=45,
+            check=False,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RotationError("{} could not execute: {}".format(name, exc)) from exc
+    if result.returncode != 0 and not allow_failure:
+        detail = (result.stderr or result.stdout).strip().replace("\n", " ")[:400]
+        raise RotationError("{} failed: {}".format(name, detail or "non-zero exit"))
+    return result
+
+
+def _service_active() -> bool:
+    result = _run(
+        ("/usr/bin/systemctl", "is-active", "--quiet", "opensips.service"),
+        "OpenSIPS active-state probe",
+        allow_failure=True,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode in (3, 4):
+        return False
+    raise RotationError("OpenSIPS active-state probe returned an unexpected status")
+
+
+def _stop_service() -> None:
+    _run(("/usr/bin/systemctl", "stop", "opensips.service"), "stop OpenSIPS")
+
+
+def _start_and_check_service(private_ipv4: str) -> None:
+    _run(("/usr/bin/systemctl", "start", "opensips.service"), "start OpenSIPS")
+    _run(("/usr/bin/systemctl", "is-active", "--quiet", "opensips.service"), "OpenSIPS health")
+    _run(("/usr/sbin/opensips", "-C", "-f", "/etc/opensips/opensips.cfg"), "OpenSIPS active parse")
+    sockets = _run(("/usr/bin/ss", "-H", "-lnt"), "OpenSIPS listener inventory").stdout
+    if re.search(r"(?<![0-9A-Fa-f:.]){}:5061(?:\s|$)".format(re.escape(private_ipv4)), sockets) is None:
+        raise RotationError("OpenSIPS did not restore its exact private TLS listener")
+
+
+def _validate_staged_pair(certificate_bytes: bytes, key_bytes: bytes) -> None:
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+        from cryptography.x509.verification import DNSName, PolicyBuilder, Store
+    except ImportError as exc:
+        raise RotationError("python3-cryptography with x509 verification is required: {}".format(exc)) from exc
+    try:
+        certificates = x509.load_pem_x509_certificates(certificate_bytes)
+        private_key = serialization.load_pem_private_key(key_bytes, password=None)
+    except (TypeError, ValueError) as exc:
+        raise RotationError("incoming certificate or key is invalid PEM: {}".format(exc)) from exc
+    if len(certificates) < 2:
+        raise RotationError("incoming full chain must contain a leaf and at least one issuer")
+    leaf = certificates[0]
+    for child, issuer in zip(certificates, certificates[1:]):
+        if child.issuer != issuer.subject:
+            raise RotationError("incoming certificate chain is not ordered leaf-to-issuer")
+    try:
+        if leaf.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+            raise RotationError("incoming Edge leaf must not be a CA")
+    except x509.ExtensionNotFound as exc:
+        raise RotationError("incoming Edge leaf lacks Basic Constraints") from exc
+    if not isinstance(private_key, rsa.RSAPrivateKey) or private_key.key_size != 2048:
+        raise RotationError("incoming Edge key must be exact RSA-2048")
+    if not isinstance(leaf.public_key(), rsa.RSAPublicKey) or leaf.public_key().key_size != 2048:
+        raise RotationError("incoming Edge leaf must use exact RSA-2048")
+    if leaf.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ) != private_key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ):
+        raise RotationError("incoming certificate and private key do not match")
+    try:
+        san = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        dns_names = san.get_values_for_type(x509.DNSName)
+    except x509.ExtensionNotFound as exc:
+        raise RotationError("incoming certificate lacks DNS SANs") from exc
+    if set(dns_names) != {NODE_FQDN, WILDCARD_FQDN} or len(dns_names) != 2 or len(san) != 2:
+        raise RotationError("incoming certificate SANs differ from the exact node and wildcard identities")
+    try:
+        eku = leaf.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+    except x509.ExtensionNotFound as exc:
+        raise RotationError("incoming certificate lacks serverAuth EKU") from exc
+    if ExtendedKeyUsageOID.SERVER_AUTH not in eku:
+        raise RotationError("incoming certificate lacks serverAuth EKU")
+    now = datetime.now(timezone.utc)
+    not_before = leaf.not_valid_before_utc if hasattr(leaf, "not_valid_before_utc") else leaf.not_valid_before.replace(tzinfo=timezone.utc)
+    not_after = leaf.not_valid_after_utc if hasattr(leaf, "not_valid_after_utc") else leaf.not_valid_after.replace(tzinfo=timezone.utc)
+    if not_before > now or not_after < now + timedelta(days=14):
+        raise RotationError("incoming certificate is not valid for at least fourteen days")
+    roots = x509.load_pem_x509_certificates(
+        _secure_read(PUBLIC_CA, modes=(0o644,), maximum=MAX_PEM_BYTES)
+    )
+    if not roots:
+        raise RotationError("Debian public trust bundle contains no roots")
+    try:
+        verifier = (
+            PolicyBuilder()
+            .store(Store(roots))
+            .time(now)
+            .build_server_verifier(DNSName(NODE_FQDN))
+        )
+        verifier.verify(leaf, certificates[1:])
+    except Exception as exc:
+        raise RotationError("incoming public certificate chain validation failed: {}".format(exc)) from exc
+
+
+def _runtime_modules():
+    if PYTHON_ROOT not in sys.path:
+        sys.path.insert(0, PYTHON_ROOT)
+    try:
+        from edge.compiler.core import NodeFacts
+        from edge.runtime.contracts import (
+            RuntimeAuthority,
+            SecretPaths,
+            sha256_digest,
+            validate_secret_material,
+        )
+        from edge.schema import manifest_tool
+    except ImportError as exc:
+        raise RotationError("installed fixed runtime modules are unavailable: {}".format(exc)) from exc
+    return NodeFacts, RuntimeAuthority, SecretPaths, sha256_digest, validate_secret_material, manifest_tool
+
+
+def _load_runtime_context(opensips_gid: int, *, require_digest_match: bool = True):
+    NodeFacts, RuntimeAuthority, SecretPaths, sha256_digest, validate_secret_material, manifest_tool = _runtime_modules()
+    try:
+        facts_value = manifest_tool.parse_json_text(
+            _secure_read(NODE_FACTS, modes=(0o600,), maximum=MAX_JSON_BYTES).decode("utf-8")
+        )
+        authority_value = manifest_tool.parse_json_text(
+            _secure_read(AUTHORITY, modes=(0o600,), maximum=MAX_JSON_BYTES).decode("utf-8")
+        )
+        facts = NodeFacts.from_mapping(facts_value)
+        authority = RuntimeAuthority.from_mapping(authority_value)
+    except Exception as exc:
+        raise RotationError("installed runtime facts or authority are invalid: {}".format(exc)) from exc
+    paths = SecretPaths(
+        LIVE_CERT,
+        LIVE_KEY,
+        Path("/etc/vivolution-edge/tls/fixture-ca.crt"),
+        Path("/etc/vivolution-edge/tls/fixture-client.crt"),
+        Path("/etc/vivolution-edge/tls/fixture-client.key"),
+        Path("/etc/vivolution-edge/tls/microsoft-ca-bundle.pem"),
+        Path("/etc/vivolution-edge/tls/pbx-ca-bundle.pem"),
+        Path("/etc/vivolution-edge/tls/public-ca-bundle.pem"),
+    )
+    secret_bytes = {
+        name: _secure_read(path, modes=(0o440,), maximum=MAX_PEM_BYTES, gid=opensips_gid)
+        for name, path in paths.as_mapping(authority.profile).items()
+    }
+    actual = {name: sha256_digest(content) for name, content in secret_bytes.items()}
+    if require_digest_match and dict(authority.secret_digests) != actual:
+        raise RotationError("current TLS bytes already differ from protected runtime authority")
+    return (
+        facts,
+        authority,
+        paths,
+        secret_bytes,
+        RuntimeAuthority,
+        sha256_digest,
+        validate_secret_material,
+        manifest_tool,
+    )
+
+
+def _reconcile_authority(opensips_gid: int) -> Tuple[str, str, str]:
+    (
+        facts,
+        authority,
+        paths,
+        secret_bytes,
+        RuntimeAuthority,
+        sha256_digest,
+        validate_secret_material,
+        manifest_tool,
+    ) = _load_runtime_context(opensips_gid, require_digest_match=False)
+    rotating_names = {"edgeCertificateChainPem", "edgePrivateKeyPem"}
+    actual_digests = {
+        name: sha256_digest(content) for name, content in sorted(secret_bytes.items())
+    }
+    drifted_non_certificate_names = sorted(
+        name
+        for name, expected_digest in authority.secret_digests.items()
+        if name not in rotating_names and actual_digests.get(name) != expected_digest
+    )
+    if drifted_non_certificate_names:
+        raise RotationError(
+            "non-certificate authority secrets changed during certificate rotation: {}".format(
+                ",".join(drifted_non_certificate_names)
+            )
+        )
+    record = authority.canonical_record()
+    record["secretDigests"] = actual_digests
+    reconciled = RuntimeAuthority.from_mapping(record)
+    try:
+        validate_secret_material(facts, reconciled, secret_bytes)
+    except Exception as exc:
+        raise RotationError("new certificate or existing authority secret failed full validation: {}".format(exc)) from exc
+    old_raw = _secure_read(AUTHORITY, modes=(0o600,), maximum=MAX_JSON_BYTES)
+    new_raw = manifest_tool.canonical_json_bytes(reconciled.canonical_record()) + b"\n"
+    _atomic_write(AUTHORITY, new_raw, mode=0o600, gid=0)
+    return _digest(old_raw), _digest(new_raw), facts.private_ipv4
+
+
+def _write_journal(value: Mapping[str, Any]) -> None:
+    if set(value) != JOURNAL_FIELDS or value.get("phase") not in JOURNAL_PHASES:
+        raise RotationError("internal certificate transaction journal is invalid")
+    _atomic_write(JOURNAL, _canonical(value), mode=0o600, gid=0)
+
+
+def _read_journal() -> Optional[Dict[str, Any]]:
+    if not _exists_regular(JOURNAL):
+        return None
+    try:
+        value = json.loads(_secure_read(JOURNAL, modes=(0o600,), maximum=MAX_JSON_BYTES).decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise RotationError("certificate transaction journal is invalid: {}".format(exc)) from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != JOURNAL_FIELDS
+        or value.get("phase") not in JOURNAL_PHASES
+        or not all(isinstance(value.get(name), bool) for name in ("hadAuthority", "hadPair", "wasActive"))
+    ):
+        raise RotationError("certificate transaction journal differs from its fixed contract")
+    return value
+
+
+def _restore_previous(journal: Mapping[str, Any], opensips_gid: int) -> None:
+    if journal["phase"] == "HEALTHY":
+        _unlink(JOURNAL)
+        return
+    if _service_active():
+        _stop_service()
+    if journal["hadPair"]:
+        previous_cert = _secure_read(BACKUP_CERT, modes=(0o400,), maximum=MAX_PEM_BYTES)
+        previous_key = _secure_read(BACKUP_KEY, modes=(0o400,), maximum=MAX_PEM_BYTES)
+        _atomic_write(LIVE_CERT, previous_cert, mode=0o440, gid=opensips_gid)
+        _atomic_write(LIVE_KEY, previous_key, mode=0o440, gid=opensips_gid)
+    else:
+        _unlink(LIVE_CERT)
+        _unlink(LIVE_KEY)
+    if journal["hadAuthority"]:
+        previous_authority = _secure_read(BACKUP_AUTHORITY, modes=(0o400,), maximum=MAX_JSON_BYTES)
+        _atomic_write(AUTHORITY, previous_authority, mode=0o600, gid=0)
+    else:
+        _unlink(AUTHORITY)
+    if journal["wasActive"]:
+        private_ipv4 = ""
+        if journal["hadAuthority"]:
+            context = _load_runtime_context(opensips_gid)
+            private_ipv4 = context[0].private_ipv4
+        if not private_ipv4:
+            raise RotationError("cannot restore an active service without protected node facts")
+        _start_and_check_service(private_ipv4)
+    _unlink(JOURNAL)
+
+
+def _write_evidence(record: Mapping[str, Any]) -> Dict[str, Any]:
+    value = dict(record)
+    unsigned = dict(value)
+    unsigned["apiVersion"] = "edge.vivolution.ae/certificate-rotation/v0.1"
+    unsigned["kind"] = "EdgeCertificateRotationEvidence"
+    value = dict(unsigned)
+    value["evidenceDigest"] = _digest(_canonical(unsigned).rstrip(b"\n"))
+    encoded = _canonical(value)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = "{}-{}.json".format(stamp, value["evidenceDigest"].split(":", 1)[1])
+    _atomic_write(EVIDENCE_DIR / filename, encoded, mode=0o600, gid=0)
+    return value
+
+
+def _prepare_directories() -> None:
+    for path, mode in (
+        (ROTATION_ROOT, 0o700),
+        (ROTATION_ROOT / "incoming", 0o700),
+        (ROTATION_ROOT / "backup", 0o700),
+        (EVIDENCE_DIR, 0o700),
+        (RUNTIME_ROOT, 0o755),
+    ):
+        if not path.exists():
+            path.mkdir(mode=mode, parents=False)
+            os.chown(path, 0, 0)
+            os.chmod(path, mode)
+        _assert_dir(path, mode)
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        raise RotationError("certificate rotation must execute as root")
+    opensips_gid = grp.getgrnam("opensips").gr_gid
+    _prepare_directories()
+    lock_descriptor = os.open(RUNTIME_LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    try:
+        lock_record = os.fstat(lock_descriptor)
+        if not stat.S_ISREG(lock_record.st_mode) or lock_record.st_nlink != 1:
+            raise RotationError("runtime lock is not a single-link regular file")
+        os.fchmod(lock_descriptor, 0o600)
+        os.fchown(lock_descriptor, 0, 0)
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        stale = _read_journal()
+        if stale is not None:
+            _restore_previous(stale, opensips_gid)
+
+        staged_cert = _secure_read(INCOMING_CERT, modes=(0o400,), maximum=MAX_PEM_BYTES)
+        staged_key = _secure_read(INCOMING_KEY, modes=(0o400,), maximum=MAX_PEM_BYTES)
+        _validate_staged_pair(staged_cert, staged_key)
+
+        cert_exists = _exists_regular(LIVE_CERT)
+        key_exists = _exists_regular(LIVE_KEY)
+        if cert_exists != key_exists:
+            raise RotationError("live certificate/key pair is incomplete")
+        had_pair = cert_exists and key_exists
+        had_authority = _exists_regular(AUTHORITY)
+        if _exists_regular(RUNTIME_STATE) and not had_authority:
+            raise RotationError("protected runtime state exists without runtime authority")
+        current_cert = b""
+        current_key = b""
+        if had_pair:
+            current_cert = _secure_read(LIVE_CERT, modes=(0o440,), maximum=MAX_PEM_BYTES, gid=opensips_gid)
+            current_key = _secure_read(LIVE_KEY, modes=(0o440,), maximum=MAX_PEM_BYTES, gid=opensips_gid)
+        if had_authority:
+            _load_runtime_context(opensips_gid)
+        if had_pair and current_cert == staged_cert and current_key == staged_key:
+            evidence = _write_evidence(
+                {
+                    "authorityReconciled": False,
+                    "certificateDigest": _digest(staged_cert),
+                    "nodeFqdn": NODE_FQDN,
+                    "opensipsRestarted": False,
+                    "status": "CERTIFICATE_UNCHANGED",
+                    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+            )
+            _unlink(INCOMING_CERT)
+            _unlink(INCOMING_KEY)
+            sys.stdout.buffer.write(_canonical(evidence))
+            return 0
+
+        was_active = _service_active()
+        if had_pair:
+            _atomic_write(BACKUP_CERT, current_cert, mode=0o400, gid=0)
+            _atomic_write(BACKUP_KEY, current_key, mode=0o400, gid=0)
+        if had_authority:
+            _atomic_write(
+                BACKUP_AUTHORITY,
+                _secure_read(AUTHORITY, modes=(0o600,), maximum=MAX_JSON_BYTES),
+                mode=0o400,
+                gid=0,
+            )
+        journal: Dict[str, Any] = {
+            "hadAuthority": had_authority,
+            "hadPair": had_pair,
+            "phase": "PREPARED",
+            "wasActive": was_active,
+        }
+        _write_journal(journal)
+        try:
+            if was_active:
+                _stop_service()
+            journal["phase"] = "SERVICE_STOPPED"
+            _write_journal(journal)
+            _atomic_write(LIVE_CERT, staged_cert, mode=0o440, gid=opensips_gid)
+            _atomic_write(LIVE_KEY, staged_key, mode=0o440, gid=opensips_gid)
+            journal["phase"] = "PAIR_INSTALLED"
+            _write_journal(journal)
+            old_authority_digest = None
+            new_authority_digest = None
+            private_ipv4 = None
+            if had_authority:
+                old_authority_digest, new_authority_digest, private_ipv4 = _reconcile_authority(opensips_gid)
+            journal["phase"] = "AUTHORITY_RECONCILED"
+            _write_journal(journal)
+            if was_active:
+                if not private_ipv4:
+                    raise RotationError("active runtime certificate rotation lacks immutable private address")
+                _start_and_check_service(private_ipv4)
+            journal["phase"] = "HEALTHY"
+            _write_journal(journal)
+        except Exception:
+            _restore_previous(journal, opensips_gid)
+            raise
+
+        evidence = _write_evidence(
+            {
+                "authorityReconciled": had_authority,
+                "certificateDigest": _digest(staged_cert),
+                "newAuthorityDigest": new_authority_digest,
+                "nodeFqdn": NODE_FQDN,
+                "oldAuthorityDigest": old_authority_digest,
+                "opensipsRestarted": was_active,
+                "status": "CERTIFICATE_ROTATED_HEALTHY",
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        )
+        _unlink(JOURNAL)
+        _unlink(INCOMING_CERT)
+        _unlink(INCOMING_KEY)
+        sys.stdout.buffer.write(_canonical(evidence))
+        return 0
+    finally:
+        os.close(lock_descriptor)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (KeyError, OSError, RotationError, UnicodeError, ValueError) as exc:
+        print("certificate rotation rejected: {}".format(exc), file=sys.stderr)
+        raise SystemExit(1)

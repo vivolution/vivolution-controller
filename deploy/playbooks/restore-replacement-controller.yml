@@ -1,0 +1,681 @@
+---
+- name: Restore a qualified CP1 backup into the replacement controller
+  hosts: controllers
+  become: true
+  gather_facts: false
+  force_handlers: true
+  vars:
+    cp_import_fixed_dump_path: /var/lib/vivolution/backups/cp1-qualified-import.pgdump
+    cp_import_journal_path: /var/lib/vivolution/backups/cp1-restore-transaction-v1.json
+    cp_import_journal_helper: /usr/local/libexec/vivolution-controller-restore-journal
+    cp_import_lock_path: /var/lib/vivolution/backups/cp1-restore-transaction-v1.lock
+    cp_import_lock_unit: vivolution-cp1-restore-transaction-lock.service
+  tasks:
+    - name: Derive digest-bound restore identities
+      ansible.builtin.set_fact:
+        cp_import_token: "{{ cp_import_expected_sha256[0:16] }}"
+        cp_import_database_name: "vivolution_import_{{ cp_import_expected_sha256[0:16] }}"
+        cp_import_previous_database_name: "vivolution_preimport_{{ cp_import_expected_sha256[0:16] }}"
+        cp_import_failed_database_name: "vivolution_failedimport_{{ cp_import_expected_sha256[0:16] }}"
+
+    - name: Require the explicit replacement-controller restore boundary
+      ansible.builtin.assert:
+        that:
+          - cp_profile == 'azure-single'
+          - cp_install_local_postgres | bool
+          - cp_import_acknowledgement == 'RESTORE_QUALIFIED_BACKUP_TO_REPLACEMENT_CP1'
+          - cp_import_expected_sha256 is match('^[0-9a-f]{64}$')
+          - cp_import_dump_path == cp_import_fixed_dump_path
+          - cp_database_name == 'vivolution'
+          - cp_import_database_name is match('^[a-z][a-z0-9_]{1,62}$')
+          - cp_import_previous_database_name is match('^[a-z][a-z0-9_]{1,62}$')
+          - cp_import_failed_database_name is match('^[a-z][a-z0-9_]{1,62}$')
+        fail_msg: >-
+          Replacement restore requires the local PostgreSQL Azure profile, the
+          fixed protected dump path, a lowercase SHA-256, and the exact
+          acknowledgement. No database was changed.
+
+    - name: Protect the fixed restore journal directory
+      ansible.builtin.file:
+        path: "{{ cp_import_fixed_dump_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Ensure the local recovery helper directory exists
+      ansible.builtin.file:
+        path: "{{ cp_import_journal_helper | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the pinned restore journal helper
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/controller_restore_journal.py"
+        dest: "{{ cp_import_journal_helper }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Create the fixed root-only restore transaction lock file
+      ansible.builtin.copy:
+        content: ''
+        dest: "{{ cp_import_lock_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+        force: false
+
+    - name: Build the fixed restore journal command identity
+      ansible.builtin.set_fact:
+        cp_import_journal_argv:
+          - "{{ cp_import_journal_helper }}"
+          - --journal
+          - "{{ cp_import_journal_path }}"
+          - --expected-sha256
+          - "{{ cp_import_expected_sha256 }}"
+          - --main-database
+          - "{{ cp_database_name }}"
+          - --import-database
+          - "{{ cp_import_database_name }}"
+          - --previous-database
+          - "{{ cp_import_previous_database_name }}"
+          - --failed-database
+          - "{{ cp_import_failed_database_name }}"
+          - --production
+
+    - name: Acquire one transaction-wide restore lock in a bounded transient unit
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemd-run
+          - "--unit={{ cp_import_lock_unit }}"
+          - --collect
+          - --property=Type=simple
+          - --property=User=root
+          - --property=Group=root
+          - --property=RuntimeMaxSec=3600
+          - /usr/bin/flock
+          - --exclusive
+          - --nonblock
+          - --no-fork
+          - "{{ cp_import_lock_path }}"
+          - /usr/bin/sleep
+          - '3600'
+      register: cp_import_lock_start
+      changed_when: true
+      notify: Release the restore transaction lock
+
+    - name: Prove another process cannot enter the restore transaction lock
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/flock
+          - --exclusive
+          - --nonblock
+          - "{{ cp_import_lock_path }}"
+          - /usr/bin/true
+      register: cp_import_lock_probe
+      changed_when: false
+      failed_when: cp_import_lock_probe.rc != 1
+      retries: 5
+      delay: 1
+      until: cp_import_lock_probe.rc == 1
+
+    - name: Observe the digest-bound PostgreSQL restore topology
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - --set=ON_ERROR_STOP=1
+          - --dbname=postgres
+          - --no-align
+          - --tuples-only
+          - --quiet
+          - >-
+            --command=SELECT COALESCE(string_agg(datname, ',' ORDER BY datname), '')
+            FROM pg_database WHERE datname IN
+            ('{{ cp_database_name }}','{{ cp_import_database_name }}',
+            '{{ cp_import_previous_database_name }}','{{ cp_import_failed_database_name }}')
+      register: cp_import_observed_databases
+      changed_when: false
+
+    - name: Reconcile the durable journal with observed database names
+      ansible.builtin.command:
+        argv: >-
+          {{ cp_import_journal_argv +
+             ['inspect', '--observed=' + (cp_import_observed_databases.stdout | trim)] }}
+      register: cp_import_journal_inspection
+      changed_when: false
+
+    - name: Select the only safe restore recovery action
+      ansible.builtin.set_fact:
+        cp_import_recovery: "{{ cp_import_journal_inspection.stdout | from_json }}"
+        cp_import_recovery_action: >-
+          {{ (cp_import_journal_inspection.stdout | from_json).action }}
+
+    - name: Finish a rollback interrupted around its atomic rename
+      when:
+        - cp_import_recovery_action in ['RESUME_ROLLBACK', 'FINALIZE_ROLLBACK', 'ROLLED_BACK']
+      block:
+        - name: Stop application services before resumed rollback
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            state: stopped
+          loop:
+            - vivolution-cp-web.service
+            - pgbouncer.service
+          failed_when: false
+
+        - name: Resume the atomic original-database selection
+          become_user: postgres
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --single-transaction
+              - --dbname=postgres
+          args:
+            stdin: |
+              SELECT pg_terminate_backend(pid)
+              FROM pg_stat_activity
+              WHERE datname IN ('{{ cp_database_name }}','{{ cp_import_previous_database_name }}')
+                AND pid <> pg_backend_pid();
+              ALTER DATABASE "{{ cp_database_name }}" RENAME TO "{{ cp_import_failed_database_name }}";
+              ALTER DATABASE "{{ cp_import_previous_database_name }}" RENAME TO "{{ cp_database_name }}";
+          changed_when: true
+          when: cp_import_recovery_action == 'RESUME_ROLLBACK'
+
+        - name: Durably record the observed completed rollback
+          ansible.builtin.command:
+            argv: "{{ cp_import_journal_argv + ['transition', '--phase', 'ROLLED_BACK'] }}"
+          changed_when: true
+          when: cp_import_recovery_action in ['RESUME_ROLLBACK', 'FINALIZE_ROLLBACK']
+
+        - name: Restart the original controller after rollback recovery
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            state: started
+          loop:
+            - pgbouncer.service
+            - vivolution-cp-web.service
+
+        - name: Require original controller readiness after rollback recovery
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ cp_controller_web_port }}/health/ready"
+            method: GET
+            status_code: 200
+          register: cp_import_rollback_ready
+          retries: "{{ cp_controller_readiness_retries }}"
+          delay: "{{ cp_controller_readiness_delay }}"
+          until: cp_import_rollback_ready.status == 200
+
+        - name: Remove any retained plaintext import archive after rollback recovery
+          ansible.builtin.file:
+            path: "{{ cp_import_dump_path }}"
+            state: absent
+
+        - name: Release the restore lock before reporting a recovered failure
+          ansible.builtin.meta: flush_handlers
+
+        - name: Refuse to conceal a recovered failed replacement restore
+          ansible.builtin.fail:
+            msg: >-
+              A prior replacement restore was interrupted or failed after database
+              selection. The durable journal and observed database names proved and
+              restored the original controller. The failed imported database is
+              retained for investigation; start a new digest-bound restore only
+              after an explicit operator review.
+
+    - name: Finalize a healthy restore interrupted after readiness
+      ansible.builtin.command:
+        argv: "{{ cp_import_journal_argv + ['transition', '--phase', 'COMPLETE'] }}"
+      changed_when: true
+      when: cp_import_recovery_action == 'FINALIZE_COMPLETE'
+
+    - name: Recheck an already completed restore
+      when: cp_import_recovery_action in ['FINALIZE_COMPLETE', 'COMPLETE']
+      block:
+        - name: Ensure completed replacement services are active
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            state: started
+          loop:
+            - pgbouncer.service
+            - vivolution-cp-web.service
+
+        - name: Reprove completed replacement readiness
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ cp_controller_web_port }}/health/ready"
+            method: GET
+            status_code: 200
+          register: cp_import_complete_ready
+          retries: "{{ cp_controller_readiness_retries }}"
+          delay: "{{ cp_controller_readiness_delay }}"
+          until: cp_import_complete_ready.status == 200
+
+        - name: Remove any retained plaintext archive after completion recovery
+          ansible.builtin.file:
+            path: "{{ cp_import_dump_path }}"
+            state: absent
+
+        - name: Report idempotent completed replacement restore
+          ansible.builtin.debug:
+            msg: >-
+              RESTORE_SELECTED_VERIFIED_BACKUP; durable transaction is COMPLETE;
+              rollback database remains {{ cp_import_previous_database_name }}.
+
+    - name: Release the restore lock after idempotent completion handling
+      ansible.builtin.meta: flush_handlers
+      when: cp_import_recovery_action in ['FINALIZE_COMPLETE', 'COMPLETE']
+
+    - name: Stop this host after idempotent completion handling
+      ansible.builtin.meta: end_host
+      when: cp_import_recovery_action in ['FINALIZE_COMPLETE', 'COMPLETE']
+
+    - name: Restore, reconcile, and atomically select the imported database
+      block:
+        - name: Inspect the protected remote dump without following links
+          ansible.builtin.stat:
+            path: "{{ cp_import_dump_path }}"
+            follow: false
+            checksum_algorithm: sha256
+            get_checksum: true
+          register: cp_import_dump_stat
+          when: cp_import_recovery_action in ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT']
+
+        - name: Require an exact root-only single-link dump
+          ansible.builtin.assert:
+            that:
+              - cp_import_dump_stat.stat.exists | default(false)
+              - cp_import_dump_stat.stat.isreg | default(false)
+              - not (cp_import_dump_stat.stat.islnk | default(true))
+              - cp_import_dump_stat.stat.uid | default(-1) | int == 0
+              - cp_import_dump_stat.stat.gid | default(-1) | int == 0
+              - cp_import_dump_stat.stat.mode | default('') == '0600'
+              - cp_import_dump_stat.stat.nlink | default(-1) | int == 1
+              - cp_import_dump_stat.stat.size | default(0) | int > 0
+              - cp_import_dump_stat.stat.size | default(0) | int < 1073741824
+              - cp_import_dump_stat.stat.checksum | default('') == cp_import_expected_sha256
+            fail_msg: The remote backup is missing, linked, permissive, oversized, or has the wrong digest.
+          when: cp_import_recovery_action in ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT']
+
+        - name: Validate the custom-format PostgreSQL archive
+          ansible.builtin.command:
+            argv: [pg_restore, --list, "{{ cp_import_dump_path }}"]
+          register: cp_import_archive_list
+          changed_when: false
+          when: cp_import_recovery_action in ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT']
+
+        - name: Require the controller, operator, and RLS schema in the archive
+          ansible.builtin.assert:
+            that:
+              - "'TABLE public core_tenantcontext' in cp_import_archive_list.stdout"
+              - "'TABLE DATA public auth_user' in cp_import_archive_list.stdout"
+              - "'TABLE cp_security rls_signing_key' in cp_import_archive_list.stdout"
+              - "'TABLE DATA cp_security rls_signing_key' not in cp_import_archive_list.stdout"
+            fail_msg: The supplied archive is not the qualified CP1 backup shape.
+          when: cp_import_recovery_action in ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT']
+
+        - name: Durably mark a fresh import before database creation
+          ansible.builtin.command:
+            argv: "{{ cp_import_journal_argv + ['transition', '--phase', 'IMPORT_STARTED'] }}"
+          changed_when: true
+          when: cp_import_recovery_action == 'START'
+
+        - name: Remove a possibly partial import after an interrupted restore
+          become_user: postgres
+          ansible.builtin.command:
+            argv:
+              - dropdb
+              - --if-exists
+              - --force
+              - "{{ cp_import_database_name }}"
+          changed_when: true
+          when: cp_import_recovery_action == 'RESTART_IMPORT'
+
+        - name: Create the isolated import database
+          become_user: postgres
+          ansible.builtin.command:
+            argv:
+              - createdb
+              - "--owner={{ cp_db_owner }}"
+              - "{{ cp_import_database_name }}"
+          changed_when: true
+          when: cp_import_recovery_action in ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT']
+
+        - name: Harden the isolated import database before restore
+          become_user: postgres
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - "--dbname={{ cp_import_database_name }}"
+          args:
+            stdin: |
+              REVOKE ALL PRIVILEGES ON DATABASE "{{ cp_import_database_name }}" FROM PUBLIC;
+              GRANT CONNECT ON DATABASE "{{ cp_import_database_name }}" TO "{{ cp_db_runtime_user }}";
+              ALTER ROLE "{{ cp_db_owner }}" IN DATABASE "{{ cp_import_database_name }}"
+                  SET search_path TO public, pg_catalog;
+              ALTER ROLE "{{ cp_db_runtime_user }}" IN DATABASE "{{ cp_import_database_name }}"
+                  SET search_path TO pg_catalog, public;
+          changed_when: true
+          no_log: true
+          when: cp_import_recovery_action in ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT']
+
+        - name: Restore the archive into the isolated database
+          ansible.builtin.command:
+            argv:
+              - pg_restore
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_import_database_name }}"
+              - --no-password
+              - --no-owner
+              - --exit-on-error
+              - "{{ cp_import_dump_path }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          changed_when: true
+          no_log: true
+          when: cp_import_recovery_action in ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT']
+
+        - name: Reinstall the current signed RLS context key
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_import_database_name }}"
+              - --no-password
+          args:
+            stdin: |
+              \getenv rls_signing_key RLS_CONTEXT_SIGNING_KEY
+              INSERT INTO cp_security.rls_signing_key AS installed_key
+                  (singleton, key_material, rotated_at)
+              VALUES (true, decode(:'rls_signing_key', 'hex'), statement_timestamp())
+              ON CONFLICT (singleton) DO UPDATE
+              SET key_material = EXCLUDED.key_material,
+                  rotated_at = EXCLUDED.rotated_at;
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+            RLS_CONTEXT_SIGNING_KEY: "{{ cp_rls_context_key }}"
+          changed_when: true
+          no_log: true
+          when: cp_import_recovery_action in ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT']
+
+        - name: Select the database that must pass the restore integrity gate
+          ansible.builtin.set_fact:
+            cp_import_integrity_database: >-
+              {{ cp_database_name
+                 if cp_import_recovery_action in
+                    ['RESUME_SELECTED_AFTER_SWAP', 'RESUME_READINESS']
+                 else cp_import_database_name }}
+
+        - name: Verify migrations, operator, and RLS catalog before service selection
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --host=127.0.0.1
+              - "--port={{ cp_db_upstream_port }}"
+              - "--username={{ cp_db_owner }}"
+              - "--dbname={{ cp_import_integrity_database }}"
+              - --no-password
+              - --no-align
+              - --tuples-only
+              - --quiet
+              - "--set=runtime_role={{ cp_db_runtime_user }}"
+              - "--set=owner_role={{ cp_db_owner }}"
+          args:
+            stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/../tests/restore-integrity-check.sql') }}"
+          environment:
+            PGPASSWORD: "{{ cp_db_owner_password }}"
+          register: cp_import_integrity
+          changed_when: false
+          no_log: true
+
+        - name: Require complete restored controller integrity before selection
+          ansible.builtin.assert:
+            that:
+              - >-
+                cp_import_integrity.stdout | trim ==
+                'true|true|true|true|true|true|true|true|true'
+            fail_msg: The imported database failed schema, operator, or RLS integrity checks.
+
+        - name: Durably mark a newly verified isolated import
+          ansible.builtin.command:
+            argv: "{{ cp_import_journal_argv + ['transition', '--phase', 'PREPARED'] }}"
+          changed_when: true
+          when: cp_import_recovery_action in ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT']
+
+        - name: Durably mark the database swap before service interruption
+          ansible.builtin.command:
+            argv: "{{ cp_import_journal_argv + ['transition', '--phase', 'SWAP_STARTED'] }}"
+          changed_when: true
+          when: >-
+            cp_import_recovery_action in
+            ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT', 'RESUME_PREPARED']
+
+        - name: Stop controller and PgBouncer for bounded selection
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            state: stopped
+          loop:
+            - vivolution-cp-web.service
+            - pgbouncer.service
+
+        - name: Atomically select the verified import
+          become_user: postgres
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --single-transaction
+              - --dbname=postgres
+          args:
+            stdin: |
+              SELECT pg_terminate_backend(pid)
+              FROM pg_stat_activity
+              WHERE datname IN ('{{ cp_database_name }}','{{ cp_import_database_name }}')
+                AND pid <> pg_backend_pid();
+              ALTER DATABASE "{{ cp_database_name }}" RENAME TO "{{ cp_import_previous_database_name }}";
+              ALTER DATABASE "{{ cp_import_database_name }}" RENAME TO "{{ cp_database_name }}";
+          changed_when: true
+          when: >-
+            cp_import_recovery_action in
+            ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT', 'RESUME_PREPARED', 'RESUME_SWAP']
+
+        - name: Durably record imported database selection
+          ansible.builtin.command:
+            argv: "{{ cp_import_journal_argv + ['transition', '--phase', 'SELECTED'] }}"
+          changed_when: true
+          when: cp_import_recovery_action != 'RESUME_READINESS'
+
+        - name: Start PgBouncer and the restored controller
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            state: started
+          loop:
+            - pgbouncer.service
+            - vivolution-cp-web.service
+
+        - name: Require restored controller readiness
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ cp_controller_web_port }}/health/ready"
+            method: GET
+            status_code: 200
+          register: cp_import_ready
+          retries: "{{ cp_controller_readiness_retries }}"
+          delay: "{{ cp_controller_readiness_delay }}"
+          until: cp_import_ready.status == 200
+
+        - name: Durably record the passed readiness gate
+          ansible.builtin.command:
+            argv: "{{ cp_import_journal_argv + ['transition', '--phase', 'READINESS_VERIFIED'] }}"
+          changed_when: true
+
+        - name: Commit the durable restore transaction
+          ansible.builtin.command:
+            argv: "{{ cp_import_journal_argv + ['transition', '--phase', 'COMPLETE'] }}"
+          changed_when: true
+
+      rescue:
+        - name: Stop application services before observed-state recovery
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            state: stopped
+          loop:
+            - vivolution-cp-web.service
+            - pgbouncer.service
+          failed_when: false
+
+        - name: Reobserve PostgreSQL topology after restore failure
+          become_user: postgres
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --dbname=postgres
+              - --no-align
+              - --tuples-only
+              - --quiet
+              - >-
+                --command=SELECT COALESCE(string_agg(datname, ',' ORDER BY datname), '')
+                FROM pg_database WHERE datname IN
+                ('{{ cp_database_name }}','{{ cp_import_database_name }}',
+                '{{ cp_import_previous_database_name }}','{{ cp_import_failed_database_name }}')
+          register: cp_import_rescue_observed
+          changed_when: false
+
+        - name: Reconcile failure against durable journal and observed names
+          ansible.builtin.command:
+            argv: >-
+              {{ cp_import_journal_argv +
+                 ['inspect', '--observed=' + (cp_import_rescue_observed.stdout | trim)] }}
+          register: cp_import_rescue_inspection
+          changed_when: false
+
+        - name: Select the bounded failure-recovery action
+          ansible.builtin.set_fact:
+            cp_import_rescue_state: "{{ cp_import_rescue_inspection.stdout | from_json }}"
+            cp_import_rescue_action: >-
+              {{ (cp_import_rescue_inspection.stdout | from_json).action }}
+
+        - name: Record a swap completed just before orchestration failure
+          ansible.builtin.command:
+            argv: "{{ cp_import_journal_argv + ['transition', '--phase', 'SELECTED'] }}"
+          changed_when: true
+          when: cp_import_rescue_action == 'RESUME_SELECTED_AFTER_SWAP'
+
+        - name: Start the durable rollback before its atomic rename
+          ansible.builtin.command:
+            argv: "{{ cp_import_journal_argv + ['transition', '--phase', 'ROLLBACK_STARTED'] }}"
+          changed_when: true
+          when: cp_import_rescue_action in ['RESUME_SELECTED_AFTER_SWAP', 'RESUME_READINESS']
+
+        - name: Atomically restore the original database after failed readiness
+          become_user: postgres
+          ansible.builtin.command:
+            argv:
+              - psql
+              - -X
+              - --set=ON_ERROR_STOP=1
+              - --single-transaction
+              - --dbname=postgres
+          args:
+            stdin: |
+              SELECT pg_terminate_backend(pid)
+              FROM pg_stat_activity
+              WHERE datname IN ('{{ cp_database_name }}','{{ cp_import_previous_database_name }}')
+                AND pid <> pg_backend_pid();
+              ALTER DATABASE "{{ cp_database_name }}" RENAME TO "{{ cp_import_failed_database_name }}";
+              ALTER DATABASE "{{ cp_import_previous_database_name }}" RENAME TO "{{ cp_database_name }}";
+          changed_when: true
+          when: >-
+            cp_import_rescue_action in
+            ['RESUME_SELECTED_AFTER_SWAP', 'RESUME_READINESS', 'RESUME_ROLLBACK']
+
+        - name: Durably record failed import rollback
+          ansible.builtin.command:
+            argv: "{{ cp_import_journal_argv + ['transition', '--phase', 'ROLLED_BACK'] }}"
+          changed_when: true
+          when: >-
+            cp_import_rescue_action in
+            ['RESUME_SELECTED_AFTER_SWAP', 'RESUME_READINESS', 'RESUME_ROLLBACK',
+             'FINALIZE_ROLLBACK']
+
+        - name: Remove an unselected or partial import
+          become_user: postgres
+          ansible.builtin.command:
+            argv:
+              - dropdb
+              - --if-exists
+              - --force
+              - "{{ cp_import_database_name }}"
+          changed_when: true
+          failed_when: false
+          when: >-
+            cp_import_rescue_action in
+            ['BEGIN_IMPORT', 'RESTART_IMPORT', 'RESUME_PREPARED', 'RESUME_SWAP']
+
+        - name: Clear an exact pre-selection journal after import removal
+          ansible.builtin.command:
+            argv: >-
+              {{ cp_import_journal_argv +
+                 ['clear', '--phase', cp_import_rescue_state.phase] }}
+          changed_when: true
+          when: >-
+            cp_import_rescue_action in
+            ['BEGIN_IMPORT', 'RESTART_IMPORT', 'RESUME_PREPARED', 'RESUME_SWAP']
+
+        - name: Restart the original or recovered application services
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            state: started
+          loop:
+            - pgbouncer.service
+            - vivolution-cp-web.service
+          failed_when: false
+
+        - name: Fail after bounded observed-state recovery
+          ansible.builtin.fail:
+            msg: >-
+              The replacement backup did not pass every restore/readiness gate.
+              Recovery used the protected journal plus observed database names;
+              it either removed an unselected import, restored the original
+              database, or retained a healthy selected state for idempotent
+              finalization. Rerun the playbook to prove the resulting state.
+
+      always:
+        - name: Remove the plaintext remote import archive
+          ansible.builtin.file:
+            path: "{{ cp_import_dump_path }}"
+            state: absent
+
+        - name: Release the transaction-wide restore lock
+          ansible.builtin.meta: flush_handlers
+
+    - name: Report the retained rollback database
+      ansible.builtin.debug:
+        msg: >-
+          RESTORE_SELECTED_VERIFIED_BACKUP; durable transaction COMPLETE;
+          rollback database retained as {{ cp_import_previous_database_name }}
+          until final acceptance.
+
+  handlers:
+    - name: Release the restore transaction lock
+      ansible.builtin.systemd_service:
+        name: "{{ cp_import_lock_unit }}"
+        state: stopped
+      failed_when: false

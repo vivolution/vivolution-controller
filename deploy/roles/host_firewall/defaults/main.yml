@@ -1,0 +1,12 @@
+---
+# The isolated voice fixture is opt-in. Its contract is deliberately fixed so
+# enabling it cannot widen controller access beyond the POC edge subnet and
+# the fixture's signaling/media listeners.
+cp_voice_fixture_enabled: false
+cp_voice_fixture_source_ipv4_cidr: 10.20.2.0/24
+cp_voice_fixture_tcp_ports:
+  - 16061
+  - 25061
+cp_voice_fixture_udp_port_ranges:
+  - 21000-21127
+  - 22000-22063

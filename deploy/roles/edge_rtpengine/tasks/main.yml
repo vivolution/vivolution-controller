@@ -1,0 +1,90 @@
+---
+- name: Resolve the dedicated RTPengine service account
+  ansible.builtin.command:
+    argv: [getent, passwd, rtpengine]
+  register: edge_rtpengine_account
+  changed_when: false
+
+- name: Require an unprivileged RTPengine system identity
+  ansible.builtin.assert:
+    that:
+      - edge_rtpengine_account.stdout_lines | length == 1
+      - edge_rtpengine_account.stdout.split(':') | length == 7
+      - edge_rtpengine_account.stdout.split(':')[2] | int > 0
+      - edge_rtpengine_account.stdout.split(':')[2] | int < 1000
+      - edge_rtpengine_account.stdout.split(':')[6] in ['/bin/false', '/usr/sbin/nologin']
+    fail_msg: RTPengine must run under its dedicated non-login system account.
+
+- name: Install the userspace-only RTPengine configuration
+  ansible.builtin.template:
+    src: rtpengine.conf.j2
+    dest: /etc/rtpengine/rtpengine.conf
+    owner: root
+    group: rtpengine
+    mode: '0640'
+  notify: Restart edge RTPengine
+
+- name: Install explicit RTPengine startup defaults
+  ansible.builtin.template:
+    src: rtpengine-daemon.default.j2
+    dest: /etc/default/rtpengine-daemon
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart edge RTPengine
+
+- name: Create the RTPengine systemd override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/rtpengine-daemon.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Remove kernel-mode capabilities from RTPengine
+  ansible.builtin.template:
+    src: 10-vivolution-userspace.conf.j2
+    dest: /etc/systemd/system/rtpengine-daemon.service.d/10-vivolution-userspace.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart edge RTPengine
+
+- name: Verify the rendered RTPengine userspace invariants
+  ansible.builtin.command:
+    argv:
+      - awk
+      - >-
+        BEGIN { section=0; table=0; ng=0; cli=0; min=0; max=0 }
+        /^\[rtpengine\]$/ { section=1; next }
+        /^\[/ { section=0 }
+        section && $0 ~ /^table[[:space:]]*=[[:space:]]*-1$/ { table++ }
+        section && $0 ~ /^listen-ng[[:space:]]*=[[:space:]]*127\.0\.0\.1:/ { ng++ }
+        section && $0 ~ /^listen-cli[[:space:]]*=[[:space:]]*127\.0\.0\.1:/ { cli++ }
+        section && $0 ~ /^port-min[[:space:]]*=/ { min++ }
+        section && $0 ~ /^port-max[[:space:]]*=/ { max++ }
+        END { print table "|" ng "|" cli "|" min "|" max }
+      - /etc/rtpengine/rtpengine.conf
+  register: edge_rtpengine_config_invariants
+  changed_when: false
+
+- name: Require one userspace table, loopback controls, and one media range
+  ansible.builtin.assert:
+    that:
+      - edge_rtpengine_config_invariants.stdout | trim == '1|1|1|1|1'
+    fail_msg: The rendered RTPengine configuration is not the userspace-only bootstrap contract.
+
+- name: Enable and start RTPengine
+  ansible.builtin.systemd_service:
+    name: rtpengine-daemon.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply pending RTPengine changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Require RTPengine to be active
+  ansible.builtin.command:
+    argv: [systemctl, is-active, rtpengine-daemon.service]
+  changed_when: false

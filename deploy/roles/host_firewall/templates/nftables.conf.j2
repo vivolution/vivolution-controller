@@ -6,6 +6,7 @@ table inet vivolution_filter {
 {% set cp_effective_public_tcp_ports = cp_firewall_public_tcp_ports | default(cp_firewall_tcp_ports) %}
 {% set cp_effective_ssh_source_ipv4_cidrs = cp_firewall_ssh_source_ipv4_cidrs | default([]) %}
 {% set cp_effective_dhcp_server_ipv4 = cp_firewall_dhcp_server_ipv4 | default('') %}
+{% set cp_effective_voice_fixture_enabled = cp_voice_fixture_enabled | default(false) | bool %}
 {% if cp_effective_ssh_source_ipv4_cidrs | length > 0 %}
     set ssh_source_ipv4 {
         type ipv4_addr
@@ -28,6 +29,10 @@ table inet vivolution_filter {
         tcp dport { {{ cp_effective_public_tcp_ports | join(', ') }} } ct state new accept
 {% if cp_effective_ssh_source_ipv4_cidrs | length > 0 %}
         ip saddr @ssh_source_ipv4 tcp dport 22 ct state new accept
+{% endif %}
+{% if cp_effective_voice_fixture_enabled %}
+        ip saddr {{ cp_voice_fixture_source_ipv4_cidr }} tcp dport { {{ cp_voice_fixture_tcp_ports | join(', ') }} } ct state new accept
+        ip saddr {{ cp_voice_fixture_source_ipv4_cidr }} udp dport { {{ cp_voice_fixture_udp_port_ranges | join(', ') }} } ct state new accept
 {% endif %}
     }
 

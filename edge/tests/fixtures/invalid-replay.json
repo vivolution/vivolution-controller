@@ -1,0 +1,16 @@
+{
+  "description": "The exact sequence-7 envelope is received again after sequence 7 was already accepted.",
+  "baseEnvelope": "../../schema/examples/v0.1-one-tenant-pbx-relay.json",
+  "mutations": [],
+  "context": {
+    "expectedClusterId": "cluster-uaen-poc-01",
+    "expectedNodeId": "sbc1",
+    "expectedGeneration": 1,
+    "expectedTenantContextId": "tenant-vivolution-poc",
+    "expectedAllocationId": "allocation-vivolution-uaen-poc",
+    "acceptedSequence": 7,
+    "acceptedDigest": "sha256:631fbf8727af030bcebc76765880defd42575b74621ea5e7c0572a67c4d58ab9",
+    "now": "2026-08-30T04:45:00Z"
+  },
+  "expectedError": "replay/downgrade"
+}

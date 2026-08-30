@@ -1,0 +1,62 @@
+{
+  "acceptedState": null,
+  "activationTtlSeconds": 1800,
+  "apiVersion": "edge.vivolution.ae/control-plane-profile/v0.1",
+  "capacity": {
+    "maxBandwidthKbps": 6400,
+    "maxCallsPerSecond": 5,
+    "maxConcurrentSessions": 50,
+    "reservedConcurrentSessions": 25
+  },
+  "deploymentMode": "CP1_SYNTHETIC_NO_PSTN",
+  "kind": "FirstTenantSyntheticFixtureProfile",
+  "media": {
+    "codecs": [
+      "PCMA",
+      "PCMU"
+    ],
+    "maxSessions": 50,
+    "rtcpMux": false
+  },
+  "pbxConnector": {
+    "mediaDestinationPortEnd": 21127,
+    "mediaDestinationPortStart": 21000,
+    "optionsIntervalSeconds": 60,
+    "remoteHost": "pbx-fixture.invalid",
+    "remotePort": 16061,
+    "sourceIpv4Cidrs": [
+      "10.20.1.4/32"
+    ],
+    "tlsServerName": "pbx-fixture.invalid"
+  },
+  "routing": {
+    "calledNumberPrefix": "+971",
+    "priority": 100
+  },
+  "secretReferences": {
+    "pbxClientCa": {
+      "offlineValiditySeconds": 604800,
+      "secretRefId": "secret-pbx-client-ca",
+      "version": "version-2026-08-30-01"
+    },
+    "pbxClientIdentity": {
+      "offlineValiditySeconds": 604800,
+      "secretRefId": "secret-pbx-client-identity",
+      "version": "version-2026-08-30-01"
+    },
+    "pbxServerIdentity": {
+      "offlineValiditySeconds": 604800,
+      "secretRefId": "secret-pbx-server-identity",
+      "version": "version-2026-08-30-01"
+    }
+  },
+  "sequence": 1,
+  "targetAuthority": {
+    "allocationId": "allocation-vivolution-uaen-poc",
+    "clusterId": "cluster-uaen-poc-01",
+    "customerAccountId": "vivolution-technologies-llc",
+    "m365TenantId": "9b7a1c2d-3e4f-4a5b-8c6d-7e8f9012abcd",
+    "serviceInstanceId": "service-vivolution-pbx-relay",
+    "tenantContextId": "tenant-vivolution-poc"
+  }
+}

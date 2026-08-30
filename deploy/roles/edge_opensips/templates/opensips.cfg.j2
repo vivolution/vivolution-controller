@@ -1,0 +1,23 @@
+#### Vivolution Open Edge bootstrap configuration
+#### Tenant TLS, certificates, routes, and media policy arrive later through
+#### signed desired state. Until then, only a loopback fail-closed listener runs.
+
+log_level=3
+xlog_level=3
+stderror_enabled=no
+syslog_enabled=yes
+syslog_facility=LOG_LOCAL0
+
+udp_workers=2
+socket=udp:127.0.0.1:5060
+
+mpath="/usr/lib/x86_64-linux-gnu/opensips/modules/"
+
+loadmodule "signaling.so"
+loadmodule "sl.so"
+loadmodule "proto_udp.so"
+
+route {
+    send_reply(503, "Edge desired state not provisioned");
+    exit;
+}

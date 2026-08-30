@@ -1,0 +1,31 @@
+[modules]
+autoload=yes
+
+; No shell/process execution is available to fixture dialplan input.
+noload=app_system.so
+noload=func_shell.so
+noload=res_config_curl.so
+noload=func_curl.so
+
+; Disable every unused signaling/control listener family.
+noload=chan_iax2.so
+noload=chan_dahdi.so
+noload=chan_mgcp.so
+noload=chan_skinny.so
+noload=chan_unistim.so
+noload=res_http_websocket.so
+noload=res_ari.so
+noload=res_ari_applications.so
+noload=res_ari_asterisk.so
+noload=res_ari_bridges.so
+noload=res_ari_channels.so
+noload=res_ari_device_states.so
+noload=res_ari_endpoints.so
+noload=res_ari_events.so
+noload=res_ari_mailboxes.so
+noload=res_ari_model.so
+noload=res_ari_playbacks.so
+noload=res_ari_recordings.so
+noload=res_ari_sounds.so
+noload=res_prometheus.so
+noload=res_snmp.so

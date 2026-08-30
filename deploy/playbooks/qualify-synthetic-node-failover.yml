@@ -1,0 +1,1378 @@
+---
+- name: Qualify bounded private new-call failover from SBC1 to SBC2
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  any_errors_fatal: true
+
+  vars:
+    edge_failover_primary: sbc1
+    edge_failover_alternate: sbc2
+    edge_failover_gate_seconds: 120
+    edge_failover_alternate_call_timeout_seconds: 110
+    edge_failover_deadman_delay_seconds: 150
+    edge_failover_deadman_unit: vivolution-synthetic-failover-deadman
+    edge_failover_lock_dir: /var/lib/vivolution-edge/synthetic-failover-recovery
+    edge_failover_marker_path: "{{ edge_failover_lock_dir }}/RECOVERY_REQUIRED.json"
+    edge_failover_deadman_path: "{{ edge_failover_lock_dir }}/recover-data-plane"
+    edge_failover_injector_path: "{{ edge_failover_lock_dir }}/inject-data-plane-failure"
+    edge_failover_results_root: /var/lib/vivolution/voice-fixture/results
+    edge_failover_local_root: "{{ inventory_dir }}/generated/synthetic-failover"
+    edge_failover_remote_collector: /run/lock/vivolution-synthetic-failover-collector.py
+    edge_failover_evidence_compiler: >-
+      {{ playbook_dir }}/../scripts/synthetic_failover_evidence.py
+    edge_failover_cdr_reconciler: >-
+      {{ playbook_dir }}/../../poc/voice-fixture/roles/voice_fixture/files/bin/synthetic_cdr_evidence.py
+    edge_failover_required_runtime_checks:
+      - systemd-nftables
+      - systemd-rtpengine-daemon
+      - systemd-opensips
+      - opensips-active-parse
+      - nft-owned-default-deny
+      - rtpengine-ng-ping
+      - listeners-exact
+      - rtpengine-control-loopback
+
+  tasks:
+    - name: Require the exact private two-node disruption contract
+      ansible.builtin.assert:
+        that:
+          - groups.get('edge_nodes', []) | sort == ['sbc1', 'sbc2']
+          - groups.get('fixture_controller', []) | length == 1
+          - groups['fixture_controller'][0] not in groups['edge_nodes']
+          - >-
+            edge_synthetic_failover_acknowledgement | default('') ==
+            'RUN_SYNTHETIC_SBC1_TO_SBC2_FAILOVER_WITHIN_120_SECONDS'
+          - edge_failover_gate_seconds | int == 120
+          - edge_failover_alternate_call_timeout_seconds | int == 110
+          - edge_failover_deadman_delay_seconds | int == 150
+          - edge_failover_deadman_delay_seconds | int > edge_failover_gate_seconds | int
+          - inventory_dir is match('^/')
+          - edge_failover_local_root == inventory_dir ~ '/generated/synthetic-failover'
+          - hostvars['sbc1'].edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+          - hostvars['sbc2'].edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+          - hostvars['sbc1'].edge_generation | int == 1
+          - hostvars['sbc2'].edge_generation | int == 1
+          - hostvars['sbc1'].edge_slot == 'A'
+          - hostvars['sbc2'].edge_slot == 'B'
+          - hostvars['sbc1'].edge_private_ipv4 == '10.20.2.4'
+          - hostvars['sbc2'].edge_private_ipv4 == '10.20.2.5'
+        fail_msg: >-
+          Synthetic failover is deliberately disruptive. It requires exactly
+          SBC1/SBC2 generation 1, one private fixture controller, the fixed
+          120-second gate, and the one-run acknowledgement.
+
+    - name: Inspect a durable recovery marker from an interrupted prior run
+      ansible.builtin.stat:
+        path: "{{ edge_failover_lock_dir }}"
+        follow: false
+        get_attributes: false
+        get_checksum: false
+        get_mime: false
+      delegate_to: sbc1
+      become: true
+      register: edge_failover_existing_lock
+
+    - name: Inspect exact prior recovery directory entries
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/find
+          - "{{ edge_failover_lock_dir }}"
+          - -mindepth
+          - '1'
+          - -maxdepth
+          - '1'
+          - -printf
+          - '%f\n'
+      delegate_to: sbc1
+      become: true
+      changed_when: false
+      register: edge_failover_existing_entries
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Inspect prior marker and deadman payload
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+        get_attributes: false
+        get_checksum: false
+        get_mime: false
+      loop:
+        - "{{ edge_failover_marker_path }}"
+        - "{{ edge_failover_deadman_path }}"
+        - "{{ edge_failover_injector_path }}"
+      delegate_to: sbc1
+      become: true
+      register: edge_failover_existing_recovery_files
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Require a protected and bounded interrupted-run marker
+      ansible.builtin.assert:
+        that:
+          - edge_failover_existing_lock.stat.isdir | default(false)
+          - not (edge_failover_existing_lock.stat.islnk | default(false))
+          - edge_failover_existing_lock.stat.uid | int == 0
+          - edge_failover_existing_lock.stat.gid | int == 0
+          - edge_failover_existing_lock.stat.mode == '0700'
+          - >-
+            edge_failover_existing_entries.stdout_lines | sort | difference(
+              ['RECOVERY_REQUIRED.json', 'inject-data-plane-failure',
+               'recover-data-plane']) | length == 0
+          - >-
+            not (edge_failover_existing_recovery_files.results[1].stat.exists | bool) or
+            (edge_failover_existing_recovery_files.results[0].stat.exists | bool)
+          - >-
+            not (edge_failover_existing_recovery_files.results[2].stat.exists | bool) or
+            (edge_failover_existing_recovery_files.results[0].stat.exists | bool)
+          - >-
+            not (edge_failover_existing_recovery_files.results[0].stat.exists | bool) or (
+              edge_failover_existing_recovery_files.results[0].stat.isreg | default(false) and
+              not (edge_failover_existing_recovery_files.results[0].stat.islnk | default(false)) and
+              edge_failover_existing_recovery_files.results[0].stat.nlink | int == 1 and
+              edge_failover_existing_recovery_files.results[0].stat.uid | int == 0 and
+              edge_failover_existing_recovery_files.results[0].stat.gid | int == 0 and
+              edge_failover_existing_recovery_files.results[0].stat.mode == '0600')
+          - >-
+            not (edge_failover_existing_recovery_files.results[1].stat.exists | bool) or (
+              edge_failover_existing_recovery_files.results[1].stat.isreg | default(false) and
+              not (edge_failover_existing_recovery_files.results[1].stat.islnk | default(false)) and
+              edge_failover_existing_recovery_files.results[1].stat.nlink | int == 1 and
+              edge_failover_existing_recovery_files.results[1].stat.uid | int == 0 and
+              edge_failover_existing_recovery_files.results[1].stat.gid | int == 0 and
+              edge_failover_existing_recovery_files.results[1].stat.mode == '0700')
+          - >-
+            not (edge_failover_existing_recovery_files.results[2].stat.exists | bool) or (
+              edge_failover_existing_recovery_files.results[2].stat.isreg | default(false) and
+              not (edge_failover_existing_recovery_files.results[2].stat.islnk | default(false)) and
+              edge_failover_existing_recovery_files.results[2].stat.nlink | int == 1 and
+              edge_failover_existing_recovery_files.results[2].stat.uid | int == 0 and
+              edge_failover_existing_recovery_files.results[2].stat.gid | int == 0 and
+              edge_failover_existing_recovery_files.results[2].stat.mode == '0700')
+        fail_msg: >-
+          An interrupted failover marker exists but violates the exact protected
+          recovery shape; no new disruption is allowed.
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Read exact interrupted-run recovery identity
+      ansible.builtin.slurp:
+        src: "{{ edge_failover_marker_path }}"
+      delegate_to: sbc1
+      become: true
+      register: edge_failover_existing_marker_raw
+      when:
+        - edge_failover_existing_lock.stat.exists | bool
+        - edge_failover_existing_recovery_files.results[0].stat.exists | bool
+
+    - name: Decode interrupted-run recovery identity
+      ansible.builtin.set_fact:
+        edge_failover_existing_marker: >-
+          {{ edge_failover_existing_marker_raw.content | b64decode | from_json }}
+      when:
+        - edge_failover_existing_lock.stat.exists | bool
+        - edge_failover_existing_recovery_files.results[0].stat.exists | bool
+
+    - name: Require exact interrupted-run recovery identity
+      ansible.builtin.assert:
+        that:
+          - >-
+            edge_failover_existing_marker.keys() | sort ==
+            ['active', 'apiVersion', 'deadmanDelaySeconds', 'nodeId', 'restoreOrder']
+          - edge_failover_existing_marker.apiVersion == 'edge.vivolution.ae/synthetic-failover-recovery/v0.1'
+          - edge_failover_existing_marker.nodeId == 'sbc1'
+          - edge_failover_existing_marker.deadmanDelaySeconds | int == 150
+          - >-
+            edge_failover_existing_marker.restoreOrder ==
+            ['rtpengine-daemon.service', 'opensips.service']
+          - edge_failover_existing_marker.active.kind == 'CANDIDATE'
+          - edge_failover_existing_marker.active.sequence | int >= 1
+          - edge_failover_existing_marker.active.manifestDigest is match('^sha256:[0-9a-f]{64}$')
+        fail_msg: The interrupted failover recovery identity is not exact.
+      when:
+        - edge_failover_existing_lock.stat.exists | bool
+        - edge_failover_existing_recovery_files.results[0].stat.exists | bool
+
+    - name: Recover prior SBC1 media before signaling on safe rerun
+      ansible.builtin.command:
+        argv: [/usr/bin/systemctl, start, "{{ item }}"]
+      loop:
+        - rtpengine-daemon.service
+        - opensips.service
+      delegate_to: sbc1
+      become: true
+      changed_when: true
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Inspect safe-rerun SBC1 services
+      ansible.builtin.command:
+        argv: [/usr/bin/systemctl, is-active, "{{ item }}"]
+      loop:
+        - rtpengine-daemon.service
+        - opensips.service
+      delegate_to: sbc1
+      become: true
+      changed_when: false
+      register: edge_failover_safe_rerun_services
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Re-prove safe-rerun runtime health
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+      delegate_to: sbc1
+      become: true
+      changed_when: false
+      register: edge_failover_safe_rerun_health_raw
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Re-read safe-rerun runtime status
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+      delegate_to: sbc1
+      become: true
+      changed_when: false
+      register: edge_failover_safe_rerun_status_raw
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Re-prove both call directions before clearing prior marker
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-voice-fixture-test, sbc1]
+      delegate_to: "{{ groups['fixture_controller'][0] }}"
+      become: true
+      changed_when: true
+      register: edge_failover_safe_rerun_call
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Require exact safe-rerun restoration before disarming recovery
+      ansible.builtin.assert:
+        that:
+          - >-
+            edge_failover_safe_rerun_services.results |
+            map(attribute='stdout') | unique | list == ['active']
+          - (edge_failover_safe_rerun_status_raw.stdout | from_json).kind == 'EdgeRuntimeStatus'
+          - not ((edge_failover_safe_rerun_status_raw.stdout | from_json).journalPresent | bool)
+          - (edge_failover_safe_rerun_status_raw.stdout | from_json).active.kind == 'CANDIDATE'
+          - (edge_failover_safe_rerun_health_raw.stdout | from_json).kind == 'EdgeRuntimeHealth'
+          - >-
+            (edge_failover_safe_rerun_health_raw.stdout | from_json).active ==
+            (edge_failover_safe_rerun_status_raw.stdout | from_json).active
+          - >-
+            (edge_failover_safe_rerun_health_raw.stdout | from_json).runtimeChecks |
+            map(attribute='status') | unique | list == ['PASSED']
+          - >-
+            edge_failover_required_runtime_checks | difference(
+              (edge_failover_safe_rerun_health_raw.stdout | from_json).runtimeChecks |
+              map(attribute='name') | list) | length == 0
+          - >-
+            not (edge_failover_existing_recovery_files.results[0].stat.exists | bool) or
+            (edge_failover_safe_rerun_status_raw.stdout | from_json).active ==
+            edge_failover_existing_marker.active
+          - >-
+            edge_failover_safe_rerun_call.stdout is
+            match('^fixture test [0-9]{8}T[0-9]{6}Z-sbc1-[0-9]+: PASS$')
+        fail_msg: >-
+          SBC1 has not passed exact service, runtime health/status, and fresh
+          post-recovery call checks; the durable marker remains armed.
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Disarm a prior node-local deadman only after exact recovery
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemctl
+          - stop
+          - "{{ edge_failover_deadman_unit }}.timer"
+          - "{{ edge_failover_deadman_unit }}.service"
+      delegate_to: sbc1
+      become: true
+      changed_when: true
+      failed_when: edge_failover_safe_rerun_disarm.rc not in [0, 5]
+      register: edge_failover_safe_rerun_disarm
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Inspect safe-rerun deadman units after disarm
+      ansible.builtin.command:
+        argv: [/usr/bin/systemctl, is-active, "{{ item }}"]
+      loop:
+        - "{{ edge_failover_deadman_unit }}.timer"
+        - "{{ edge_failover_deadman_unit }}.service"
+      delegate_to: sbc1
+      become: true
+      changed_when: false
+      failed_when: false
+      register: edge_failover_safe_rerun_deadman_inactive
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Require safe-rerun deadman inactive before marker removal
+      ansible.builtin.assert:
+        that:
+          - >-
+            edge_failover_safe_rerun_deadman_inactive.results |
+            map(attribute='stdout') | unique | list == ['inactive']
+          - >-
+            edge_failover_safe_rerun_deadman_inactive.results |
+            map(attribute='rc') | unique | list == [3]
+        fail_msg: The prior deadman is not inactive; retaining its recovery marker.
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Remove exact prior recovery payloads after successful disarm
+      ansible.builtin.command:
+        argv: [/usr/bin/unlink, "{{ item.path }}"]
+      loop:
+        - path: "{{ edge_failover_injector_path }}"
+          exists: "{{ edge_failover_existing_recovery_files.results[2].stat.exists }}"
+        - path: "{{ edge_failover_deadman_path }}"
+          exists: "{{ edge_failover_existing_recovery_files.results[1].stat.exists }}"
+        - path: "{{ edge_failover_marker_path }}"
+          exists: "{{ edge_failover_existing_recovery_files.results[0].stat.exists }}"
+      loop_control:
+        label: "{{ item.path }}"
+      delegate_to: sbc1
+      become: true
+      changed_when: true
+      when:
+        - edge_failover_existing_lock.stat.exists | bool
+        - item.exists | bool
+
+    - name: Release prior failover recovery directory after successful retest
+      ansible.builtin.command:
+        argv: [/usr/bin/rmdir, "{{ edge_failover_lock_dir }}"]
+      delegate_to: sbc1
+      become: true
+      changed_when: true
+      when: edge_failover_existing_lock.stat.exists | bool
+
+    - name: Read immutable node facts from both Edge nodes
+      ansible.builtin.slurp:
+        src: /etc/vivolution-edge/node-facts.json
+      loop:
+        - sbc1
+        - sbc2
+      delegate_to: "{{ item }}"
+      become: true
+      register: edge_failover_node_facts_raw
+
+    - name: Read root runtime authority from both Edge nodes
+      ansible.builtin.slurp:
+        src: /etc/vivolution-edge/runtime-authority.json
+      loop:
+        - sbc1
+        - sbc2
+      delegate_to: "{{ item }}"
+      become: true
+      register: edge_failover_runtime_authority_raw
+
+    - name: Read protected runtime status from both Edge nodes
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+      loop:
+        - sbc1
+        - sbc2
+      delegate_to: "{{ item }}"
+      become: true
+      changed_when: false
+      register: edge_failover_runtime_status_raw
+
+    - name: Prove protected baseline runtime health on both Edge nodes
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+      loop:
+        - sbc1
+        - sbc2
+      delegate_to: "{{ item }}"
+      become: true
+      changed_when: false
+      register: edge_failover_runtime_health_raw
+
+    - name: Decode exact two-node runtime identity
+      ansible.builtin.set_fact:
+        edge_failover_sbc1_facts: >-
+          {{ edge_failover_node_facts_raw.results[0].content | b64decode | from_json }}
+        edge_failover_sbc2_facts: >-
+          {{ edge_failover_node_facts_raw.results[1].content | b64decode | from_json }}
+        edge_failover_sbc1_authority: >-
+          {{ edge_failover_runtime_authority_raw.results[0].content | b64decode | from_json }}
+        edge_failover_sbc2_authority: >-
+          {{ edge_failover_runtime_authority_raw.results[1].content | b64decode | from_json }}
+        edge_failover_sbc1_status: >-
+          {{ edge_failover_runtime_status_raw.results[0].stdout | from_json }}
+        edge_failover_sbc2_status: >-
+          {{ edge_failover_runtime_status_raw.results[1].stdout | from_json }}
+        edge_failover_sbc1_health: >-
+          {{ edge_failover_runtime_health_raw.results[0].stdout | from_json }}
+        edge_failover_sbc2_health: >-
+          {{ edge_failover_runtime_health_raw.results[1].stdout | from_json }}
+
+    - name: Require one identical logical tenant route on distinct healthy nodes
+      ansible.builtin.assert:
+        that:
+          - edge_failover_sbc1_facts.nodeId == 'sbc1'
+          - edge_failover_sbc2_facts.nodeId == 'sbc2'
+          - edge_failover_sbc1_facts.slot == 'A'
+          - edge_failover_sbc2_facts.slot == 'B'
+          - edge_failover_sbc1_facts.privateIpv4 == '10.20.2.4'
+          - edge_failover_sbc2_facts.privateIpv4 == '10.20.2.5'
+          - edge_failover_sbc1_facts.generation | int == 1
+          - edge_failover_sbc2_facts.generation | int == 1
+          - edge_failover_sbc1_facts.clusterId == edge_failover_sbc2_facts.clusterId
+          - edge_failover_sbc1_facts.customerAccountId == edge_failover_sbc2_facts.customerAccountId
+          - edge_failover_sbc1_facts.m365TenantId == edge_failover_sbc2_facts.m365TenantId
+          - edge_failover_sbc1_facts.tenantContextId == edge_failover_sbc2_facts.tenantContextId
+          - edge_failover_sbc1_facts.serviceInstanceId == edge_failover_sbc2_facts.serviceInstanceId
+          - edge_failover_sbc1_facts.allocationId == edge_failover_sbc2_facts.allocationId
+          - edge_failover_sbc1_facts.tenantListenerPort | int == 15061
+          - edge_failover_sbc2_facts.tenantListenerPort | int == 15061
+          - edge_failover_sbc1_facts.tenantMediaPortStart | int == 20000
+          - edge_failover_sbc2_facts.tenantMediaPortStart | int == 20000
+          - edge_failover_sbc1_facts.tenantMediaPortEnd | int == 20255
+          - edge_failover_sbc2_facts.tenantMediaPortEnd | int == 20255
+          - edge_failover_sbc1_facts.authorizedPbxSourceIpv4Cidrs == ['10.20.1.4/32']
+          - edge_failover_sbc2_facts.authorizedPbxSourceIpv4Cidrs == ['10.20.1.4/32']
+          - edge_failover_sbc1_authority.profile == 'SYNTHETIC_PRIVATE'
+          - edge_failover_sbc2_authority.profile == 'SYNTHETIC_PRIVATE'
+          - edge_failover_sbc1_authority.generation | int == 1
+          - edge_failover_sbc2_authority.generation | int == 1
+          - edge_failover_sbc1_authority.nodeId == 'sbc1'
+          - edge_failover_sbc2_authority.nodeId == 'sbc2'
+          - edge_failover_sbc1_authority.slot == 'A'
+          - edge_failover_sbc2_authority.slot == 'B'
+          - edge_failover_sbc1_status.kind == 'EdgeRuntimeStatus'
+          - edge_failover_sbc2_status.kind == 'EdgeRuntimeStatus'
+          - not (edge_failover_sbc1_status.journalPresent | bool)
+          - not (edge_failover_sbc2_status.journalPresent | bool)
+          - edge_failover_sbc1_status.active.kind == 'CANDIDATE'
+          - edge_failover_sbc2_status.active.kind == 'CANDIDATE'
+          - edge_failover_sbc1_status.active.sequence | int >= 1
+          - edge_failover_sbc2_status.active.sequence | int >= 1
+          - edge_failover_sbc1_status.active.manifestDigest is match('^sha256:[0-9a-f]{64}$')
+          - edge_failover_sbc2_status.active.manifestDigest is match('^sha256:[0-9a-f]{64}$')
+          - edge_failover_sbc1_health.kind == 'EdgeRuntimeHealth'
+          - edge_failover_sbc2_health.kind == 'EdgeRuntimeHealth'
+          - edge_failover_sbc1_health.active == edge_failover_sbc1_status.active
+          - edge_failover_sbc2_health.active == edge_failover_sbc2_status.active
+          - >-
+            edge_failover_sbc1_health.runtimeChecks |
+            map(attribute='status') | unique | list == ['PASSED']
+          - >-
+            edge_failover_sbc2_health.runtimeChecks |
+            map(attribute='status') | unique | list == ['PASSED']
+          - >-
+            edge_failover_required_runtime_checks |
+            difference(edge_failover_sbc1_health.runtimeChecks |
+                       map(attribute='name') | list) | length == 0
+          - >-
+            edge_failover_required_runtime_checks |
+            difference(edge_failover_sbc2_health.runtimeChecks |
+                       map(attribute='name') | list) | length == 0
+        fail_msg: >-
+          Both Edges must be distinct healthy SYNTHETIC_PRIVATE nodes carrying
+          the same immutable first-tenant allocation before failure injection.
+
+    - name: Prove the private no-PSTN fixture is ready
+      ansible.builtin.command:
+        argv: [/usr/local/libexec/vivolution-voice-fixture-readiness]
+      delegate_to: "{{ groups['fixture_controller'][0] }}"
+      become: true
+      changed_when: false
+
+    - name: Prove both call directions through primary SBC1 before failure
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/vivolution-voice-fixture-test, sbc1]
+      delegate_to: "{{ groups['fixture_controller'][0] }}"
+      become: true
+      changed_when: true
+      register: edge_failover_primary_call
+
+    - name: Bind the baseline call to one complete manifested result
+      ansible.builtin.assert:
+        that:
+          - >-
+            edge_failover_primary_call.stdout is
+            match('^fixture test [0-9]{8}T[0-9]{6}Z-sbc1-[0-9]+: PASS$')
+        fail_msg: The primary baseline did not produce one passing fixture result.
+
+    - name: Select the primary baseline test identity
+      ansible.builtin.set_fact:
+        edge_failover_primary_test_id: >-
+          {{ edge_failover_primary_call.stdout |
+             regex_replace('^fixture test ([0-9]{8}T[0-9]{6}Z-sbc1-[0-9]+): PASS$', '\1') }}
+        edge_failover_injection_failed: false
+        edge_failover_alternate_accepted: false
+
+    - name: Acquire the primary-node failover exercise lock
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/mkdir
+          - --mode=0700
+          - "{{ edge_failover_lock_dir }}"
+      delegate_to: sbc1
+      become: true
+      changed_when: true
+
+    - name: Mark the exact lock for guaranteed recovery
+      ansible.builtin.set_fact:
+        edge_failover_recovery_required: true
+        edge_failover_recovery_marker:
+          active: "{{ edge_failover_sbc1_status.active }}"
+          apiVersion: edge.vivolution.ae/synthetic-failover-recovery/v0.1
+          deadmanDelaySeconds: 150
+          nodeId: sbc1
+          restoreOrder:
+            - rtpengine-daemon.service
+            - opensips.service
+
+    - name: Persist exact recovery identity before arming any disruption
+      ansible.builtin.copy:
+        content: >
+          {{ edge_failover_recovery_marker |
+             to_json(sort_keys=True, separators=(',', ':')) }}
+        dest: "{{ edge_failover_marker_path }}"
+        owner: root
+        group: root
+        mode: '0600'
+      delegate_to: sbc1
+      become: true
+
+    - name: Install the node-local ordered deadman recovery payload
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          set -euo pipefail
+          marker={{ edge_failover_marker_path | quote }}
+          test -f "$marker"
+          test ! -L "$marker"
+          test "$(/usr/bin/stat --format='%a:%u:%g:%h' -- "$marker")" = '600:0:0:1'
+          /usr/bin/systemctl start rtpengine-daemon.service
+          /usr/bin/systemctl is-active --quiet rtpengine-daemon.service
+          /usr/bin/systemctl start opensips.service
+          /usr/bin/systemctl is-active --quiet opensips.service
+        dest: "{{ edge_failover_deadman_path }}"
+        owner: root
+        group: root
+        mode: '0700'
+      delegate_to: sbc1
+      become: true
+
+    - name: Install the node-local atomic deadman-and-stop payload
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          set -euo pipefail
+          marker={{ edge_failover_marker_path | quote }}
+          deadman={{ edge_failover_deadman_path | quote }}
+          test -f "$marker"
+          test ! -L "$marker"
+          test "$(/usr/bin/stat --format='%a:%u:%g:%h' -- "$marker")" = '600:0:0:1'
+          test -x "$deadman"
+          /usr/bin/systemd-run \
+              --quiet \
+              --unit={{ edge_failover_deadman_unit | quote }} \
+              --on-active={{ edge_failover_deadman_delay_seconds }}s \
+              --remain-after-exit \
+              --timer-property=AccuracySec=1s \
+              --timer-property=RemainAfterElapse=yes \
+              --property=Type=oneshot \
+              --property=TimeoutStartSec=30s \
+              --property=NoNewPrivileges=yes \
+              --property=PrivateTmp=yes \
+              --property=ProtectHome=yes \
+              "$deadman"
+          /usr/bin/systemctl is-active --quiet {{ (edge_failover_deadman_unit + '.timer') | quote }}
+          /usr/bin/timeout --signal=TERM --kill-after=5s 45s \
+              /usr/bin/systemctl stop opensips.service
+          /usr/bin/timeout --signal=TERM --kill-after=5s 45s \
+              /usr/bin/systemctl stop rtpengine-daemon.service
+          printf 'DEADMAN_ARMED_AND_DATA_PLANE_STOPPED\n'
+        dest: "{{ edge_failover_injector_path }}"
+        owner: root
+        group: root
+        mode: '0700'
+      delegate_to: sbc1
+      become: true
+
+    - name: Inspect the durable recovery boundary before starting the clock
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+        get_attributes: false
+        get_checksum: false
+        get_mime: false
+      loop:
+        - "{{ edge_failover_marker_path }}"
+        - "{{ edge_failover_deadman_path }}"
+        - "{{ edge_failover_injector_path }}"
+      delegate_to: sbc1
+      become: true
+      register: edge_failover_armed_recovery_files
+
+    - name: Require exact durable recovery payloads before the timed disruption
+      ansible.builtin.assert:
+        that:
+          - edge_failover_armed_recovery_files.results[0].stat.isreg
+          - not (edge_failover_armed_recovery_files.results[0].stat.islnk | default(false))
+          - edge_failover_armed_recovery_files.results[0].stat.nlink | int == 1
+          - edge_failover_armed_recovery_files.results[0].stat.uid | int == 0
+          - edge_failover_armed_recovery_files.results[0].stat.gid | int == 0
+          - edge_failover_armed_recovery_files.results[0].stat.mode == '0600'
+          - edge_failover_armed_recovery_files.results[1].stat.isreg
+          - not (edge_failover_armed_recovery_files.results[1].stat.islnk | default(false))
+          - edge_failover_armed_recovery_files.results[1].stat.nlink | int == 1
+          - edge_failover_armed_recovery_files.results[1].stat.uid | int == 0
+          - edge_failover_armed_recovery_files.results[1].stat.gid | int == 0
+          - edge_failover_armed_recovery_files.results[1].stat.mode == '0700'
+          - edge_failover_armed_recovery_files.results[2].stat.isreg
+          - not (edge_failover_armed_recovery_files.results[2].stat.islnk | default(false))
+          - edge_failover_armed_recovery_files.results[2].stat.nlink | int == 1
+          - edge_failover_armed_recovery_files.results[2].stat.uid | int == 0
+          - edge_failover_armed_recovery_files.results[2].stat.gid | int == 0
+          - edge_failover_armed_recovery_files.results[2].stat.mode == '0700'
+        fail_msg: SBC1 recovery payloads are not durable; refusing the timed disruption.
+
+    - name: Inject, time, and recover one bounded primary data-plane failure
+      block:
+        - name: Start the conservative 120-second failover clock
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - -c
+              - >-
+                import json,time;
+                print(json.dumps({'epochMs':time.time_ns() // 1000000,
+                'monotonicNs':time.monotonic_ns()},sort_keys=True,separators=(',',':')))
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+          become: true
+          changed_when: false
+          register: edge_failover_failure_started
+
+        - name: Deliberately stop the complete SBC1 data plane only through the armed node-local injector
+          ansible.builtin.command:
+            argv: ["{{ edge_failover_injector_path }}"]
+          delegate_to: sbc1
+          become: true
+          changed_when: true
+          register: edge_failover_failure_injection
+
+        - name: Prove the deadman timer remained active after failure injection
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/systemctl
+              - is-active
+              - "{{ edge_failover_deadman_unit }}.timer"
+          delegate_to: sbc1
+          become: true
+          changed_when: false
+          register: edge_failover_deadman_active_after_injection
+
+        - name: Require exact atomic deadman arming before the data-plane stop
+          ansible.builtin.assert:
+            that:
+              - >-
+                edge_failover_failure_injection.stdout ==
+                'DEADMAN_ARMED_AND_DATA_PLANE_STOPPED'
+              - edge_failover_deadman_active_after_injection.rc == 0
+              - edge_failover_deadman_active_after_injection.stdout == 'active'
+            fail_msg: >-
+              The node-local injector did not prove the deadman active after
+              stopping SBC1; retaining the recovery marker and refusing the call.
+
+        - name: Inspect the stopped SBC1 data-plane services
+          ansible.builtin.command:
+            argv: [/usr/bin/systemctl, is-active, "{{ item }}"]
+          loop:
+            - opensips.service
+            - rtpengine-daemon.service
+          delegate_to: sbc1
+          become: true
+          changed_when: false
+          failed_when: false
+          register: edge_failover_stopped_services
+
+        - name: Require both deliberate SBC1 stops to be effective
+          ansible.builtin.assert:
+            that:
+              - >-
+                edge_failover_stopped_services.results |
+                map(attribute='rc') | unique | list == [3]
+              - >-
+                edge_failover_stopped_services.results |
+                map(attribute='stdout') | unique | list == ['inactive']
+            fail_msg: SBC1 was not completely stopped by the bounded failure injection.
+
+        - name: Prove SBC1 TLS 5061 is closed from the fixture controller
+          ansible.builtin.wait_for:
+            host: 10.20.2.4
+            port: 5061
+            state: stopped
+            connect_timeout: 1
+            delay: 0
+            timeout: 5
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+          become: false
+
+        - name: Place the new same-route call through alternate SBC2
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/timeout
+              - --signal=TERM
+              - --kill-after=5s
+              - "{{ edge_failover_alternate_call_timeout_seconds }}s"
+              - /usr/local/sbin/vivolution-voice-fixture-test
+              - sbc2
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+          become: true
+          changed_when: true
+          register: edge_failover_alternate_call
+
+        - name: End the failover clock only after the alternate call passed
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - -c
+              - >-
+                import json,time;
+                print(json.dumps({'epochMs':time.time_ns() // 1000000,
+                'monotonicNs':time.monotonic_ns()},sort_keys=True,separators=(',',':')))
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+          become: true
+          changed_when: false
+          register: edge_failover_completed
+
+        - name: Require the alternate new call inside the exact 120-second gate
+          ansible.builtin.assert:
+            that:
+              - >-
+                edge_failover_alternate_call.stdout is
+                match('^fixture test [0-9]{8}T[0-9]{6}Z-sbc2-[0-9]+: PASS$')
+              - >-
+                (edge_failover_failure_started.stdout | from_json).keys() | sort ==
+                ['epochMs', 'monotonicNs']
+              - >-
+                (edge_failover_completed.stdout | from_json).keys() | sort ==
+                ['epochMs', 'monotonicNs']
+              - >-
+                ((edge_failover_completed.stdout | from_json).monotonicNs | int) >=
+                ((edge_failover_failure_started.stdout | from_json).monotonicNs | int)
+              - >-
+                ((edge_failover_completed.stdout | from_json).monotonicNs | int) -
+                ((edge_failover_failure_started.stdout | from_json).monotonicNs | int) <=
+                (edge_failover_gate_seconds | int * 1000000000)
+            fail_msg: >-
+              A new synthetic call did not complete through SBC2 within 120
+              seconds of beginning the deliberate SBC1 failure.
+
+        - name: Mark the timed alternate call accepted
+          ansible.builtin.set_fact:
+            edge_failover_alternate_accepted: true
+
+      rescue:
+        - name: Record a failed injection phase without suppressing restoration
+          ansible.builtin.set_fact:
+            edge_failover_injection_failed: true
+            edge_failover_failed_task_name: >-
+              {{ ansible_failed_task.name | default('unknown failover phase') }}
+
+      always:
+        - name: Restore SBC1 media before signaling
+          ansible.builtin.command:
+            argv: [/usr/bin/systemctl, start, "{{ item }}"]
+          loop:
+            - rtpengine-daemon.service
+            - opensips.service
+          delegate_to: sbc1
+          become: true
+          changed_when: true
+          failed_when: false
+          register: edge_failover_restore_start
+          when: edge_failover_recovery_required | bool
+
+        - name: Inspect restored SBC1 data-plane services
+          ansible.builtin.command:
+            argv: [/usr/bin/systemctl, is-active, "{{ item }}"]
+          loop:
+            - rtpengine-daemon.service
+            - opensips.service
+          delegate_to: sbc1
+          become: true
+          changed_when: false
+          failed_when: false
+          register: edge_failover_restored_services
+          when: edge_failover_recovery_required | bool
+
+        - name: Re-prove protected runtime health after SBC1 restoration
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+          delegate_to: sbc1
+          become: true
+          changed_when: false
+          failed_when: false
+          register: edge_failover_restored_health_raw
+          when: edge_failover_recovery_required | bool
+
+        - name: Re-read protected runtime status after SBC1 restoration
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+          delegate_to: sbc1
+          become: true
+          changed_when: false
+          failed_when: false
+          register: edge_failover_restored_status_raw
+          when: edge_failover_recovery_required | bool
+
+        - name: Re-prove protected alternate runtime health after the exercise
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+          delegate_to: sbc2
+          become: true
+          changed_when: false
+          failed_when: false
+          register: edge_failover_alternate_health_after_raw
+          when: edge_failover_recovery_required | bool
+
+        - name: Re-read protected alternate runtime status after the exercise
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+          delegate_to: sbc2
+          become: true
+          changed_when: false
+          failed_when: false
+          register: edge_failover_alternate_status_after_raw
+          when: edge_failover_recovery_required | bool
+
+        - name: Re-prove both call directions through restored SBC1
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-voice-fixture-test, sbc1]
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+          become: true
+          changed_when: true
+          failed_when: false
+          register: edge_failover_restored_call
+          when:
+            - edge_failover_recovery_required | bool
+            - >-
+              edge_failover_restored_services.results | default([]) |
+              map(attribute='rc') | unique | list == [0]
+            - edge_failover_restored_health_raw.rc | default(1) == 0
+
+        - name: Require exact restoration before disarming the node-local deadman
+          ansible.builtin.assert:
+            that:
+              - >-
+                edge_failover_restore_start.results | default([]) |
+                map(attribute='rc') | unique | list == [0]
+              - >-
+                edge_failover_restored_services.results | default([]) |
+                map(attribute='stdout') | unique | list == ['active']
+              - edge_failover_restored_health_raw.rc | default(1) == 0
+              - edge_failover_restored_status_raw.rc | default(1) == 0
+              - edge_failover_alternate_health_after_raw.rc | default(1) == 0
+              - edge_failover_alternate_status_after_raw.rc | default(1) == 0
+              - (edge_failover_restored_status_raw.stdout | from_json).kind == 'EdgeRuntimeStatus'
+              - (edge_failover_restored_health_raw.stdout | from_json).kind == 'EdgeRuntimeHealth'
+              - (edge_failover_alternate_status_after_raw.stdout | from_json).kind == 'EdgeRuntimeStatus'
+              - (edge_failover_alternate_health_after_raw.stdout | from_json).kind == 'EdgeRuntimeHealth'
+              - >-
+                (edge_failover_restored_status_raw.stdout | from_json).active ==
+                edge_failover_sbc1_status.active
+              - not ((edge_failover_restored_status_raw.stdout | from_json).journalPresent | bool)
+              - >-
+                (edge_failover_restored_health_raw.stdout | from_json).active ==
+                edge_failover_sbc1_status.active
+              - >-
+                (edge_failover_restored_health_raw.stdout | from_json).runtimeChecks |
+                map(attribute='status') | unique | list == ['PASSED']
+              - >-
+                edge_failover_required_runtime_checks | difference(
+                  (edge_failover_restored_health_raw.stdout | from_json).runtimeChecks |
+                  map(attribute='name') | list) | length == 0
+              - >-
+                (edge_failover_alternate_status_after_raw.stdout | from_json).active ==
+                edge_failover_sbc2_status.active
+              - not ((edge_failover_alternate_status_after_raw.stdout | from_json).journalPresent | bool)
+              - >-
+                (edge_failover_alternate_health_after_raw.stdout | from_json).active ==
+                edge_failover_sbc2_status.active
+              - >-
+                (edge_failover_alternate_health_after_raw.stdout | from_json).runtimeChecks |
+                map(attribute='status') | unique | list == ['PASSED']
+              - >-
+                edge_failover_required_runtime_checks | difference(
+                  (edge_failover_alternate_health_after_raw.stdout | from_json).runtimeChecks |
+                  map(attribute='name') | list) | length == 0
+              - edge_failover_restored_call.rc | default(1) == 0
+              - >-
+                edge_failover_restored_call.stdout | default('') is
+                match('^fixture test [0-9]{8}T[0-9]{6}Z-sbc1-[0-9]+: PASS$')
+            fail_msg: >-
+              SBC1 is not exactly restored and re-tested; the durable marker
+              and node-local deadman remain armed.
+          when: edge_failover_recovery_required | bool
+
+        - name: Disarm the node-local timer only after exact restoration
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/systemctl
+              - stop
+              - "{{ edge_failover_deadman_unit }}.timer"
+              - "{{ edge_failover_deadman_unit }}.service"
+          delegate_to: sbc1
+          become: true
+          changed_when: true
+          register: edge_failover_deadman_disarm
+          when: edge_failover_recovery_required | bool
+
+        - name: Prove the node-local deadman is inactive
+          ansible.builtin.command:
+            argv: [/usr/bin/systemctl, is-active, "{{ item }}"]
+          loop:
+            - "{{ edge_failover_deadman_unit }}.timer"
+            - "{{ edge_failover_deadman_unit }}.service"
+          delegate_to: sbc1
+          become: true
+          changed_when: false
+          failed_when: false
+          register: edge_failover_deadman_inactive
+          when: edge_failover_recovery_required | bool
+
+        - name: Require the node-local deadman inactive before marker removal
+          ansible.builtin.assert:
+            that:
+              - >-
+                edge_failover_deadman_inactive.results |
+                map(attribute='stdout') | unique | list == ['inactive']
+              - >-
+                edge_failover_deadman_inactive.results |
+                map(attribute='rc') | unique | list == [3]
+            fail_msg: The deadman is not inactive; retaining its recovery marker.
+          when: edge_failover_recovery_required | bool
+
+        - name: Remove exact recovery payloads only after successful disarm
+          ansible.builtin.command:
+            argv: [/usr/bin/unlink, "{{ item }}"]
+          loop:
+            - "{{ edge_failover_injector_path }}"
+            - "{{ edge_failover_deadman_path }}"
+            - "{{ edge_failover_marker_path }}"
+          delegate_to: sbc1
+          become: true
+          changed_when: true
+          register: edge_failover_recovery_payload_removal
+          when: edge_failover_recovery_required | bool
+
+        - name: Release only this failover exercise lock after marker removal
+          ansible.builtin.command:
+            argv: [/usr/bin/rmdir, "{{ edge_failover_lock_dir }}"]
+          delegate_to: sbc1
+          become: true
+          changed_when: true
+          register: edge_failover_lock_release
+          when: edge_failover_recovery_required | bool
+
+    - name: Require accepted failover and exact healthy primary restoration
+      ansible.builtin.assert:
+        that:
+          - not (edge_failover_injection_failed | bool)
+          - edge_failover_alternate_accepted | bool
+          - >-
+            edge_failover_restore_start.results | default([]) |
+            map(attribute='rc') | unique | list == [0]
+          - >-
+            edge_failover_restored_services.results | default([]) |
+            map(attribute='stdout') | unique | list == ['active']
+          - edge_failover_restored_health_raw.rc | default(1) == 0
+          - edge_failover_restored_status_raw.rc | default(1) == 0
+          - edge_failover_alternate_health_after_raw.rc | default(1) == 0
+          - edge_failover_alternate_status_after_raw.rc | default(1) == 0
+          - >-
+            (edge_failover_restored_status_raw.stdout | from_json).active ==
+            edge_failover_sbc1_status.active
+          - not ((edge_failover_restored_status_raw.stdout | from_json).journalPresent | bool)
+          - >-
+            (edge_failover_restored_health_raw.stdout | from_json).active ==
+            edge_failover_sbc1_status.active
+          - >-
+            (edge_failover_restored_health_raw.stdout | from_json).runtimeChecks |
+            map(attribute='status') | unique | list == ['PASSED']
+          - >-
+            (edge_failover_alternate_status_after_raw.stdout | from_json).active ==
+            edge_failover_sbc2_status.active
+          - not ((edge_failover_alternate_status_after_raw.stdout | from_json).journalPresent | bool)
+          - >-
+            (edge_failover_alternate_health_after_raw.stdout | from_json).active ==
+            edge_failover_sbc2_status.active
+          - >-
+            (edge_failover_alternate_health_after_raw.stdout | from_json).runtimeChecks |
+            map(attribute='status') | unique | list == ['PASSED']
+          - edge_failover_restored_call.rc | default(1) == 0
+          - >-
+            edge_failover_restored_call.stdout | default('') is
+            match('^fixture test [0-9]{8}T[0-9]{6}Z-sbc1-[0-9]+: PASS$')
+          - edge_failover_deadman_disarm.rc | default(1) == 0
+          - >-
+            edge_failover_deadman_inactive.results | default([]) |
+            map(attribute='stdout') | unique | list == ['inactive']
+          - >-
+            edge_failover_recovery_payload_removal.results | default([]) |
+            map(attribute='rc') | unique | list == [0]
+          - edge_failover_lock_release.rc | default(1) == 0
+        fail_msg: >-
+          Synthetic failover was not accepted or SBC1 did not return to its
+          exact pre-failure active runtime and pass a fresh two-direction call.
+
+    - name: Select alternate and restored fixture test identities
+      ansible.builtin.set_fact:
+        edge_failover_alternate_test_id: >-
+          {{ edge_failover_alternate_call.stdout |
+             regex_replace('^fixture test ([0-9]{8}T[0-9]{6}Z-sbc2-[0-9]+): PASS$', '\1') }}
+        edge_failover_restored_test_id: >-
+          {{ edge_failover_restored_call.stdout |
+             regex_replace('^fixture test ([0-9]{8}T[0-9]{6}Z-sbc1-[0-9]+): PASS$', '\1') }}
+
+    - name: Bind all three call phases to exact Edge and fixture identities
+      ansible.builtin.set_fact:
+        edge_failover_phase_records:
+          - node: sbc1
+            phase: primary
+            testId: "{{ edge_failover_primary_test_id }}"
+          - node: sbc2
+            phase: alternate
+            testId: "{{ edge_failover_alternate_test_id }}"
+          - node: sbc1
+            phase: restored
+            testId: "{{ edge_failover_restored_test_id }}"
+
+    - name: Export exact Edge-side CDR evidence for every accepted call phase
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/vivolution-edge-synthetic-cdr-export
+          - --test-id
+          - "{{ item.testId }}"
+      loop: "{{ edge_failover_phase_records }}"
+      loop_control:
+        label: "{{ item.phase }}:{{ item.testId }}"
+      delegate_to: "{{ item.node }}"
+      become: true
+      changed_when: true
+      register: edge_failover_edge_cdr_exports
+
+    - name: Require exact phase identity in every Edge CDR export
+      ansible.builtin.assert:
+        that:
+          - (item.stdout | from_json).testId == item.item.testId
+          - (item.stdout | from_json).nodeIdentity.nodeId == item.item.node
+          - (item.stdout | from_json).status == 'TWO_LOGICAL_SYNTHETIC_CALLS_ACCOUNTED'
+          - (item.stdout | from_json).liveM365Interoperability == 'NOT_ASSERTED'
+        fail_msg: Edge CDR export did not bind the exact call phase.
+      loop: "{{ edge_failover_edge_cdr_exports.results }}"
+      loop_control:
+        label: "{{ item.item.phase }}"
+
+    - name: Collect every protected manifested fixture artifact
+      block:
+        - name: Install the fixed remote result collector
+          ansible.builtin.copy:
+            src: "{{ edge_failover_evidence_compiler }}"
+            dest: "{{ edge_failover_remote_collector }}"
+            owner: root
+            group: root
+            mode: '0500'
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+          become: true
+
+        - name: Build complete canonical fixture result bundles
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - "{{ edge_failover_remote_collector }}"
+              - --collect-result-dir
+              - "{{ edge_failover_results_root }}/{{ item.testId }}"
+          loop: "{{ edge_failover_phase_records }}"
+          loop_control:
+            label: "{{ item.phase }}:{{ item.testId }}"
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+          become: true
+          changed_when: false
+          register: edge_failover_fixture_bundles
+      always:
+        - name: Remove the transient remote result collector
+          ansible.builtin.file:
+            path: "{{ edge_failover_remote_collector }}"
+            state: absent
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+          become: true
+
+    - name: Create one protected local failover evidence directory
+      ansible.builtin.file:
+        path: "{{ edge_failover_local_root }}/{{ edge_failover_primary_test_id }}"
+        state: directory
+        mode: '0700'
+      become: false
+
+    - name: Preserve every complete fixture result bundle locally
+      ansible.builtin.copy:
+        content: "{{ item.stdout }}\n"
+        dest: >-
+          {{ edge_failover_local_root }}/{{ edge_failover_primary_test_id }}/{{ item.item.phase }}-bundle.json
+        mode: '0600'
+      loop: "{{ edge_failover_fixture_bundles.results }}"
+      loop_control:
+        label: "{{ item.item.phase }}-bundle.json"
+      become: false
+
+    - name: Create protected per-phase CDR reconciliation directories
+      ansible.builtin.file:
+        path: >-
+          {{ edge_failover_local_root }}/.{{ edge_failover_primary_test_id }}-cdr/{{ item.phase }}
+        state: directory
+        mode: '0700'
+      loop: "{{ edge_failover_phase_records }}"
+      loop_control:
+        label: "{{ item.phase }}"
+      become: false
+
+    - name: Preserve exact Edge CDR inputs for offline reconciliation
+      ansible.builtin.copy:
+        content: "{{ item.stdout }}\n"
+        dest: >-
+          {{ edge_failover_local_root }}/.{{ edge_failover_primary_test_id }}-cdr/{{ item.item.phase }}/edge-cdr.json
+        mode: '0600'
+      loop: "{{ edge_failover_edge_cdr_exports.results }}"
+      loop_control:
+        label: "{{ item.item.phase }}-edge-cdr.json"
+      become: false
+
+    - name: Bind exact raw Edge CDR sources into failover evidence
+      ansible.builtin.copy:
+        content: "{{ item.stdout }}\n"
+        dest: >-
+          {{ edge_failover_local_root }}/{{ edge_failover_primary_test_id }}/{{ item.item.phase }}-edge-cdr.json
+        mode: '0600'
+      loop: "{{ edge_failover_edge_cdr_exports.results }}"
+      loop_control:
+        label: "{{ item.item.phase }}-edge-cdr.json"
+      become: false
+
+    - name: Preserve normalized fixture CDR inputs for offline reconciliation
+      ansible.builtin.copy:
+        content: "{{ (item.stdout | from_json).artifacts['fixture-cdr.json'] | b64decode }}"
+        dest: >-
+          {{ edge_failover_local_root }}/.{{ edge_failover_primary_test_id }}-cdr/{{ item.item.phase }}/fixture-cdr.json
+        mode: '0600'
+      loop: "{{ edge_failover_fixture_bundles.results }}"
+      loop_control:
+        label: "{{ item.item.phase }}-fixture-cdr.json"
+      become: false
+
+    - name: Preserve raw fixture CDR inputs for offline reconciliation
+      ansible.builtin.copy:
+        content: "{{ (item.stdout | from_json).artifacts['asterisk-cdr-delta.csv'] | b64decode }}"
+        dest: >-
+          {{ edge_failover_local_root }}/.{{ edge_failover_primary_test_id }}-cdr/{{ item.item.phase }}/fixture-asterisk-cdr-delta.csv
+        mode: '0600'
+      loop: "{{ edge_failover_fixture_bundles.results }}"
+      loop_control:
+        label: "{{ item.item.phase }}-fixture-asterisk-cdr-delta.csv"
+      become: false
+
+    - name: Preserve fixture result inputs for offline CDR reconciliation
+      ansible.builtin.copy:
+        content: "{{ (item.stdout | from_json).artifacts['RESULT'] | b64decode }}"
+        dest: >-
+          {{ edge_failover_local_root }}/.{{ edge_failover_primary_test_id }}-cdr/{{ item.item.phase }}/fixture-RESULT
+        mode: '0600'
+      loop: "{{ edge_failover_fixture_bundles.results }}"
+      loop_control:
+        label: "{{ item.item.phase }}-fixture-RESULT"
+      become: false
+
+    - name: Preserve fixture manifest inputs for offline CDR reconciliation
+      ansible.builtin.copy:
+        content: "{{ (item.stdout | from_json).manifestBase64 | b64decode }}"
+        dest: >-
+          {{ edge_failover_local_root }}/.{{ edge_failover_primary_test_id }}-cdr/{{ item.item.phase }}/fixture-MANIFEST.sha256
+        mode: '0600'
+      loop: "{{ edge_failover_fixture_bundles.results }}"
+      loop_control:
+        label: "{{ item.item.phase }}-fixture-MANIFEST.sha256"
+      become: false
+
+    - name: Reconcile exact Edge and fixture CDRs for every phase offline
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ edge_failover_cdr_reconciler }}"
+          - reconcile
+          - --evidence-dir
+          - >-
+            {{ edge_failover_local_root }}/.{{ edge_failover_primary_test_id }}-cdr/{{ item.phase }}
+      loop: "{{ edge_failover_phase_records }}"
+      loop_control:
+        label: "{{ item.phase }}"
+      become: false
+      changed_when: true
+      register: edge_failover_cdr_reconciliations
+
+    - name: Read exact per-phase CDR reconciliations
+      ansible.builtin.slurp:
+        src: >-
+          {{ edge_failover_local_root }}/.{{ edge_failover_primary_test_id }}-cdr/{{ item.phase }}/reconciliation.json
+      loop: "{{ edge_failover_phase_records }}"
+      loop_control:
+        label: "{{ item.phase }}"
+      become: false
+      register: edge_failover_cdr_reconciliation_files
+
+    - name: Require exact successful CDR reconciliation for every phase
+      ansible.builtin.assert:
+        that:
+          - >-
+            (item.content | b64decode | from_json).status ==
+            'SYNTHETIC_EDGE_FIXTURE_CDR_RECONCILED'
+          - >-
+            (item.content | b64decode | from_json).liveM365Interoperability ==
+            'NOT_ASSERTED'
+          - (item.content | b64decode | from_json).testId == item.item.testId
+          - (item.content | b64decode | from_json).nodeIdentity.nodeId == item.item.node
+          - (item.content | b64decode | from_json).matchedCalls | length == 2
+          - >-
+            (item.content | b64decode | from_json).reconciliationDigest is
+            match('^sha256:[0-9a-f]{64}$')
+        fail_msg: A failover call phase lacks exact Edge-to-fixture CDR reconciliation.
+      loop: "{{ edge_failover_cdr_reconciliation_files.results }}"
+      loop_control:
+        label: "{{ item.item.phase }}"
+
+    - name: Bind exact CDR reconciliations into failover evidence
+      ansible.builtin.copy:
+        content: "{{ item.content | b64decode }}"
+        dest: >-
+          {{ edge_failover_local_root }}/{{ edge_failover_primary_test_id }}/{{ item.item.phase }}-cdr-reconciliation.json
+        mode: '0600'
+      loop: "{{ edge_failover_cdr_reconciliation_files.results }}"
+      loop_control:
+        label: "{{ item.item.phase }}-cdr-reconciliation.json"
+      become: false
+
+    - name: Remove transient local CDR reconciliation workspaces
+      ansible.builtin.file:
+        path: >-
+          {{ edge_failover_local_root }}/.{{ edge_failover_primary_test_id }}-cdr
+        state: absent
+      become: false
+
+    - name: Build the exact non-secret synthetic failover request
+      ansible.builtin.set_fact:
+        edge_failover_evidence_request:
+          acknowledgement: RUN_SYNTHETIC_SBC1_TO_SBC2_FAILOVER_WITHIN_120_SECONDS
+          alternate:
+            activeManifestDigest: >-
+              {{ (edge_failover_alternate_status_after_raw.stdout |
+                  from_json).active.manifestDigest }}
+            activeSequence: >-
+              {{ (edge_failover_alternate_status_after_raw.stdout |
+                  from_json).active.sequence | int }}
+            nodeId: sbc2
+            privateIpv4: 10.20.2.5
+            slot: B
+          apiVersion: edge.vivolution.ae/synthetic-failover-request/v0.1
+          completedAtEpochMs: >-
+            {{ (edge_failover_completed.stdout | from_json).epochMs | int }}
+          completedAtMonotonicNs: >-
+            {{ (edge_failover_completed.stdout | from_json).monotonicNs | int }}
+          failureStartedAtEpochMs: >-
+            {{ (edge_failover_failure_started.stdout | from_json).epochMs | int }}
+          failureStartedAtMonotonicNs: >-
+            {{ (edge_failover_failure_started.stdout | from_json).monotonicNs | int }}
+          gateSeconds: 120
+          liveM365Interoperability: NOT_ASSERTED
+          primary:
+            activeManifestDigest: "{{ edge_failover_sbc1_status.active.manifestDigest }}"
+            activeSequence: "{{ edge_failover_sbc1_status.active.sequence | int }}"
+            nodeId: sbc1
+            privateIpv4: 10.20.2.4
+            slot: A
+          restoredPrimary:
+            activeManifestDigest: >-
+              {{ (edge_failover_restored_status_raw.stdout |
+                  from_json).active.manifestDigest }}
+            activeSequence: >-
+              {{ (edge_failover_restored_status_raw.stdout |
+                  from_json).active.sequence | int }}
+            nodeId: sbc1
+            privateIpv4: 10.20.2.4
+            slot: A
+          routeIdentity:
+            allocationId: "{{ edge_failover_sbc1_facts.allocationId }}"
+            calledNumber: '+9710000001001'
+            clusterId: "{{ edge_failover_sbc1_facts.clusterId }}"
+            customerAccountId: "{{ edge_failover_sbc1_facts.customerAccountId }}"
+            directions:
+              - TEAMS_FIXTURE_TO_PBX_FIXTURE
+              - PBX_FIXTURE_TO_TEAMS_FIXTURE
+            m365TenantId: "{{ edge_failover_sbc1_facts.m365TenantId }}"
+            serviceInstanceId: "{{ edge_failover_sbc1_facts.serviceInstanceId }}"
+            tenantContextId: "{{ edge_failover_sbc1_facts.tenantContextId }}"
+          testedFailure:
+            injection: SYSTEMD_STOP_COMPLETE_DATA_PLANE
+            primaryNodeId: sbc1
+            servicesStopped:
+              - opensips.service
+              - rtpengine-daemon.service
+            signalingListener: CLOSED_FROM_FIXTURE_CONTROLLER
+
+    - name: Write canonical failover request input
+      ansible.builtin.copy:
+        content: >
+          {{ edge_failover_evidence_request |
+             to_json(sort_keys=True, separators=(',', ':')) }}
+        dest: >-
+          {{ edge_failover_local_root }}/{{ edge_failover_primary_test_id }}/request.json
+        mode: '0600'
+      become: false
+
+    - name: Compile strict synthetic failover acceptance evidence offline
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ edge_failover_evidence_compiler }}"
+          - --evidence-dir
+          - "{{ edge_failover_local_root }}/{{ edge_failover_primary_test_id }}"
+      become: false
+      changed_when: true
+      register: edge_failover_evidence_compilation
+
+    - name: Read compiled synthetic failover evidence
+      ansible.builtin.slurp:
+        src: >-
+          {{ edge_failover_local_root }}/{{ edge_failover_primary_test_id }}/acceptance.json
+      become: false
+      register: edge_failover_acceptance_raw
+
+    - name: Require exact synthetic-only acceptance conclusion
+      ansible.builtin.assert:
+        that:
+          - >-
+            edge_failover_evidence_compilation.stdout is
+            match('^SYNTHETIC_FAILOVER_ACCEPTANCE_WRITTEN sha256:[0-9a-f]{64}$')
+          - >-
+            (edge_failover_acceptance_raw.content | b64decode | from_json).status ==
+            'SYNTHETIC_NEW_CALL_FAILOVER_ACCEPTED'
+          - >-
+            (edge_failover_acceptance_raw.content | b64decode | from_json).liveM365Interoperability ==
+            'NOT_ASSERTED'
+          - >-
+            (edge_failover_acceptance_raw.content | b64decode | from_json).activeCallMigration ==
+            'NOT_TESTED_NOT_CLAIMED'
+          - >-
+            (edge_failover_acceptance_raw.content | b64decode | from_json).failoverElapsedMilliseconds | int <= 120000
+          - >-
+            (edge_failover_acceptance_raw.content | b64decode | from_json).primaryRestoredAndRetested | bool
+        fail_msg: The compiled evidence expanded beyond the private synthetic gate.
+
+    - name: Report the non-secret synthetic failover evidence location
+      ansible.builtin.debug:
+        msg: >-
+          SYNTHETIC_NEW_CALL_FAILOVER_ACCEPTED evidence={{ edge_failover_local_root }}/{{ edge_failover_primary_test_id }}/acceptance.json
+          liveM365Interoperability=NOT_ASSERTED activeCallMigration=NOT_TESTED_NOT_CLAIMED

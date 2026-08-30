@@ -1,4 +1,16 @@
 ---
+- name: Validate isolated voice fixture firewall contract
+  ansible.builtin.assert:
+    that:
+      - cp_voice_fixture_source_ipv4_cidr == '10.20.2.0/24'
+      - cp_voice_fixture_tcp_ports == [16061, 25061]
+      - cp_voice_fixture_udp_port_ranges == ['21000-21127', '22000-22063']
+    fail_msg: >-
+      The isolated voice fixture firewall contract is fixed to source
+      10.20.2.0/24, TCP destinations 16061/25061, and UDP destinations
+      21000-21127/22000-22063.
+  when: cp_voice_fixture_enabled | bool
+
 - name: Install controller nftables policy
   ansible.builtin.template:
     src: nftables.conf.j2
@@ -14,4 +26,3 @@
     name: nftables.service
     enabled: true
     state: started
-

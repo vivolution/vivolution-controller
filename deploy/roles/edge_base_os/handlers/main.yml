@@ -1,0 +1,10 @@
+---
+- name: Restart edge journald
+  ansible.builtin.systemd_service:
+    name: systemd-journald.service
+    state: restarted
+
+- name: Restart edge ntpsec
+  ansible.builtin.systemd_service:
+    name: ntpsec.service
+    state: restarted

@@ -1,0 +1,107 @@
+---
+edge_expected_hostname: "{{ inventory_hostname }}"
+edge_ssh_allowed_user: "{{ ansible_user }}"
+
+# Runtime identity and certificate SAN checks require both addresses to be
+# explicit per host. They remain blank in this template so it cannot be used
+# accidentally as a deployable inventory.
+edge_private_ipv4: ''
+
+# Populate these from approved, current sources immediately before deployment.
+# The template intentionally contains no permissive or fabricated CIDRs.
+edge_admin_source_ipv4_cidrs: []
+edge_microsoft_signaling_source_ipv4_cidrs: []
+edge_microsoft_media_source_ipv4_cidrs: []
+# Optional private CP1/SIPp fixture sources for no-PSTN tests before M365.
+# Keep separate from the globally routable Microsoft endpoint sets.
+edge_synthetic_teams_source_ipv4_cidrs: []
+edge_pbx_source_ipv4_cidrs: []
+
+# Azure WireServer DHCP source used by the Debian Azure image. Set this to an
+# empty string only when the target's network does not use that DHCP path.
+edge_firewall_dhcp_server_ipv4: 168.63.129.16
+
+# These are playbook-pinned egress dependencies and are repeated here so a
+# generated inventory review exposes the complete expected network contract.
+edge_azure_wire_server_ipv4: 168.63.129.16
+edge_azure_imds_ipv4: 169.254.169.254
+edge_control_plane_ipv4_cidrs:
+  - 10.20.1.4/32
+edge_ntp_server_ipv4_cidrs:
+  - 162.159.200.1/32
+  - 162.159.200.123/32
+
+edge_tls_signaling_port: 5061
+edge_pbx_tls_signaling_port: 15061
+edge_rtp_port_start: 20000
+edge_rtp_port_end: 20255
+# Synthetic is pinned to the CP1 Asterisk PBX RTP range. DIRECT_ROUTING must
+# override both values per node with the reviewed real-PBX destination range.
+edge_pbx_media_destination_port_start: 21000
+edge_pbx_media_destination_port_end: 21127
+edge_rtpengine_ng_port: 2223
+edge_rtpengine_cli_port: 2224
+
+edge_journal_max_use: 256M
+edge_dns_probe_name: deb.debian.org
+
+# Public certificate issuance uses each VM's system-assigned Azure managed
+# identity and exact DNS-record RBAC. No Azure client secret is stored here.
+edge_acme_email: replace@example.invalid
+edge_acme_node_fqdn: "{{ inventory_hostname }}.voice.example.invalid"
+edge_acme_wildcard_fqdn: "*.{{ edge_acme_node_fqdn }}"
+edge_acme_certificate_key_type: rsa2048
+edge_azure_subscription_id: 00000000-0000-0000-0000-000000000000
+edge_azure_tenant_id: 00000000-0000-0000-0000-000000000000
+edge_azure_dns_resource_group: REPLACE_DNS_RESOURCE_GROUP
+# Set per host to its isolated delegated ACME zone. Lego deletes challenge
+# record sets during cleanup, so its durable RBAC scope is the child zone.
+edge_azure_dns_zone: REPLACE_PER_HOST_DELEGATED_ACME_ZONE
+
+# Immutable first-tenant and signed-runtime authority. These are template-only
+# sentinels; replace every REPLACE value in a private generated inventory.
+edge_cluster_id: REPLACE_CLUSTER_ID
+edge_generation: 1
+edge_runtime_profile: SYNTHETIC_PRIVATE
+edge_customer_account_id: REPLACE_CUSTOMER_ACCOUNT_ID
+edge_m365_tenant_id: 00000000-0000-0000-0000-000000000000
+edge_tenant_context_id: REPLACE_TENANT_CONTEXT_ID
+edge_service_instance_id: REPLACE_SERVICE_INSTANCE_ID
+edge_allocation_id: REPLACE_ALLOCATION_ID
+edge_cluster_media_port_start: 20000
+edge_cluster_media_port_end: 29999
+
+# Only an Ed25519 public key is installed on an Edge node. Never put the
+# signing seed/private key in this inventory or under generated/.
+edge_signing_key_id: REPLACE_SIGNING_KEY_ID
+edge_signing_public_key_base64: REPLACE_32_BYTE_ED25519_PUBLIC_KEY_BASE64
+
+# The CP1 fixture export must first be fetched into this ignored, protected
+# controller directory. The private leaf path and SHA-256 are host-specific.
+edge_fixture_ca_src: "{{ inventory_dir }}/generated/fixture/fixture-ca.crt"
+edge_fixture_ca_sha256: REPLACE_FIXTURE_CA_SHA256
+edge_system_ca_bundle_remote_src: /etc/ssl/certs/ca-certificates.crt
+
+# Direct Routing uses a distinct, reimaged generation-2-or-later fleet. These
+# sentinels are inert under the default synthetic profile and intentionally do
+# not contain any valid acknowledgement. The PBX bundle is public trust
+# material, but its exact bytes are still controller-pinned before transfer.
+edge_direct_pbx_ca_bundle_src: "{{ inventory_dir }}/generated/direct/pbx-ca-bundle.pem"
+edge_direct_pbx_ca_bundle_sha256: REPLACE_DIRECT_PBX_CA_BUNDLE_SHA256
+edge_direct_install_acknowledgement: REPLACE_WITH_INSTALL_DIRECT_ROUTING_REPLACEMENT_GENERATION
+edge_direct_activation_acknowledgement: REPLACE_WITH_ACTIVATE_DIRECT_ROUTING_REPLACEMENT_GENERATION
+edge_direct_replacement_transition_acknowledgement: REPLACE_WITH_TRANSITION_TO_DIRECT_ROUTING_REPLACEMENT_FLEET
+edge_direct_rollback_contract: REPLACE_WITH_PRESERVE_SYNTHETIC_PREDECESSOR_UNTIL_SEPARATE_CUTOVER
+edge_direct_predecessor_fixture_probe_acknowledgement: REPLACE_WITH_PROBE_PRESERVED_SYNTHETIC_PREDECESSOR_BEFORE_AND_AFTER
+
+# Activation inputs are also per host because each signed envelope binds one
+# immutable node identity. Evidence contains no envelope or private material.
+edge_activation_local_evidence_dir: "{{ inventory_dir }}/generated/activation-evidence"
+edge_activation_acknowledgement: REPLACE_WITH_ACTIVATE_SIGNED_EDGE_CANDIDATE
+edge_activation_recovery_acknowledgement: REPLACE_WITH_RECOVER_EXACT_EDGE_ACTIVATION
+edge_activation_recovery_profile: REPLACE_RECOVERY_PROFILE
+edge_activation_recovery_generation: 0
+
+# Reboot verification is disruptive and therefore requires an explicit opt-in
+# after both hosts have known-good console access.
+edge_perform_reboot_check: false

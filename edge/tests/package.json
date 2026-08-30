@@ -1,0 +1,9 @@
+{
+  "name": "vivolution-edge-contract-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Non-optional Draft 2020-12 validation dependency for Edge contract tests",
+  "devDependencies": {
+    "ajv": "8.20.0"
+  }
+}

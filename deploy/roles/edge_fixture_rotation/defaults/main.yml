@@ -1,0 +1,13 @@
+---
+edge_fixture_rotation_acknowledgement: ''
+edge_fixture_rotation_controller_staging_root: "{{ inventory_dir }}/generated/fixture-rotation"
+edge_fixture_rotation_ca_src: "{{ edge_fixture_rotation_controller_staging_root }}/fixture-ca.crt"
+edge_fixture_rotation_client_certificate_src: >-
+  {{ edge_fixture_rotation_controller_staging_root }}/{{ inventory_hostname }}.crt
+edge_fixture_rotation_client_key_src: >-
+  {{ edge_fixture_rotation_controller_staging_root }}/{{ inventory_hostname }}.key
+edge_fixture_rotation_ca_sha256: ''
+edge_fixture_rotation_client_certificate_sha256: ''
+edge_fixture_rotation_client_key_sha256: ''
+edge_fixture_rotation_local_evidence_root: >-
+  {{ edge_fixture_rotation_controller_staging_root }}/evidence

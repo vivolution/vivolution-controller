@@ -1,5 +1,5 @@
 ---
-- name: Qualify the read-only Azure single-node infrastructure contract
+- name: Qualify the read-only Azure infrastructure contract
   hosts: controllers
   become: false
   gather_facts: false
@@ -8,10 +8,26 @@
       ansible.builtin.meta: end_host
       when: cp_profile | default('') != 'azure-single'
 
-    - name: Audit the Azure single-node control plane without mutation
+    - name: Audit the Azure control plane without mutation
       delegate_to: localhost
       run_once: true
       block:
+        - name: Select the explicit Azure infrastructure topology
+          ansible.builtin.set_fact:
+            cp_azure_infrastructure_topology_selected: >-
+              {{ cp_azure_infrastructure_topology |
+                 default('legacy-single-node', true) }}
+
+        - name: Require one supported Azure infrastructure topology
+          ansible.builtin.assert:
+            that:
+              - >-
+                cp_azure_infrastructure_topology_selected in
+                ['legacy-single-node', 'poc-three-node']
+            fail_msg: >-
+              cp_azure_infrastructure_topology must be explicitly supported;
+              only legacy-single-node and poc-three-node are qualified.
+
         - name: Require explicit Azure infrastructure inventory variables
           ansible.builtin.assert:
             that:
@@ -53,6 +69,26 @@
               resource, image, network, and DNS identity to be explicit in the
               protected inventory.
 
+        - name: Require explicit three-node POC infrastructure variables
+          ansible.builtin.assert:
+            that:
+              - cp_azure_poc_edge_availability_set_name is defined
+              - cp_azure_poc_edge_subnet_name is defined
+              - cp_azure_poc_edge_subnet_address_prefix is defined
+              - cp_azure_poc_edge_nodes is defined
+              - cp_azure_poc_microsoft_signaling_source_prefixes is defined
+              - cp_azure_poc_microsoft_media_source_prefixes is defined
+              - cp_azure_poc_synthetic_teams_source_prefixes is defined
+              - cp_azure_poc_rtp_media_port_range is defined
+              - cp_azure_poc_tenant_media_port_range is defined
+              - cp_azure_poc_pbx_tls_listener_port is defined
+              - cp_azure_poc_edge_runtime_profile is defined
+            fail_msg: >-
+              The three-node POC topology requires every Edge identity,
+              subnet, source allow-list, and bounded signaling/media range to
+              be explicit in the protected inventory.
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
         - name: Validate the immutable Azure infrastructure contract
           ansible.builtin.assert:
             that:
@@ -69,7 +105,11 @@
               - cp_azure_vm_image_version is match('^[0-9][0-9A-Za-z._-]+$')
               - cp_azure_os_disk_name is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$')
               - cp_azure_os_disk_size_gb | int == 64
-              - cp_azure_os_disk_sku == 'Premium_LRS'
+              - >-
+                (cp_azure_infrastructure_topology_selected == 'legacy-single-node' and
+                 cp_azure_os_disk_sku == 'Premium_LRS') or
+                (cp_azure_infrastructure_topology_selected == 'poc-three-node' and
+                 cp_azure_os_disk_sku == 'StandardSSD_LRS')
               - cp_azure_public_ip_name is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$')
               - cp_azure_public_ip is match(cp_azure_ipv4_pattern)
               - cp_azure_public_ip_dns_label is none
@@ -103,9 +143,148 @@
                 cp_firewall_ssh_source_ipv4_cidrs | sort
             fail_msg: >-
               Azure inventory values do not declare the approved UAE North,
-              D2as_v5, pinned Debian 13 Gen2, 64 GiB Premium SSD contract.
+              D2as_v5, pinned Debian 13 Gen2, or topology-specific OS-disk
+              contract.
           vars:
             cp_azure_ipv4_pattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})$'
+
+        - name: Validate the immutable three-node POC identity contract
+          ansible.builtin.assert:
+            that:
+              - cp_azure_vm_name == 'viv-sbc-poc-cp1'
+              - cp_azure_os_disk_name == 'viv-sbc-poc-cp1-osdisk'
+              - cp_azure_public_ip_name == 'viv-sbc-poc-cp1-pip'
+              - cp_azure_nsg_name == 'viv-sbc-poc-cp1-nsg'
+              - cp_azure_nic_name == 'viv-sbc-poc-cp1-nic'
+              - cp_azure_vnet_name == 'viv-sbc-poc-vnet'
+              - cp_azure_subnet_name == 'snet-management'
+              - cp_azure_poc_edge_subnet_name == 'snet-edge'
+              - cp_azure_poc_edge_subnet_address_prefix == '10.20.2.0/24'
+              - cp_azure_poc_edge_availability_set_name == 'viv-sbc-poc-edge-as'
+              - cp_azure_poc_edge_nodes is sequence
+              - cp_azure_poc_edge_nodes is not string
+              - cp_azure_poc_edge_nodes | length == 2
+              - >-
+                cp_azure_poc_edge_nodes | map(attribute='role') | list ==
+                ['sbc1', 'sbc2']
+              - cp_azure_poc_microsoft_signaling_source_prefixes is sequence
+              - cp_azure_poc_microsoft_signaling_source_prefixes is not string
+              - >-
+                cp_azure_poc_microsoft_signaling_source_prefixes | sort ==
+                ['52.112.0.0/14', '52.120.0.0/14']
+              - cp_azure_poc_microsoft_media_source_prefixes is sequence
+              - cp_azure_poc_microsoft_media_source_prefixes is not string
+              - >-
+                cp_azure_poc_microsoft_media_source_prefixes | sort ==
+                ['52.112.0.0/14', '52.120.0.0/14']
+              - cp_azure_poc_synthetic_teams_source_prefixes is sequence
+              - cp_azure_poc_synthetic_teams_source_prefixes is not string
+              - >-
+                (cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' and
+                 cp_azure_poc_synthetic_teams_source_prefixes == ['10.20.1.4/32']) or
+                (cp_azure_poc_edge_runtime_profile == 'DIRECT_ROUTING' and
+                 cp_azure_poc_synthetic_teams_source_prefixes | length == 0)
+              - cp_azure_poc_rtp_media_port_range == '20000-29999'
+              - cp_azure_poc_tenant_media_port_range == '20000-20255'
+              - cp_azure_poc_pbx_tls_listener_port | int == 15061
+              - >-
+                cp_azure_poc_edge_runtime_profile in
+                ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING']
+            fail_msg: >-
+              The three-node POC inventory diverges from the fixed Bicep
+              naming, subnet, or bounded media contract.
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Validate each immutable POC Edge-node identity
+          ansible.builtin.assert:
+            that:
+              - >-
+                item.keys() | list | sort ==
+                ['nic_name', 'nsg_name', 'os_disk_name', 'os_disk_size_gb',
+                 'pbx_media_destination_port_end',
+                 'pbx_media_destination_port_start', 'pbx_source_prefixes',
+                 'private_ip', 'public_ip',
+                 'public_ip_name', 'role', 'vm_name', 'vm_size'] | sort
+              - item.vm_name == 'viv-sbc-poc-' ~ item.role
+              - item.vm_size == 'Standard_B2als_v2'
+              - item.os_disk_name == item.vm_name ~ '-osdisk'
+              - item.os_disk_size_gb | int == 32
+              - item.public_ip_name == item.vm_name ~ '-pip'
+              - item.nsg_name == item.vm_name ~ '-nsg'
+              - item.nic_name == item.vm_name ~ '-nic'
+              - item.public_ip is match(cp_azure_ipv4_pattern)
+              - >-
+                (item.role == 'sbc1' and item.private_ip == '10.20.2.4') or
+                (item.role == 'sbc2' and item.private_ip == '10.20.2.5')
+              - item.pbx_source_prefixes is sequence
+              - item.pbx_source_prefixes is not string
+              - item.pbx_source_prefixes | length >= 1
+              - item.pbx_source_prefixes | length <= 16
+              - item.pbx_media_destination_port_start is number
+              - item.pbx_media_destination_port_end is number
+              - item.pbx_media_destination_port_start | int >= 1024
+              - item.pbx_media_destination_port_end | int <= 65535
+              - item.pbx_media_destination_port_start | int % 2 == 0
+              - item.pbx_media_destination_port_end | int % 2 == 1
+              - item.pbx_media_destination_port_start | int <= item.pbx_media_destination_port_end | int
+              - item.pbx_media_destination_port_end | int - item.pbx_media_destination_port_start | int + 1 <= 4096
+              - >-
+                not (item.pbx_media_destination_port_start | int <= 2223 and
+                     item.pbx_media_destination_port_end | int >= 2223)
+              - >-
+                not (item.pbx_media_destination_port_start | int <= 2224 and
+                     item.pbx_media_destination_port_end | int >= 2224)
+              - >-
+                not (item.pbx_media_destination_port_start | int <= 5061 and
+                     item.pbx_media_destination_port_end | int >= 5061)
+              - >-
+                not (item.pbx_media_destination_port_start | int <= 15061 and
+                     item.pbx_media_destination_port_end | int >= 15061)
+              - >-
+                item.pbx_source_prefixes | unique | length ==
+                item.pbx_source_prefixes | length
+              - >-
+                (cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' and
+                 item.pbx_source_prefixes == ['10.20.1.4/32'] and
+                 item.pbx_media_destination_port_start | int == 21000 and
+                 item.pbx_media_destination_port_end | int == 21127) or
+                (cp_azure_poc_edge_runtime_profile == 'DIRECT_ROUTING' and
+                 '10.20.1.4/32' not in item.pbx_source_prefixes and
+                 item.pbx_media_destination_port_end | int -
+                 item.pbx_media_destination_port_start | int + 1 >= 100 and
+                 not (item.pbx_media_destination_port_start | int == 21000 and
+                      item.pbx_media_destination_port_end | int == 21127))
+            fail_msg: >-
+              A POC Edge node does not match its fixed VM, disk, NIC, NSG,
+              public-IP, private-IP, size, or PBX-source identity.
+          loop: "{{ cp_azure_poc_edge_nodes | default([]) }}"
+          loop_control:
+            label: "{{ item.role | default('invalid-edge-node') }}"
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+          vars:
+            cp_azure_ipv4_pattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})$'
+
+        - name: Require globally routable bounded PBX CIDRs for Direct Routing
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - -c
+              - >-
+                import ipaddress, json, sys;
+                groups = json.loads(sys.argv[1]);
+                networks = [ipaddress.ip_network(cidr, strict=True)
+                for group in groups for cidr in group];
+                sys.exit(0 if networks and all(network.version == 4 and
+                network.prefixlen >= 24 and network.network_address.is_global
+                for network in networks) else 1)
+              - >-
+                {{ cp_azure_poc_edge_nodes |
+                   map(attribute='pbx_source_prefixes') | list | to_json }}
+          changed_when: false
+          check_mode: false
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
+            - cp_azure_poc_edge_runtime_profile == 'DIRECT_ROUTING'
 
         - name: Validate every approved SSH source as one IPv4 host
           ansible.builtin.assert:
@@ -221,7 +400,7 @@
         - name: Parse the sanitized Azure resource set
           ansible.builtin.set_fact:
             cp_azure_resources: "{{ cp_azure_resources_raw.stdout | from_json }}"
-            cp_azure_expected_resources:
+            cp_azure_legacy_expected_resources:
               - name: "{{ cp_azure_vm_name }}"
                 type: Microsoft.Compute/virtualMachines
                 location: "{{ cp_azure_location }}"
@@ -247,11 +426,104 @@
               - cp_azure_resources | length == 6
               - >-
                 cp_azure_resources ==
-                (cp_azure_expected_resources | sort(attribute='name'))
+                (cp_azure_legacy_expected_resources | sort(attribute='name'))
             fail_msg: >-
               The Azure resource group is not the exact VM, disk, NIC, NSG,
               public IP, and VNet base set; an unexpected or managed runtime
               service is present.
+          when: cp_azure_infrastructure_topology_selected == 'legacy-single-node'
+
+        - name: Build the exact three-node POC resource contract
+          ansible.builtin.set_fact:
+            cp_azure_poc_expected_declared_resources:
+              - name: "{{ cp_azure_vm_name }}"
+                type: Microsoft.Compute/virtualMachines
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_nic_name }}"
+                type: Microsoft.Network/networkInterfaces
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_nsg_name }}"
+                type: Microsoft.Network/networkSecurityGroups
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_public_ip_name }}"
+                type: Microsoft.Network/publicIPAddresses
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_poc_edge_nodes[0].vm_name }}"
+                type: Microsoft.Compute/virtualMachines
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_poc_edge_nodes[0].nic_name }}"
+                type: Microsoft.Network/networkInterfaces
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_poc_edge_nodes[0].nsg_name }}"
+                type: Microsoft.Network/networkSecurityGroups
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_poc_edge_nodes[0].public_ip_name }}"
+                type: Microsoft.Network/publicIPAddresses
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_poc_edge_nodes[1].vm_name }}"
+                type: Microsoft.Compute/virtualMachines
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_poc_edge_nodes[1].nic_name }}"
+                type: Microsoft.Network/networkInterfaces
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_poc_edge_nodes[1].nsg_name }}"
+                type: Microsoft.Network/networkSecurityGroups
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_poc_edge_nodes[1].public_ip_name }}"
+                type: Microsoft.Network/publicIPAddresses
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_vnet_name }}"
+                type: Microsoft.Network/virtualNetworks
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_poc_edge_availability_set_name }}"
+                type: Microsoft.Compute/availabilitySets
+                location: "{{ cp_azure_location }}"
+            cp_azure_poc_expected_disk_resources:
+              - name: "{{ cp_azure_os_disk_name }}"
+                type: Microsoft.Compute/disks
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_poc_edge_nodes[0].os_disk_name }}"
+                type: Microsoft.Compute/disks
+                location: "{{ cp_azure_location }}"
+              - name: "{{ cp_azure_poc_edge_nodes[1].os_disk_name }}"
+                type: Microsoft.Compute/disks
+                location: "{{ cp_azure_location }}"
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Split declared POC resources from provider-created managed disks
+          ansible.builtin.set_fact:
+            cp_azure_poc_declared_resources: >-
+              {{ cp_azure_resources |
+                 rejectattr('type', 'equalto', 'Microsoft.Compute/disks') |
+                 list | sort(attribute='name') }}
+            cp_azure_poc_disk_resources: >-
+              {{ cp_azure_resources |
+                 selectattr('type', 'equalto', 'Microsoft.Compute/disks') |
+                 list | sort(attribute='name') }}
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require exactly the fourteen-resource POC base and three managed OS disks
+          ansible.builtin.assert:
+            that:
+              - cp_azure_poc_declared_resources | length == 14
+              - cp_azure_poc_disk_resources | length == 3
+              - cp_azure_resources | length == 17
+              - >-
+                cp_azure_poc_declared_resources ==
+                (cp_azure_poc_expected_declared_resources | sort(attribute='name'))
+              - >-
+                cp_azure_poc_disk_resources ==
+                (cp_azure_poc_expected_disk_resources | sort(attribute='name'))
+              - >-
+                cp_azure_resources ==
+                ((cp_azure_poc_expected_declared_resources +
+                  cp_azure_poc_expected_disk_resources) | sort(attribute='name'))
+            fail_msg: >-
+              The POC resource group is not exactly the fourteen declared
+              CP1/SBC1/SBC2 resources plus their three provider-created
+              managed OS disks; an expected resource is absent or an
+              undeclared resource or managed service is present.
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
         - name: Read the exact Azure virtual machine security and storage profile
           ansible.builtin.command:
@@ -268,6 +540,7 @@
               - --query
               - >-
                 {id:id,name:name,location:location,vmSize:hardwareProfile.vmSize,
+                availabilitySetId:availabilitySet.id,identityType:identity.type,
                 securityType:securityProfile.securityType,
                 secureBootEnabled:securityProfile.uefiSettings.secureBootEnabled,
                 vTpmEnabled:securityProfile.uefiSettings.vTpmEnabled,
@@ -309,7 +582,13 @@
               - cp_azure_vm.id | lower == cp_azure_expected_vm_id | lower
               - cp_azure_vm.name == cp_azure_vm_name
               - cp_azure_vm.location | lower == 'uaenorth'
-              - cp_azure_vm.vmSize == 'Standard_D2as_v5'
+              - cp_azure_vm.vmSize == cp_azure_vm_size
+              - >-
+                cp_azure_infrastructure_topology_selected == 'legacy-single-node' or
+                cp_azure_vm.availabilitySetId is none
+              - >-
+                cp_azure_infrastructure_topology_selected == 'legacy-single-node' or
+                cp_azure_vm.identityType == 'SystemAssigned'
               - cp_azure_vm.securityType == 'TrustedLaunch'
               - cp_azure_vm.secureBootEnabled | bool
               - cp_azure_vm.vTpmEnabled | bool
@@ -320,19 +599,28 @@
               - cp_azure_vm.imageExactVersion == cp_azure_vm_image_version
               - cp_azure_vm.osDiskName == cp_azure_os_disk_name
               - cp_azure_vm.osDiskType == 'Linux'
-              - cp_azure_vm.osDiskSizeGiB | int == 64
-              - cp_azure_vm.osDiskSku == 'Premium_LRS'
+              - cp_azure_vm.osDiskSizeGiB | int == cp_azure_os_disk_size_gb | int
+              - cp_azure_vm.osDiskSku == cp_azure_os_disk_sku
               - cp_azure_vm.osDiskCaching == 'ReadWrite'
-              - cp_azure_vm.osDiskDeleteOption == 'Detach'
+              - >-
+                (cp_azure_infrastructure_topology_selected == 'legacy-single-node' and
+                 cp_azure_vm.osDiskDeleteOption == 'Detach') or
+                (cp_azure_infrastructure_topology_selected == 'poc-three-node' and
+                 cp_azure_vm.osDiskDeleteOption == 'Delete')
               - cp_azure_vm.dataDisks | length == 0
               - cp_azure_vm.networkInterfaces | length == 1
               - cp_azure_vm.networkInterfaces[0].id | lower == cp_azure_expected_nic_id | lower
               - cp_azure_vm.networkInterfaces[0].primary | bool
-              - cp_azure_vm.networkInterfaces[0].deleteOption == 'Detach'
+              - >-
+                (cp_azure_infrastructure_topology_selected == 'legacy-single-node' and
+                 cp_azure_vm.networkInterfaces[0].deleteOption == 'Detach') or
+                (cp_azure_infrastructure_topology_selected == 'poc-three-node' and
+                 cp_azure_vm.networkInterfaces[0].deleteOption == 'Delete')
               - cp_azure_vm.provisioningState == 'Succeeded'
             fail_msg: >-
               The Azure VM does not match the exact pinned Debian 13 Gen2,
-              D2as_v5, Trusted Launch, Secure Boot, vTPM, or OS-disk contract.
+              D2as_v5, Trusted Launch, Secure Boot, vTPM, or
+              topology-specific OS-disk contract.
 
         - name: Read the Azure virtual machine instance state
           ansible.builtin.command:
@@ -396,20 +684,22 @@
           ansible.builtin.set_fact:
             cp_azure_disk: "{{ cp_azure_disk_raw.stdout | from_json }}"
 
-        - name: Require the exact private encrypted Premium OS disk
+        - name: Require the exact private encrypted controller OS disk
           ansible.builtin.assert:
             that:
               - cp_azure_disk.name == cp_azure_os_disk_name
               - cp_azure_disk.location | lower == 'uaenorth'
-              - cp_azure_disk.diskSizeGiB | int == 64
-              - cp_azure_disk.sku == 'Premium_LRS'
+              - cp_azure_disk.diskSizeGiB | int == cp_azure_os_disk_size_gb | int
+              - cp_azure_disk.sku == cp_azure_os_disk_sku
               - cp_azure_disk.managedBy | lower == cp_azure_expected_vm_id | lower
               - cp_azure_disk.securityType == 'TrustedLaunch'
               - cp_azure_disk.encryptionType == 'EncryptionAtRestWithPlatformKey'
               - cp_azure_disk.publicNetworkAccess == 'Disabled'
               - cp_azure_disk.networkAccessPolicy == 'DenyAll'
               - cp_azure_disk.provisioningState == 'Succeeded'
-            fail_msg: The Azure OS disk is not the exact private encrypted 64 GiB Premium disk.
+            fail_msg: >-
+              The Azure OS disk is not the exact topology-specific private,
+              encrypted managed disk.
 
         - name: Read the exact static public IP
           ansible.builtin.command:
@@ -429,6 +719,7 @@
                 {id:id,name:name,location:location,ipAddress:ipAddress,
                 allocationMethod:publicIPAllocationMethod,ipVersion:publicIPAddressVersion,
                 sku:sku.name,skuTier:sku.tier,
+                idleTimeout:idleTimeoutInMinutes,
                 dnsLabel:dnsSettings.domainNameLabel,dnsFqdn:dnsSettings.fqdn,
                 provisioningState:provisioningState}
               - --output
@@ -456,6 +747,9 @@
               - cp_azure_public_ip_state.ipVersion == 'IPv4'
               - cp_azure_public_ip_state.sku == 'Standard'
               - cp_azure_public_ip_state.skuTier == 'Regional'
+              - >-
+                cp_azure_infrastructure_topology_selected == 'legacy-single-node' or
+                cp_azure_public_ip_state.idleTimeout | int == 30
               - cp_azure_public_ip_state.dnsLabel == cp_azure_public_ip_dns_label
               - cp_azure_public_ip_state.dnsLabel is none
               - cp_azure_public_ip_state.dnsFqdn is none
@@ -509,13 +803,17 @@
               {{ cp_azure_expected_nic_id }}/ipConfigurations/{{
               cp_azure_nic_ip_configuration_name }}
 
-        - name: Require the exact accelerated non-forwarding controller NIC
+        - name: Require the exact topology-specific non-forwarding controller NIC
           ansible.builtin.assert:
             that:
               - cp_azure_nic.id | lower == cp_azure_expected_nic_id | lower
               - cp_azure_nic.name == cp_azure_nic_name
               - cp_azure_nic.location | lower == 'uaenorth'
-              - cp_azure_nic.acceleratedNetworking | bool
+              - >-
+                (cp_azure_infrastructure_topology_selected == 'legacy-single-node' and
+                 cp_azure_nic.acceleratedNetworking | bool) or
+                (cp_azure_infrastructure_topology_selected == 'poc-three-node' and
+                 not (cp_azure_nic.acceleratedNetworking | bool))
               - cp_azure_nic.ipForwarding == false
               - cp_azure_nic.nsgId | lower == cp_azure_expected_nsg_id | lower
               - cp_azure_nic.vmId | lower == cp_azure_expected_vm_id | lower
@@ -590,7 +888,7 @@
               /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
               }}/providers/Microsoft.Network/virtualNetworks/{{ cp_azure_vnet_name }}
 
-        - name: Select the sole declared Azure subnet
+        - name: Select the controller Azure subnet
           ansible.builtin.set_fact:
             cp_azure_subnet: "{{ cp_azure_vnet.subnets[0] }}"
 
@@ -604,7 +902,11 @@
               - cp_azure_vnet.dnsServers | default([], true) | length == 0
               - cp_azure_vnet.ddosProtection == false
               - cp_azure_vnet.peerings | length == 0
-              - cp_azure_vnet.subnets | length == 1
+              - >-
+                (cp_azure_infrastructure_topology_selected == 'legacy-single-node' and
+                 cp_azure_vnet.subnets | length == 1) or
+                (cp_azure_infrastructure_topology_selected == 'poc-three-node' and
+                 cp_azure_vnet.subnets | length == 2)
               - cp_azure_vnet.provisioningState == 'Succeeded'
               - cp_azure_subnet.id | lower == cp_azure_expected_subnet_id | lower
               - cp_azure_subnet.name == cp_azure_subnet_name
@@ -619,7 +921,11 @@
               - cp_azure_subnet.networkSecurityGroupId is none
               - cp_azure_subnet.natGatewayId is none
               - cp_azure_subnet.routeTableId is none
-              - cp_azure_subnet.privateEndpointNetworkPolicies == 'Disabled'
+              - >-
+                (cp_azure_infrastructure_topology_selected == 'legacy-single-node' and
+                 cp_azure_subnet.privateEndpointNetworkPolicies == 'Disabled') or
+                (cp_azure_infrastructure_topology_selected == 'poc-three-node' and
+                 cp_azure_subnet.privateEndpointNetworkPolicies == 'Enabled')
               - cp_azure_subnet.privateLinkServiceNetworkPolicies == 'Enabled'
               - cp_azure_subnet.privateEndpointIds | default([], true) | length == 0
               - cp_azure_subnet.serviceEndpoints | default([], true) | length == 0
@@ -629,7 +935,64 @@
               - cp_azure_subnet.provisioningState == 'Succeeded'
             fail_msg: >-
               The Azure VNet or subnet differs from the exact isolated
-              single-node address-space and policy contract.
+              topology-specific address-space and policy contract.
+
+        - name: Select the POC Edge subnet and expected NIC bindings
+          ansible.builtin.set_fact:
+            cp_azure_poc_edge_subnet: "{{ cp_azure_vnet.subnets[1] }}"
+            cp_azure_poc_expected_edge_ip_configuration_ids:
+              - >-
+                /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+                }}/providers/Microsoft.Network/networkInterfaces/{{ cp_azure_poc_edge_nodes[0].nic_name
+                }}/ipConfigurations/ipconfig1
+              - >-
+                /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+                }}/providers/Microsoft.Network/networkInterfaces/{{ cp_azure_poc_edge_nodes[1].nic_name
+                }}/ipConfigurations/ipconfig1
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require the exact isolated POC Edge subnet
+          ansible.builtin.assert:
+            that:
+              - >-
+                cp_azure_poc_edge_subnet.id | lower ==
+                (cp_azure_expected_vnet_id ~ '/subnets/' ~
+                 cp_azure_poc_edge_subnet_name) | lower
+              - cp_azure_poc_edge_subnet.name == cp_azure_poc_edge_subnet_name
+              - >-
+                cp_azure_poc_edge_subnet.addressPrefix ==
+                cp_azure_poc_edge_subnet_address_prefix
+              - cp_azure_poc_edge_subnet.addressPrefixes is none
+              - cp_azure_poc_edge_subnet.defaultOutboundAccess == false
+              - cp_azure_poc_edge_subnet.delegations | length == 0
+              - cp_azure_poc_edge_subnet.ipConfigurationIds | length == 2
+              - >-
+                cp_azure_poc_edge_subnet.ipConfigurationIds | map('lower') | sort ==
+                cp_azure_poc_expected_edge_ip_configuration_ids |
+                map('lower') | sort
+              - cp_azure_poc_edge_subnet.networkSecurityGroupId is none
+              - cp_azure_poc_edge_subnet.natGatewayId is none
+              - cp_azure_poc_edge_subnet.routeTableId is none
+              - >-
+                cp_azure_poc_edge_subnet.privateEndpointNetworkPolicies ==
+                'Enabled'
+              - >-
+                cp_azure_poc_edge_subnet.privateLinkServiceNetworkPolicies ==
+                'Enabled'
+              - >-
+                cp_azure_poc_edge_subnet.privateEndpointIds |
+                default([], true) | length == 0
+              - >-
+                cp_azure_poc_edge_subnet.serviceEndpoints |
+                default([], true) | length == 0
+              - >-
+                cp_azure_poc_edge_subnet.serviceEndpointPolicyIds |
+                default([], true) | length == 0
+              - cp_azure_poc_edge_subnet.provisioningState == 'Succeeded'
+            fail_msg: >-
+              The POC Edge subnet is not exactly the isolated two-NIC,
+              no-delegation, no-routing, no-private-endpoint contract.
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
         - name: Read the complete custom NSG rule set
           ansible.builtin.command:
@@ -675,6 +1038,7 @@
                 ['Allow-SSH-Approved-IP', 'Allow-HTTP-Internet',
                  'Allow-HTTPS-Internet', 'Deny-All-Other-Inbound']
             fail_msg: The custom NSG rule names, priorities, or count differ from policy.
+          when: cp_azure_infrastructure_topology_selected == 'legacy-single-node'
 
         - name: Select the four approved custom NSG rules
           ansible.builtin.set_fact:
@@ -682,6 +1046,7 @@
             cp_azure_nsg_http: "{{ cp_azure_nsg_rules[1] }}"
             cp_azure_nsg_https: "{{ cp_azure_nsg_rules[2] }}"
             cp_azure_nsg_deny: "{{ cp_azure_nsg_rules[3] }}"
+          when: cp_azure_infrastructure_topology_selected == 'legacy-single-node'
 
         - name: Require the exact approved-IP SSH rule
           ansible.builtin.assert:
@@ -702,6 +1067,7 @@
               - cp_azure_nsg_ssh.destinationPortRanges | length == 0
               - cp_azure_nsg_ssh.provisioningState == 'Succeeded'
             fail_msg: The Azure SSH NSG rule is broader or different than inventory policy.
+          when: cp_azure_infrastructure_topology_selected == 'legacy-single-node'
 
         - name: Require the exact public HTTP rule
           ansible.builtin.assert:
@@ -720,6 +1086,7 @@
               - cp_azure_nsg_http.destinationPortRanges | length == 0
               - cp_azure_nsg_http.provisioningState == 'Succeeded'
             fail_msg: The Azure HTTP NSG rule is broader or different than policy.
+          when: cp_azure_infrastructure_topology_selected == 'legacy-single-node'
 
         - name: Require the exact public HTTPS rule
           ansible.builtin.assert:
@@ -738,6 +1105,7 @@
               - cp_azure_nsg_https.destinationPortRanges | length == 0
               - cp_azure_nsg_https.provisioningState == 'Succeeded'
             fail_msg: The Azure HTTPS NSG rule is broader or different than policy.
+          when: cp_azure_infrastructure_topology_selected == 'legacy-single-node'
 
         - name: Require the exact deny-all remainder rule
           ansible.builtin.assert:
@@ -756,6 +1124,990 @@
               - cp_azure_nsg_deny.destinationPortRanges | length == 0
               - cp_azure_nsg_deny.provisioningState == 'Succeeded'
             fail_msg: Azure does not deny every undeclared inbound flow after the approved rules.
+          when: cp_azure_infrastructure_topology_selected == 'legacy-single-node'
+
+        - name: Build the complete profile-aware POC controller NSG rule contract
+          ansible.builtin.set_fact:
+            cp_azure_poc_controller_nsg_rule_superset:
+              - name: AllowAdminSsh
+                priority: 100
+                protocol: Tcp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: null
+                sourcePrefixes: "{{ cp_azure_ssh_source_prefixes }}"
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: '22'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowPublicHttp
+                priority: 200
+                protocol: Tcp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: Internet
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: '80'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowPublicHttps
+                priority: 210
+                protocol: Tcp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: Internet
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: '443'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowEdgeToFixtureSignaling
+                priority: 300
+                protocol: Tcp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: "{{ cp_azure_private_ip }}"
+                destinationPrefixes: []
+                destinationPortRange: null
+                destinationPortRanges:
+                  - '16061'
+                  - '25061'
+                provisioningState: Succeeded
+              - name: AllowEdgeToFixtureMedia
+                priority: 310
+                protocol: Udp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: "{{ cp_azure_private_ip }}"
+                destinationPrefixes: []
+                destinationPortRange: null
+                destinationPortRanges:
+                  - '21000-21127'
+                  - '22000-22063'
+                provisioningState: Succeeded
+              - name: DenyAllInbound
+                priority: 4096
+                protocol: '*'
+                access: Deny
+                direction: Inbound
+                sourcePrefix: '*'
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: '*'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Select the exact POC controller NSG rules for the active profile
+          ansible.builtin.set_fact:
+            cp_azure_poc_expected_controller_nsg_rules: >-
+              {{
+                cp_azure_poc_controller_nsg_rule_superset
+                if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+                else
+                cp_azure_poc_controller_nsg_rule_superset |
+                rejectattr('name', 'equalto', 'AllowEdgeToFixtureSignaling') |
+                rejectattr('name', 'equalto', 'AllowEdgeToFixtureMedia') |
+                list
+              }}
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require the exact profile-specific POC controller NSG
+          ansible.builtin.assert:
+            that:
+              - >-
+                cp_azure_nsg_rules | length ==
+                (6 if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' else 4)
+              - cp_azure_nsg_rules == cp_azure_poc_expected_controller_nsg_rules
+            fail_msg: >-
+              The POC controller NSG is not the exact approved SSH, public
+              HTTP/HTTPS, profile-specific private fixture, and deny-all policy.
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Read the exact POC Edge availability set
+          ansible.builtin.command:
+            argv:
+              - az
+              - vm
+              - availability-set
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ cp_azure_poc_edge_availability_set_name }}"
+              - --query
+              - >-
+                {id:id,name:name,location:location,sku:sku.name,
+                faultDomains:platformFaultDomainCount,
+                updateDomains:platformUpdateDomainCount,
+                vmIds:virtualMachines[].id}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          register: cp_azure_poc_availability_set_raw
+          changed_when: false
+          check_mode: false
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Parse the sanitized POC Edge availability set
+          ansible.builtin.set_fact:
+            cp_azure_poc_availability_set: >-
+              {{ cp_azure_poc_availability_set_raw.stdout | from_json }}
+            cp_azure_poc_expected_availability_set_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Compute/availabilitySets/{{ cp_azure_poc_edge_availability_set_name }}
+            cp_azure_poc_expected_edge_vm_ids:
+              - >-
+                /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+                }}/providers/Microsoft.Compute/virtualMachines/{{ cp_azure_poc_edge_nodes[0].vm_name }}
+              - >-
+                /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+                }}/providers/Microsoft.Compute/virtualMachines/{{ cp_azure_poc_edge_nodes[1].vm_name }}
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require the exact two-node POC Edge availability set
+          ansible.builtin.assert:
+            that:
+              - >-
+                cp_azure_poc_availability_set.id | lower ==
+                cp_azure_poc_expected_availability_set_id | lower
+              - >-
+                cp_azure_poc_availability_set.name ==
+                cp_azure_poc_edge_availability_set_name
+              - cp_azure_poc_availability_set.location | lower == 'uaenorth'
+              - cp_azure_poc_availability_set.sku == 'Aligned'
+              - cp_azure_poc_availability_set.faultDomains | int == 2
+              - cp_azure_poc_availability_set.updateDomains | int == 5
+              - cp_azure_poc_availability_set.vmIds | length == 2
+              - >-
+                cp_azure_poc_availability_set.vmIds | map('lower') | sort ==
+                cp_azure_poc_expected_edge_vm_ids | map('lower') | sort
+            fail_msg: >-
+              The POC Edge availability set does not contain exactly SBC1 and
+              SBC2 across the approved fault/update-domain contract.
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Read each exact POC Edge virtual machine
+          ansible.builtin.command:
+            argv:
+              - az
+              - vm
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ item.vm_name }}"
+              - --query
+              - >-
+                {id:id,name:name,location:location,vmSize:hardwareProfile.vmSize,
+                availabilitySetId:availabilitySet.id,identityType:identity.type,
+                securityType:securityProfile.securityType,
+                secureBootEnabled:securityProfile.uefiSettings.secureBootEnabled,
+                vTpmEnabled:securityProfile.uefiSettings.vTpmEnabled,
+                imagePublisher:storageProfile.imageReference.publisher,
+                imageOffer:storageProfile.imageReference.offer,
+                imageSku:storageProfile.imageReference.sku,
+                imageVersion:storageProfile.imageReference.version,
+                imageExactVersion:storageProfile.imageReference.exactVersion,
+                osDiskName:storageProfile.osDisk.name,
+                osDiskType:storageProfile.osDisk.osType,
+                osDiskSizeGiB:storageProfile.osDisk.diskSizeGB,
+                osDiskSku:storageProfile.osDisk.managedDisk.storageAccountType,
+                osDiskCaching:storageProfile.osDisk.caching,
+                osDiskDeleteOption:storageProfile.osDisk.deleteOption,
+                dataDisks:storageProfile.dataDisks,
+                networkInterfaces:networkProfile.networkInterfaces[].{id:id,
+                primary:primary,deleteOption:deleteOption},
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          loop: "{{ cp_azure_poc_edge_nodes | default([]) }}"
+          loop_control:
+            label: "{{ item.role }}"
+          register: cp_azure_poc_edge_vms_raw
+          changed_when: false
+          check_mode: false
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require each exact trusted Debian 13 POC Edge virtual machine
+          ansible.builtin.assert:
+            that:
+              - vm.id | lower == expected_vm_id | lower
+              - vm.name == node.vm_name
+              - vm.location | lower == 'uaenorth'
+              - vm.vmSize == node.vm_size
+              - >-
+                vm.availabilitySetId | lower ==
+                cp_azure_poc_expected_availability_set_id | lower
+              - vm.identityType == 'SystemAssigned'
+              - vm.securityType == 'TrustedLaunch'
+              - vm.secureBootEnabled | bool
+              - vm.vTpmEnabled | bool
+              - vm.imagePublisher == cp_azure_vm_image_publisher
+              - vm.imageOffer == cp_azure_vm_image_offer
+              - vm.imageSku == cp_azure_vm_image_sku
+              - vm.imageVersion == cp_azure_vm_image_version
+              - vm.imageExactVersion == cp_azure_vm_image_version
+              - vm.osDiskName == node.os_disk_name
+              - vm.osDiskType == 'Linux'
+              - vm.osDiskSizeGiB | int == node.os_disk_size_gb | int
+              - vm.osDiskSku == 'StandardSSD_LRS'
+              - vm.osDiskCaching == 'ReadWrite'
+              - vm.osDiskDeleteOption == 'Delete'
+              - vm.dataDisks | length == 0
+              - vm.networkInterfaces | length == 1
+              - >-
+                vm.networkInterfaces[0].id | lower == expected_nic_id | lower
+              - vm.networkInterfaces[0].primary | bool
+              - vm.networkInterfaces[0].deleteOption == 'Delete'
+              - vm.provisioningState == 'Succeeded'
+            fail_msg: >-
+              A POC Edge VM differs from its exact pinned image, low-cost SKU,
+              Trusted Launch, availability-set, disk, or NIC contract.
+          loop: "{{ cp_azure_poc_edge_vms_raw.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.role | default('invalid-edge-vm') }}"
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+          vars:
+            node: "{{ item.item }}"
+            vm: "{{ item.stdout | from_json }}"
+            expected_vm_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Compute/virtualMachines/{{ item.item.vm_name }}
+            expected_nic_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Network/networkInterfaces/{{ item.item.nic_name }}
+
+        - name: Read each POC Edge virtual machine instance state
+          ansible.builtin.command:
+            argv:
+              - az
+              - vm
+              - get-instance-view
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ item.vm_name }}"
+              - --query
+              - instanceView.statuses[].code
+              - --output
+              - json
+          environment: *azure_cli_environment
+          loop: "{{ cp_azure_poc_edge_nodes | default([]) }}"
+          loop_control:
+            label: "{{ item.role }}"
+          register: cp_azure_poc_edge_instance_states_raw
+          changed_when: false
+          check_mode: false
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require every POC Edge virtual machine to be running and healthy
+          ansible.builtin.assert:
+            that:
+              - "'ProvisioningState/succeeded' in states"
+              - "'PowerState/running' in states"
+            fail_msg: >-
+              A POC Edge VM is not running and provisioned; final
+              infrastructure qualification requires both SBC nodes online.
+          loop: >-
+            {{ cp_azure_poc_edge_instance_states_raw.results | default([]) }}
+          loop_control:
+            label: "{{ item.item.role | default('invalid-edge-state') }}"
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+          vars:
+            states: "{{ item.stdout | from_json }}"
+
+        - name: Read each exact POC Edge managed OS disk
+          ansible.builtin.command:
+            argv:
+              - az
+              - disk
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ item.os_disk_name }}"
+              - --query
+              - >-
+                {name:name,location:location,diskSizeGiB:diskSizeGB,sku:sku.name,
+                managedBy:managedBy,securityType:securityProfile.securityType,
+                encryptionType:encryption.type,publicNetworkAccess:publicNetworkAccess,
+                networkAccessPolicy:networkAccessPolicy,
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          loop: "{{ cp_azure_poc_edge_nodes | default([]) }}"
+          loop_control:
+            label: "{{ item.role }}"
+          register: cp_azure_poc_edge_disks_raw
+          changed_when: false
+          check_mode: false
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require each exact private encrypted POC Edge OS disk
+          ansible.builtin.assert:
+            that:
+              - disk.name == node.os_disk_name
+              - disk.location | lower == 'uaenorth'
+              - disk.diskSizeGiB | int == node.os_disk_size_gb | int
+              - disk.sku == 'StandardSSD_LRS'
+              - disk.managedBy | lower == expected_vm_id | lower
+              - disk.securityType == 'TrustedLaunch'
+              - disk.encryptionType == 'EncryptionAtRestWithPlatformKey'
+              - disk.publicNetworkAccess == 'Disabled'
+              - disk.networkAccessPolicy == 'DenyAll'
+              - disk.provisioningState == 'Succeeded'
+            fail_msg: >-
+              A POC Edge OS disk is not the exact private, encrypted,
+              Standard SSD managed by its declared VM.
+          loop: "{{ cp_azure_poc_edge_disks_raw.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.role | default('invalid-edge-disk') }}"
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+          vars:
+            node: "{{ item.item }}"
+            disk: "{{ item.stdout | from_json }}"
+            expected_vm_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Compute/virtualMachines/{{ item.item.vm_name }}
+
+        - name: Assemble the three implicit POC OS-disk lockdown records
+          ansible.builtin.set_fact:
+            cp_azure_poc_os_disk_lockdown_evidence: >-
+              {{ [cp_azure_disk] +
+                 (cp_azure_poc_edge_disks_raw.results |
+                  map(attribute='stdout') | map('from_json') | list) }}
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Prove all three exact implicit POC OS disks deny network access
+          ansible.builtin.assert:
+            that:
+              - cp_azure_poc_os_disk_lockdown_evidence | length == 3
+              - >-
+                cp_azure_poc_os_disk_lockdown_evidence |
+                map(attribute='name') | list | sort ==
+                ([cp_azure_os_disk_name] +
+                 (cp_azure_poc_edge_nodes |
+                  map(attribute='os_disk_name') | list)) | sort
+              - >-
+                cp_azure_poc_os_disk_lockdown_evidence |
+                map(attribute='publicNetworkAccess') | unique | list ==
+                ['Disabled']
+              - >-
+                cp_azure_poc_os_disk_lockdown_evidence |
+                map(attribute='networkAccessPolicy') | unique | list ==
+                ['DenyAll']
+              - >-
+                cp_azure_poc_os_disk_lockdown_evidence |
+                map(attribute='provisioningState') | unique | list ==
+                ['Succeeded']
+            fail_msg: >-
+              The three provider-created POC OS disks are not the exact
+              CP1/SBC1/SBC2 set locked to publicNetworkAccess Disabled and
+              networkAccessPolicy DenyAll.
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Read each exact POC Edge static public IP
+          ansible.builtin.command:
+            argv:
+              - az
+              - network
+              - public-ip
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ item.public_ip_name }}"
+              - --query
+              - >-
+                {id:id,name:name,location:location,ipAddress:ipAddress,
+                allocationMethod:publicIPAllocationMethod,
+                ipVersion:publicIPAddressVersion,sku:sku.name,skuTier:sku.tier,
+                idleTimeout:idleTimeoutInMinutes,
+                dnsLabel:dnsSettings.domainNameLabel,dnsFqdn:dnsSettings.fqdn,
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          loop: "{{ cp_azure_poc_edge_nodes | default([]) }}"
+          loop_control:
+            label: "{{ item.role }}"
+          register: cp_azure_poc_edge_public_ips_raw
+          changed_when: false
+          check_mode: false
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require each exact POC Edge static Standard IPv4 address
+          ansible.builtin.assert:
+            that:
+              - public_ip.id | lower == expected_public_ip_id | lower
+              - public_ip.name == node.public_ip_name
+              - public_ip.location | lower == 'uaenorth'
+              - public_ip.ipAddress == node.public_ip
+              - public_ip.allocationMethod == 'Static'
+              - public_ip.ipVersion == 'IPv4'
+              - public_ip.sku == 'Standard'
+              - public_ip.skuTier == 'Regional'
+              - public_ip.idleTimeout | int == 30
+              - public_ip.dnsLabel is none
+              - public_ip.dnsFqdn is none
+              - public_ip.provisioningState == 'Succeeded'
+            fail_msg: >-
+              A POC Edge public IP is not the exact declared static Standard
+              regional IPv4 address without an Azure DNS label.
+          loop: "{{ cp_azure_poc_edge_public_ips_raw.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.role | default('invalid-edge-public-ip') }}"
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+          vars:
+            node: "{{ item.item }}"
+            public_ip: "{{ item.stdout | from_json }}"
+            expected_public_ip_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Network/publicIPAddresses/{{ item.item.public_ip_name }}
+
+        - name: Read each exact POC Edge network interface
+          ansible.builtin.command:
+            argv:
+              - az
+              - network
+              - nic
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ item.nic_name }}"
+              - --query
+              - >-
+                {id:id,name:name,location:location,
+                acceleratedNetworking:enableAcceleratedNetworking,
+                ipForwarding:enableIPForwarding,nsgId:networkSecurityGroup.id,
+                vmId:virtualMachine.id,
+                ipConfigurations:ipConfigurations[].{id:id,name:name,primary:primary,
+                privateIp:privateIPAddress,privateIpVersion:privateIPAddressVersion,
+                privateIpAllocationMethod:privateIPAllocationMethod,
+                publicIpId:publicIPAddress.id,subnetId:subnet.id,
+                provisioningState:provisioningState},
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          loop: "{{ cp_azure_poc_edge_nodes | default([]) }}"
+          loop_control:
+            label: "{{ item.role }}"
+          register: cp_azure_poc_edge_nics_raw
+          changed_when: false
+          check_mode: false
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require each exact non-forwarding POC Edge NIC
+          ansible.builtin.assert:
+            that:
+              - nic.id | lower == expected_nic_id | lower
+              - nic.name == node.nic_name
+              - nic.location | lower == 'uaenorth'
+              - not (nic.acceleratedNetworking | bool)
+              - nic.ipForwarding == false
+              - nic.nsgId | lower == expected_nsg_id | lower
+              - nic.vmId | lower == expected_vm_id | lower
+              - nic.ipConfigurations | length == 1
+              - >-
+                nic.ipConfigurations[0].id | lower ==
+                expected_ip_configuration_id | lower
+              - nic.ipConfigurations[0].name == 'ipconfig1'
+              - nic.ipConfigurations[0].primary | bool
+              - nic.ipConfigurations[0].privateIp == node.private_ip
+              - nic.ipConfigurations[0].privateIpVersion == 'IPv4'
+              - >-
+                nic.ipConfigurations[0].privateIpAllocationMethod == 'Static'
+              - >-
+                nic.ipConfigurations[0].publicIpId | lower ==
+                expected_public_ip_id | lower
+              - >-
+                nic.ipConfigurations[0].subnetId | lower ==
+                expected_edge_subnet_id | lower
+              - nic.ipConfigurations[0].provisioningState == 'Succeeded'
+              - nic.provisioningState == 'Succeeded'
+            fail_msg: >-
+              A POC Edge NIC is not exactly bound to its VM, NSG, static
+              private/public IP, and isolated Edge subnet.
+          loop: "{{ cp_azure_poc_edge_nics_raw.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.role | default('invalid-edge-nic') }}"
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+          vars:
+            node: "{{ item.item }}"
+            nic: "{{ item.stdout | from_json }}"
+            expected_vm_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Compute/virtualMachines/{{ item.item.vm_name }}
+            expected_nic_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Network/networkInterfaces/{{ item.item.nic_name }}
+            expected_nsg_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Network/networkSecurityGroups/{{ item.item.nsg_name }}
+            expected_public_ip_id: >-
+              /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
+              }}/providers/Microsoft.Network/publicIPAddresses/{{ item.item.public_ip_name }}
+            expected_edge_subnet_id: >-
+              {{ cp_azure_expected_vnet_id }}/subnets/{{ cp_azure_poc_edge_subnet_name }}
+            expected_ip_configuration_id: >-
+              {{ expected_nic_id }}/ipConfigurations/ipconfig1
+
+        - name: Read each complete POC Edge custom NSG rule set
+          ansible.builtin.command:
+            argv:
+              - az
+              - network
+              - nsg
+              - rule
+              - list
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --nsg-name
+              - "{{ item.nsg_name }}"
+              - --query
+              - >-
+                sort_by([],&name)[].{name:name,priority:priority,
+                protocol:protocol,access:access,direction:direction,
+                sourcePrefix:sourceAddressPrefix,
+                sourcePrefixes:sourceAddressPrefixes,
+                sourcePortRange:sourcePortRange,
+                sourcePortRanges:sourcePortRanges,
+                destinationPrefix:destinationAddressPrefix,
+                destinationPrefixes:destinationAddressPrefixes,
+                destinationPortRange:destinationPortRange,
+                destinationPortRanges:destinationPortRanges,
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          loop: "{{ cp_azure_poc_edge_nodes | default([]) }}"
+          loop_control:
+            label: "{{ item.role }}"
+          register: cp_azure_poc_edge_nsg_rules_raw
+          changed_when: false
+          check_mode: false
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require each exact profile-specific POC Edge NSG
+          ansible.builtin.assert:
+            that:
+              - >-
+                rules | length ==
+                (17 if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' else 19)
+              - rules == expected_rules
+            fail_msg: >-
+              A POC Edge NSG is not the exact approved administrator,
+              directional Microsoft signaling/media, synthetic fixture, PBX,
+              bounded media, and deny-all policy.
+          loop: "{{ cp_azure_poc_edge_nsg_rules_raw.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.role | default('invalid-edge-nsg') }}"
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+          vars:
+            node: "{{ item.item }}"
+            rules: "{{ item.stdout | from_json }}"
+            expected_rule_superset:
+              - name: AllowAdminSsh
+                priority: 100
+                protocol: Tcp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: null
+                sourcePrefixes: "{{ cp_azure_ssh_source_prefixes }}"
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: '22'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowAzureDhcpOutbound
+                priority: 1000
+                protocol: Udp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '68'
+                sourcePortRanges: []
+                destinationPrefix: 168.63.129.16
+                destinationPrefixes: []
+                destinationPortRange: '67'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowAzureDnsTcpOutbound
+                priority: 1020
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: 168.63.129.16
+                destinationPrefixes: []
+                destinationPortRange: '53'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowAzureDnsUdpOutbound
+                priority: 1010
+                protocol: Udp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: 168.63.129.16
+                destinationPrefixes: []
+                destinationPortRange: '53'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowAzureImdsOutbound
+                priority: 1040
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: 169.254.169.254
+                destinationPrefixes: []
+                destinationPortRange: '80'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowAzureWireServerOutbound
+                priority: 1030
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: 168.63.129.16
+                destinationPrefixes: []
+                destinationPortRange: null
+                destinationPortRanges:
+                  - '80'
+                  - '32526'
+                provisioningState: Succeeded
+              - name: AllowControlPlaneOutbound
+                priority: 1070
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: "{{ cp_azure_private_ip }}"
+                destinationPrefixes: []
+                destinationPortRange: '443'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowMicrosoftMedia
+                priority: 210
+                protocol: Udp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: null
+                sourcePrefixes: "{{ cp_azure_poc_microsoft_media_source_prefixes }}"
+                sourcePortRange: null
+                sourcePortRanges:
+                  - '3478-3481'
+                  - '49152-53247'
+                destinationPrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                destinationPrefixes: []
+                destinationPortRange: "{{ cp_azure_poc_rtp_media_port_range }}"
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowMicrosoftTls5061
+                priority: 200
+                protocol: Tcp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: null
+                sourcePrefixes: "{{ cp_azure_poc_microsoft_signaling_source_prefixes }}"
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: '5061'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowNtpOutbound
+                priority: 1050
+                protocol: Udp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: null
+                destinationPrefixes:
+                  - 162.159.200.1/32
+                  - 162.159.200.123/32
+                destinationPortRange: '123'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowPbxMedia
+                priority: 310
+                protocol: Udp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: null
+                sourcePrefixes: "{{ node.pbx_source_prefixes }}"
+                sourcePortRange: >-
+                  {{ node.pbx_media_destination_port_start | string }}-{{ node.pbx_media_destination_port_end | string }}
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: "{{ cp_azure_poc_tenant_media_port_range }}"
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowPbxTls
+                priority: 300
+                protocol: Tcp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: null
+                sourcePrefixes: "{{ node.pbx_source_prefixes }}"
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: >-
+                  {{ cp_azure_poc_pbx_tls_listener_port | string }}
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowSyntheticFixtureMediaOutbound
+                priority: 1110
+                protocol: Udp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: "{{ cp_azure_poc_tenant_media_port_range }}"
+                sourcePortRanges: []
+                destinationPrefix: "{{ cp_azure_private_ip }}"
+                destinationPrefixes: []
+                destinationPortRange: null
+                destinationPortRanges:
+                  - '21000-21127'
+                  - '22000-22063'
+                provisioningState: Succeeded
+              - name: AllowSyntheticFixtureSignalingOutbound
+                priority: 1100
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: "{{ cp_azure_private_ip }}"
+                destinationPrefixes: []
+                destinationPortRange: null
+                destinationPortRanges:
+                  - '16061'
+                  - '25061'
+                provisioningState: Succeeded
+              - name: AllowSyntheticTeamsMedia
+                priority: 230
+                protocol: Udp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: null
+                sourcePrefixes: "{{ cp_azure_poc_synthetic_teams_source_prefixes }}"
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: "{{ cp_azure_poc_tenant_media_port_range }}"
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowSyntheticTeamsTls5061
+                priority: 220
+                protocol: Tcp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: null
+                sourcePrefixes: "{{ cp_azure_poc_synthetic_teams_source_prefixes }}"
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: '5061'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowWebOutbound
+                priority: 1060
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: Internet
+                destinationPrefixes: []
+                destinationPortRange: null
+                destinationPortRanges:
+                  - '80'
+                  - '443'
+                provisioningState: Succeeded
+              - name: DenyAllInbound
+                priority: 4096
+                protocol: '*'
+                access: Deny
+                direction: Inbound
+                sourcePrefix: '*'
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: '*'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: DenyAllOutbound
+                priority: 4096
+                protocol: '*'
+                access: Deny
+                direction: Outbound
+                sourcePrefix: '*'
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: '*'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+            direct_profile_outbound_rules:
+              - name: AllowMicrosoftMediaOutbound
+                priority: 1110
+                protocol: Udp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: "{{ cp_azure_poc_tenant_media_port_range }}"
+                sourcePortRanges: []
+                destinationPrefix: null
+                destinationPrefixes: "{{ cp_azure_poc_microsoft_media_source_prefixes }}"
+                destinationPortRange: null
+                destinationPortRanges:
+                  - '3478-3481'
+                  - '49152-53247'
+                provisioningState: Succeeded
+              - name: AllowMicrosoftSignalingOutbound
+                priority: 1100
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: null
+                destinationPrefixes: "{{ cp_azure_poc_microsoft_signaling_source_prefixes }}"
+                destinationPortRange: '5061'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowPbxMediaOutbound
+                priority: 1130
+                protocol: Udp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: "{{ cp_azure_poc_tenant_media_port_range }}"
+                sourcePortRanges: []
+                destinationPrefix: null
+                destinationPrefixes: "{{ node.pbx_source_prefixes }}"
+                destinationPortRange: >-
+                  {{ node.pbx_media_destination_port_start | string }}-{{ node.pbx_media_destination_port_end | string }}
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowPbxSignalingOutbound
+                priority: 1120
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: null
+                destinationPrefixes: "{{ node.pbx_source_prefixes }}"
+                destinationPortRange: '5061'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+            expected_rules: >-
+              {{
+                (
+                  expected_rule_superset |
+                  rejectattr('name', 'equalto', 'AllowMicrosoftMedia') |
+                  rejectattr('name', 'equalto', 'AllowMicrosoftTls5061') |
+                  list
+                )
+                if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+                else
+                (
+                  (
+                    expected_rule_superset |
+                    rejectattr('name', 'equalto', 'AllowSyntheticFixtureMediaOutbound') |
+                    rejectattr('name', 'equalto', 'AllowSyntheticFixtureSignalingOutbound') |
+                    rejectattr('name', 'equalto', 'AllowSyntheticTeamsMedia') |
+                    rejectattr('name', 'equalto', 'AllowSyntheticTeamsTls5061') |
+                    list
+                  ) + direct_profile_outbound_rules
+                ) | sort(attribute='name')
+              }}
 
         - name: Read the public DNS A record without mutation
           ansible.builtin.command:
@@ -853,6 +2205,7 @@
           ansible.builtin.debug:
             msg:
               - azure_infrastructure=passed
+              - "azure_topology={{ cp_azure_infrastructure_topology_selected }}"
               - "azure_cli={{ cp_azure_cli_version }}"
               - "subscription_id={{ cp_azure_account.id }}"
               - "resource_group={{ cp_azure_resource_group_state.name }}"
@@ -867,11 +2220,38 @@
                 os_disk={{ cp_azure_disk.name }},{{ cp_azure_disk.diskSizeGiB }}GiB,
                 {{ cp_azure_disk.sku }}
               - "public_ip={{ cp_azure_public_ip_state.ipAddress }},Static,Standard"
-              - resource_set=vm,disk,nic,nsg,public-ip,vnet
+              - >-
+                resource_set={{
+                'vm,disk,nic,nsg,public-ip,vnet'
+                if cp_azure_infrastructure_topology_selected == 'legacy-single-node'
+                else
+                '14-declared-resources,3-managed-os-disks,cp1,sbc1,sbc2' }}
               - >-
                 network=vnet-{{ cp_azure_vnet_address_prefix }},
                 subnet-{{ cp_azure_subnet_address_prefix }},
                 private-{{ cp_azure_private_ip }}
-              - nsg_custom_rules=ssh-approved-ip,http-public,https-public,deny-remainder
+              - >-
+                nsg_custom_rules={{
+                'ssh-approved-ip,http-public,https-public,deny-remainder'
+                if cp_azure_infrastructure_topology_selected == 'legacy-single-node'
+                else
+                'profile-' ~ cp_azure_poc_edge_runtime_profile ~
+                ',controller-' ~
+                (6 if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' else 4) ~
+                '-rule,edge-' ~
+                (17 if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' else 19) ~
+                '-rule-exact-contracts' }}
+              - >-
+                os_disk_network_access={{
+                'controller-disabled-deny-all'
+                if cp_azure_infrastructure_topology_selected == 'legacy-single-node'
+                else
+                'cp1-sbc1-sbc2-disabled-deny-all' }}
+              - >-
+                edge_nodes={{
+                'not-applicable'
+                if cp_azure_infrastructure_topology_selected == 'legacy-single-node'
+                else
+                cp_azure_poc_edge_nodes | map(attribute='vm_name') | join(',') }}
               - "dns={{ cp_ingress_server_name }}->{{ cp_azure_dns.addresses[0] }}"
               - "runner_dns={{ cp_ingress_server_name }}->{{ cp_azure_runner_dns_addresses[0] }}"

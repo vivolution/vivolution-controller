@@ -1,0 +1,70 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
+
+acme_root=/var/lib/vivolution-edge/acme
+certificate_name='{{ edge_acme_node_fqdn }}'
+certificate_source="$acme_root/certificates/$certificate_name.crt"
+issuer_source="$acme_root/certificates/$certificate_name.issuer.crt"
+key_source="$acme_root/certificates/$certificate_name.key"
+rotation_root=/var/lib/vivolution-edge/certificate-rotation
+incoming_root="$rotation_root/incoming"
+
+exec 9>"$acme_root/renew.lock"
+/usr/bin/flock -n 9
+
+if [ -f "$certificate_source" ] && [ -f "$key_source" ]; then
+    /usr/local/sbin/lego \
+        --accept-tos \
+        --email '{{ edge_acme_email }}' \
+        --dns azuredns \
+        --domains '{{ edge_acme_node_fqdn }}' \
+        --domains '{{ edge_acme_wildcard_fqdn }}' \
+        --key-type '{{ edge_acme_certificate_key_type }}' \
+        --path "$acme_root" \
+        renew --days 30
+else
+    /usr/local/sbin/lego \
+        --accept-tos \
+        --email '{{ edge_acme_email }}' \
+        --dns azuredns \
+        --domains '{{ edge_acme_node_fqdn }}' \
+        --domains '{{ edge_acme_wildcard_fqdn }}' \
+        --key-type '{{ edge_acme_certificate_key_type }}' \
+        --path "$acme_root" \
+        run
+fi
+
+test -s "$certificate_source"
+test -s "$issuer_source"
+test -s "$key_source"
+
+certificate_tmp="$incoming_root/.teams-fullchain.pem.$$"
+key_tmp="$incoming_root/.teams-key.pem.$$"
+trap 'rm -f "$certificate_tmp" "$key_tmp"' EXIT HUP INT TERM
+
+{
+    /bin/cat "$certificate_source"
+    /bin/cat "$issuer_source"
+} >"$certificate_tmp"
+/usr/bin/install -o root -g root -m 0400 "$key_source" "$key_tmp"
+/bin/chown root:root "$certificate_tmp"
+/bin/chmod 0400 "$certificate_tmp"
+
+/usr/local/libexec/vivolution-edge/validate-edge-certificate \
+    --certificate "$certificate_tmp" \
+    --private-key "$key_tmp" \
+    --expected-san '{{ edge_acme_node_fqdn }}' \
+    --expected-san '{{ edge_acme_wildcard_fqdn }}' \
+    --trust-bundle /etc/ssl/certs/ca-certificates.crt \
+    --minimum-valid-seconds 1209600
+
+/bin/mv -f "$certificate_tmp" "$incoming_root/teams-fullchain.pem"
+/bin/mv -f "$key_tmp" "$incoming_root/teams-key.pem"
+trap - EXIT HUP INT TERM
+/bin/sync -f "$incoming_root"
+
+/usr/local/libexec/vivolution-edge/rotate-edge-certificate

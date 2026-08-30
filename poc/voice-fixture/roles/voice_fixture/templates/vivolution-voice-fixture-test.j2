@@ -1,0 +1,244 @@
+#!/bin/bash
+set -euo pipefail
+umask 027
+
+if [[ ${EUID} -ne 0 ]]; then
+    printf 'synthetic test must run as root\n' >&2
+    exit 2
+fi
+
+node=${1:-}
+case "$node" in
+    sbc1)
+        target_ip={{ voice_fixture_sbc1_ipv4 | quote }}
+        origin_extension=9201
+        ;;
+    sbc2)
+        target_ip={{ voice_fixture_sbc2_ipv4 | quote }}
+        origin_extension=9202
+        ;;
+    *)
+        printf 'usage: %s sbc1|sbc2\n' "$0" >&2
+        exit 2
+        ;;
+esac
+
+exec 9>/run/lock/vivolution-voice-fixture-test.lock
+flock --exclusive --nonblock 9 || {
+    printf 'another synthetic fixture test is already running\n' >&2
+    exit 3
+}
+
+timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+test_id="${timestamp}-${node}-$$"
+transient_unit="vivolution-fixture-uac-${node}-$$"
+transient_container="vivolution-fixture-uac-${node}-$$"
+results_root={{ voice_fixture_results_root | quote }}
+state_root={{ voice_fixture_state_root | quote }}
+pki_root={{ voice_fixture_pki_root | quote }}
+result_dir="$results_root/$test_id"
+cdr_file="$state_root/asterisk-log/cdr-custom/VivolutionFixture.csv"
+uas_rtp_file="$state_root/sipp/runtime/teams-uas-rtp.json"
+sipp_image_file={{ (voice_fixture_config_root + '/sipp-image-id') | quote }}
+start_epoch=$(date -u +%s)
+
+install -d -o 10002 -g 10002 -m 0750 "$result_dir"
+
+line_count() {
+    local path=$1
+    if [[ -f $path ]]; then
+        wc -l <"$path"
+    else
+        printf '0\n'
+    fi
+}
+
+rtp_count() {
+    local path=$1
+    if [[ -f $path ]]; then
+        jq -er '.packets_received | numbers' "$path"
+    else
+        printf '0\n'
+    fi
+}
+
+rtp_peer_count() {
+    local path=$1
+    local peer=$2
+    if [[ -f $path ]]; then
+        jq -er --arg peer "$peer" '.sources[$peer] // 0 | numbers' "$path"
+    else
+        printf '0\n'
+    fi
+}
+
+rtp_echo_count() {
+    local path=$1
+    if [[ -f $path ]]; then
+        jq -er '.packets_echoed | numbers' "$path"
+    else
+        printf '0\n'
+    fi
+}
+
+capture_final() {
+    local exit_code=$?
+    trap - EXIT
+    systemctl stop "$transient_unit.service" >/dev/null 2>&1 || true
+    /usr/bin/podman rm --force "$transient_container" >/dev/null 2>&1 || true
+    {
+        systemctl show vivolution-voice-fixture-asterisk.service \
+            --property=ActiveState --property=SubState --property=IPAddressAllow \
+            --property=IPAddressDeny --property=SocketBindAllow --property=SocketBindDeny
+        systemctl show vivolution-voice-fixture-sipp.service \
+            --property=ActiveState --property=SubState --property=IPAddressAllow \
+            --property=IPAddressDeny --property=SocketBindAllow --property=SocketBindDeny
+    } >"$result_dir/unit-policy.txt" 2>&1 || true
+    journalctl --no-pager --since "@$start_epoch" \
+        -u vivolution-voice-fixture-asterisk.service \
+        -u vivolution-voice-fixture-sipp.service \
+        >"$result_dir/fixture-journal.log" 2>&1 || true
+    ss -H -lntu >"$result_dir/listeners.txt" 2>&1 || true
+    nft list ruleset >"$result_dir/nftables.txt" 2>&1 || true
+    if [[ -f $uas_rtp_file ]]; then
+        cp --preserve=mode,timestamps "$uas_rtp_file" "$result_dir/pbx-to-teams-rtp-after.json"
+    fi
+    if [[ $exit_code -eq 0 ]]; then
+        printf 'PASS\n' >"$result_dir/RESULT"
+    else
+        printf 'FAIL exit=%s\n' "$exit_code" >"$result_dir/RESULT"
+    fi
+    chmod 0640 "$result_dir"/* 2>/dev/null || true
+    manifest_content=$(
+        cd "$result_dir"
+        find . -type f ! -name MANIFEST.sha256 -print0 \
+            | sort -z \
+            | xargs -0 sha256sum
+    )
+    printf '%s\n' "$manifest_content" >"$result_dir/MANIFEST.sha256"
+    chmod 0440 "$result_dir/MANIFEST.sha256"
+    printf 'fixture test %s: %s\n' "$test_id" "$(<"$result_dir/RESULT")"
+    exit "$exit_code"
+}
+trap capture_final EXIT
+
+/usr/local/libexec/vivolution-voice-fixture-readiness \
+    >"$result_dir/readiness.txt" 2>&1
+
+sipp_image=$(<"$sipp_image_file")
+[[ $sipp_image =~ ^sha256:[0-9a-f]{64}$ ]]
+
+cdr_before=$(line_count "$cdr_file")
+uas_rtp_before=$(rtp_count "$uas_rtp_file")
+uas_peer_rtp_before=$(rtp_peer_count "$uas_rtp_file" "$target_ip")
+uas_echo_before=$(rtp_echo_count "$uas_rtp_file")
+printf '%s\n' "$uas_rtp_before" >"$result_dir/pbx-to-teams-rtp-before.count"
+printf '%s\n' "$uas_peer_rtp_before" >"$result_dir/pbx-to-teams-peer-rtp-before.count"
+printf '%s\n' "$uas_echo_before" >"$result_dir/pbx-to-teams-rtp-echo-before.count"
+
+systemd-run --quiet --wait --collect --pipe --service-type=exec \
+    --unit="$transient_unit" \
+    --property=IPAddressDeny=any \
+    --property=IPAddressAllow=127.0.0.0/8 \
+    --property=IPAddressAllow={{ voice_fixture_controller_ipv4 }}/32 \
+    --property=IPAddressAllow={{ voice_fixture_edge_subnet_ipv4 }} \
+    --property='RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET' \
+    --property=SocketBindDeny=any \
+    --property=SocketBindAllow=ipv4:tcp:{{ voice_fixture_sipp_uac_tls_port }} \
+    --property=SocketBindAllow=ipv4:tcp:{{ voice_fixture_sipp_probe_tls_port }} \
+    --property=SocketBindAllow=ipv4:udp:{{ voice_fixture_sipp_uac_rtp_port }} \
+    --property=NoNewPrivileges=true \
+    --property=MemoryMax=256M \
+    --property=CPUQuota=50% \
+    /usr/bin/podman run --rm \
+        --name="$transient_container" \
+        --network=host \
+        --add-host={{ voice_fixture_sbc1_server_name }}:{{ voice_fixture_sbc1_ipv4 }} \
+        --add-host={{ voice_fixture_sbc2_server_name }}:{{ voice_fixture_sbc2_ipv4 }} \
+        --user=10002:10002 \
+        --read-only \
+        --cap-drop=all \
+        --security-opt=no-new-privileges \
+        --tmpfs=/tmp:rw,size=16m,mode=1777 \
+        --volume="$pki_root:/run/fixture-pki:ro" \
+        --volume="$result_dir:/results:rw" \
+        "$sipp_image" \
+        /opt/fixture/bin/fixture_sipp.py uac \
+        --target-ip "$target_ip" \
+        --target-port {{ voice_fixture_edge_teams_tls_port }} \
+        --test-id "$test_id" \
+        --output-dir /results \
+    >"$result_dir/teams-to-pbx-runner.log" 2>&1
+
+# The inbound CDR can flush just after SIPp exits.
+for _attempt in $(seq 1 20); do
+    [[ $(line_count "$cdr_file") -gt $cdr_before ]] && break
+    sleep 0.5
+done
+[[ $(line_count "$cdr_file") -gt $cdr_before ]]
+
+/usr/bin/podman exec vivolution-voice-fixture-asterisk \
+    /usr/sbin/asterisk -rx "dialplan set global VIVOLUTION_FIXTURE_TEST_ID $test_id" \
+    >"$result_dir/asterisk-set-test-id.log"
+/usr/bin/podman exec vivolution-voice-fixture-asterisk \
+    /usr/sbin/asterisk -rx \
+    "channel originate Local/${origin_extension}@fixture-origin application Milliwatt" \
+    >"$result_dir/asterisk-originate.log"
+
+for _attempt in $(seq 1 40); do
+    current_rtp=$(rtp_count "$uas_rtp_file")
+    current_peer_rtp=$(rtp_peer_count "$uas_rtp_file" "$target_ip")
+    current_echo=$(rtp_echo_count "$uas_rtp_file")
+    current_cdr=$(line_count "$cdr_file")
+    if [[ $current_rtp -gt $uas_rtp_before && $current_peer_rtp -gt $uas_peer_rtp_before && $current_echo -gt $uas_echo_before && $current_cdr -ge $((cdr_before + 2)) ]]; then
+        break
+    fi
+    sleep 0.5
+done
+
+uas_rtp_after=$(rtp_count "$uas_rtp_file")
+uas_peer_rtp_after=$(rtp_peer_count "$uas_rtp_file" "$target_ip")
+uas_echo_after=$(rtp_echo_count "$uas_rtp_file")
+cdr_after=$(line_count "$cdr_file")
+[[ $uas_rtp_after -gt $uas_rtp_before ]]
+[[ $uas_peer_rtp_after -gt $uas_peer_rtp_before ]]
+[[ $uas_echo_after -gt $uas_echo_before ]]
+[[ $cdr_after -ge $((cdr_before + 2)) ]]
+
+tail -n "+$((cdr_before + 1))" "$cdr_file" >"$result_dir/asterisk-cdr-delta.csv"
+grep -Fq "$test_id" "$result_dir/asterisk-cdr-delta.csv"
+/usr/local/libexec/vivolution-synthetic-cdr-evidence normalize-fixture \
+    --cdr-csv "$result_dir/asterisk-cdr-delta.csv" \
+    --node "$node" \
+    --output "$result_dir/fixture-cdr.json" \
+    --test-id "$test_id" \
+    >"$result_dir/fixture-cdr-normalization.log"
+jq -e \
+    --arg node "$node" \
+    --arg test_id "$test_id" \
+    '.apiVersion == "edge.vivolution.ae/synthetic-fixture-cdr/v0.1" and
+     .kind == "SyntheticFixtureCdrEvidence" and
+     .scope == "SYNTHETIC_PRIVATE_NO_PSTN" and
+     .status == "TWO_LOGICAL_SYNTHETIC_CALLS_ACCOUNTED" and
+     .liveM365Interoperability == "NOT_ASSERTED" and
+     .nodeId == $node and .testId == $test_id and
+     (.records | map(.direction)) ==
+       ["TEAMS_FIXTURE_TO_PBX_FIXTURE", "PBX_FIXTURE_TO_TEAMS_FIXTURE"] and
+     (.records | map(.disposition) | unique) == ["ANSWERED"]' \
+    "$result_dir/fixture-cdr.json" >/dev/null
+jq -e --arg peer "$target_ip" \
+    '.packets_received > 0 and .packets_echoed > 0 and .invalid_packets == 0 and .rejected_sources == 0 and (.sources[$peer] > 0)' \
+    "$result_dir/teams-to-pbx-summary.json" >/dev/null
+
+if [[ -f $state_root/sipp/runtime/teams-uas-errors.log ]]; then
+    cp --preserve=mode,timestamps \
+        "$state_root/sipp/runtime/teams-uas-errors.log" \
+        "$result_dir/pbx-to-teams-sipp-errors.log"
+fi
+
+printf 'node=%s\ntarget=%s\ntest_id=%s\ncdr_records=%s\nrtp_uas_delta=%s\nrtp_selected_peer_delta=%s\nrtp_echo_delta=%s\n' \
+    "$node" "$target_ip" "$test_id" "$((cdr_after - cdr_before))" \
+    "$((uas_rtp_after - uas_rtp_before))" \
+    "$((uas_peer_rtp_after - uas_peer_rtp_before))" \
+    "$((uas_echo_after - uas_echo_before))" \
+    >"$result_dir/summary.txt"

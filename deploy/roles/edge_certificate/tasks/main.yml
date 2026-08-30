@@ -1,0 +1,201 @@
+---
+- name: Create the protected ACME client cache
+  ansible.builtin.file:
+    path: /var/cache/vivolution-edge/lego
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Download the checksum-pinned lego AMD64 release archive
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/go-acme/lego/releases/download/v{{ edge_lego_version_required }}/lego_v{{ edge_lego_version_required }}_linux_amd64.tar.gz
+    dest: "/var/cache/vivolution-edge/lego/lego_v{{ edge_lego_version_required }}_linux_amd64.tar.gz"
+    owner: root
+    group: root
+    mode: '0644'
+    checksum: "sha256:{{ edge_lego_linux_amd64_archive_sha256 }}"
+    force: false
+
+- name: Create the versioned lego extraction directory
+  ansible.builtin.file:
+    path: "/var/cache/vivolution-edge/lego/{{ edge_lego_version_required }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Extract the reviewed lego archive without remote execution
+  ansible.builtin.unarchive:
+    src: "/var/cache/vivolution-edge/lego/lego_v{{ edge_lego_version_required }}_linux_amd64.tar.gz"
+    dest: "/var/cache/vivolution-edge/lego/{{ edge_lego_version_required }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0750'
+    include:
+      - lego
+    creates: "/var/cache/vivolution-edge/lego/{{ edge_lego_version_required }}/lego"
+
+- name: Install the reviewed lego binary
+  ansible.builtin.copy:
+    src: "/var/cache/vivolution-edge/lego/{{ edge_lego_version_required }}/lego"
+    dest: /usr/local/sbin/lego
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Require the exact lego runtime version
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/lego, --version]
+  register: edge_lego_version
+  changed_when: false
+  failed_when: >-
+    edge_lego_version.rc != 0 or
+    ('lego version ' ~ edge_lego_version_required) not in edge_lego_version.stdout
+
+- name: Create protected ACME and deployed TLS directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: /var/lib/vivolution-edge/acme
+      group: root
+      mode: '0700'
+    - path: /var/lib/vivolution-edge/certificate-rotation
+      group: root
+      mode: '0700'
+    - path: /var/lib/vivolution-edge/certificate-rotation/incoming
+      group: root
+      mode: '0700'
+    - path: /var/lib/vivolution-edge/certificate-rotation/backup
+      group: root
+      mode: '0700'
+    - path: /var/lib/vivolution-edge/certificate-rotation/evidence
+      group: root
+      mode: '0700'
+    - path: /var/lib/vivolution-edge/runtime
+      group: root
+      mode: '0755'
+    - path: /etc/vivolution-edge/tls
+      group: opensips
+      mode: '0750'
+    - path: /usr/local/libexec/vivolution-edge
+      group: root
+      mode: '0755'
+
+- name: Install non-secret managed-identity ACME inputs
+  ansible.builtin.template:
+    src: acme-azure.env.j2
+    dest: /etc/vivolution-edge/acme-azure.env
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Install the fixed certificate issuance and renewal helper
+  ansible.builtin.template:
+    src: renew-edge-certificate.sh.j2
+    dest: /usr/local/libexec/vivolution-edge/renew-edge-certificate
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Install the fail-closed public certificate validator
+  ansible.builtin.copy:
+    src: validate_edge_certificate.py
+    dest: /usr/local/libexec/vivolution-edge/validate-edge-certificate
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install the fixed rollback-capable certificate rotation core
+  ansible.builtin.template:
+    src: rotate-edge-certificate.py.j2
+    dest: /usr/local/libexec/vivolution-edge/rotate-edge-certificate.py
+    owner: root
+    group: root
+    mode: '0444'
+
+- name: Install the isolated no-argument certificate rotation wrapper
+  ansible.builtin.template:
+    src: vivolution-edge-certificate-rotate.j2
+    dest: /usr/local/libexec/vivolution-edge/rotate-edge-certificate
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Install the edge certificate renewal service
+  ansible.builtin.template:
+    src: vivolution-edge-certificate.service.j2
+    dest: /etc/systemd/system/vivolution-edge-certificate.service
+    owner: root
+    group: root
+    mode: '0644'
+  register: edge_certificate_service_unit
+
+- name: Install the edge certificate renewal timer
+  ansible.builtin.template:
+    src: vivolution-edge-certificate.timer.j2
+    dest: /etc/systemd/system/vivolution-edge-certificate.timer
+    owner: root
+    group: root
+    mode: '0644'
+  register: edge_certificate_timer_unit
+
+- name: Reload systemd for certificate unit changes
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: edge_certificate_service_unit.changed or edge_certificate_timer_unit.changed
+
+- name: Hold certificate scheduling until protected runtime authority is installed
+  ansible.builtin.systemd_service:
+    name: vivolution-edge-certificate.timer
+    enabled: false
+    state: stopped
+
+- name: Obtain or renew the publicly trusted Edge certificate through Azure DNS
+  ansible.builtin.systemd_service:
+    name: vivolution-edge-certificate.service
+    state: started
+  register: edge_certificate_issue
+  # Managed-identity and Resource Graph authorization can take several minutes
+  # to converge after the isolated ACME-zone role assignments are created.
+  retries: 30
+  delay: 20
+  until: edge_certificate_issue is succeeded
+
+- name: Validate the deployed Edge certificate contract
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-edge/validate-edge-certificate
+      - --certificate
+      - /etc/vivolution-edge/tls/teams-fullchain.pem
+      - --private-key
+      - /etc/vivolution-edge/tls/teams-key.pem
+      - --expected-san
+      - "{{ edge_acme_node_fqdn }}"
+      - --expected-san
+      - "{{ edge_acme_wildcard_fqdn }}"
+      - --trust-bundle
+      - /etc/ssl/certs/ca-certificates.crt
+      - --minimum-valid-seconds
+      - '1209600'
+  register: edge_certificate_identity
+  changed_when: false
+
+- name: Require exact Microsoft-compatible public certificate evidence
+  ansible.builtin.assert:
+    that:
+      - (edge_certificate_identity.stdout | from_json).status == 'EDGE_PUBLIC_CERTIFICATE_VALID'
+      - (edge_certificate_identity.stdout | from_json).dnsSans == [edge_acme_wildcard_fqdn, edge_acme_node_fqdn] | sort
+      - (edge_certificate_identity.stdout | from_json).chainCertificateCount | int >= 2
+      - (edge_certificate_identity.stdout | from_json).leafKeyAlgorithm == 'RSA'
+      - (edge_certificate_identity.stdout | from_json).leafKeyBits | int == 2048
+      - (edge_certificate_identity.stdout | from_json).serverAuthenticationEku | bool
+      - (edge_certificate_identity.stdout | from_json).publicTrustBundleSha256 is match('^[0-9a-f]{64}$')
+    fail_msg: The deployed Edge certificate does not meet the exact RSA, SAN, chain, EKU, lifetime, and public-trust contract.

@@ -1,0 +1,213 @@
+---
+- name: Create the nftables systemd override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/nftables.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Limit nftables service lifecycle actions to the owned edge table
+  ansible.builtin.template:
+    src: 10-vivolution-edge.conf.j2
+    dest: /etc/systemd/system/nftables.service.d/10-vivolution-edge.conf
+    owner: root
+    group: root
+    mode: '0644'
+  register: edge_nftables_systemd_override
+
+- name: Reload systemd after nftables unit ownership changes
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: edge_nftables_systemd_override.changed
+
+- name: Capture tables present before edge firewall installation
+  ansible.builtin.command:
+    argv: [nft, --json, list, tables]
+  register: edge_firewall_tables_before_raw
+  changed_when: false
+
+- name: Remember pre-existing foreign nftables table identities
+  ansible.builtin.set_fact:
+    edge_firewall_foreign_tables_before: []
+
+- name: Build the pre-existing foreign table inventory
+  ansible.builtin.set_fact:
+    edge_firewall_foreign_tables_before: >-
+      {{ edge_firewall_foreign_tables_before +
+         [item.table.family ~ ':' ~ item.table.name] }}
+  loop: >-
+    {{ (edge_firewall_tables_before_raw.stdout | from_json).nftables |
+       selectattr('table', 'defined') |
+       rejectattr('table.name', 'equalto', 'vivolution_edge_filter') |
+       rejectattr('table.name', 'equalto', 'vivolution_edge_preservation_probe') |
+       list }}
+  loop_control:
+    label: "{{ item.table.family }}:{{ item.table.name }}"
+
+- name: Exercise owned-table install and reapply preservation
+  block:
+    - name: Remove a stale edge preservation probe
+      ansible.builtin.command:
+        argv: [nft, destroy, table, inet, vivolution_edge_preservation_probe]
+      changed_when: false
+
+    - name: Create a harmless foreign-table preservation probe
+      ansible.builtin.command:
+        argv: [nft, add, table, inet, vivolution_edge_preservation_probe]
+      changed_when: false
+
+    - name: Install the complete owned edge firewall policy
+      ansible.builtin.template:
+        src: nftables.conf.j2
+        dest: /etc/nftables.conf
+        owner: root
+        group: root
+        mode: '0644'
+        validate: /usr/sbin/nft --check --file %s
+      notify: Apply owned edge nftables table
+
+    - name: Enable the edge firewall at boot
+      ansible.builtin.systemd_service:
+        name: nftables.service
+        enabled: true
+        state: started
+
+    - name: Apply pending firewall changes
+      ansible.builtin.meta: flush_handlers
+
+    - name: Require the sentinel after initial firewall installation
+      ansible.builtin.command:
+        argv: [nft, list, table, inet, vivolution_edge_preservation_probe]
+      changed_when: false
+
+    - name: Reapply the owned table as an idempotency and preservation test
+      ansible.builtin.command:
+        argv: [/usr/sbin/nft, --file, /etc/nftables.conf]
+      changed_when: false
+
+    - name: Require the sentinel after explicit firewall reapplication
+      ansible.builtin.command:
+        argv: [nft, list, table, inet, vivolution_edge_preservation_probe]
+      changed_when: false
+
+    - name: Capture tables after edge firewall reapplication
+      ansible.builtin.command:
+        argv: [nft, --json, list, tables]
+      register: edge_firewall_tables_after_raw
+      changed_when: false
+
+    - name: Remember post-install nftables table identities
+      ansible.builtin.set_fact:
+        edge_firewall_tables_after: []
+
+    - name: Build the post-install nftables table inventory
+      ansible.builtin.set_fact:
+        edge_firewall_tables_after: >-
+          {{ edge_firewall_tables_after +
+             [item.table.family ~ ':' ~ item.table.name] }}
+      loop: >-
+        {{ (edge_firewall_tables_after_raw.stdout | from_json).nftables |
+           selectattr('table', 'defined') | list }}
+      loop_control:
+        label: "{{ item.table.family }}:{{ item.table.name }}"
+
+    - name: Require all foreign and sentinel tables to survive reapplication
+      ansible.builtin.assert:
+        that:
+          - >-
+            edge_firewall_foreign_tables_before |
+            difference(edge_firewall_tables_after) | length == 0
+          - inet_probe_table in edge_firewall_tables_after
+        fail_msg: Applying the edge firewall removed a foreign nftables table.
+      vars:
+        inet_probe_table: inet:vivolution_edge_preservation_probe
+  always:
+    - name: Remove the harmless firewall preservation probe
+      ansible.builtin.command:
+        argv: [nft, destroy, table, inet, vivolution_edge_preservation_probe]
+      changed_when: false
+
+- name: Inspect the active edge firewall table
+  ansible.builtin.command:
+    argv: [nft, list, table, inet, vivolution_edge_filter]
+  register: edge_active_firewall
+  changed_when: false
+
+- name: Require default-deny and split signaling policy
+  ansible.builtin.assert:
+    that:
+      - edge_active_firewall.stdout is search('hook input priority filter; policy drop;')
+      - edge_active_firewall.stdout is search('hook forward priority filter; policy drop;')
+      - edge_active_firewall.stdout is search('hook output priority filter; policy drop;')
+      - edge_active_firewall.stdout is search('set admin_source_ipv4')
+      - edge_active_firewall.stdout is search('set microsoft_signaling_source_ipv4')
+      - edge_active_firewall.stdout is search('set microsoft_media_source_ipv4')
+      - >-
+        (edge_synthetic_teams_source_ipv4_cidrs | length == 0) or
+        (edge_active_firewall.stdout is search('set synthetic_teams_source_ipv4'))
+      - edge_active_firewall.stdout is search('set pbx_source_ipv4')
+      - edge_active_firewall.stdout is search('set control_plane_ipv4')
+      - edge_active_firewall.stdout is search('set ntp_server_ipv4')
+      - edge_active_firewall.stdout is search('tcp dport 5061')
+      - edge_active_firewall.stdout is search('tcp dport 15061')
+      - edge_active_firewall.stdout is search('udp dport 20000-20255')
+      - >-
+        edge_active_firewall.stdout is search(
+          'ip saddr @pbx_source_ipv4 udp sport ' ~
+          (edge_pbx_media_destination_port_start | string) ~ '-' ~
+          (edge_pbx_media_destination_port_end | string) ~
+          ' udp dport 20000-20255 accept'
+        )
+      - >-
+        (edge_runtime_profile != 'DIRECT_ROUTING') or
+        (edge_active_firewall.stdout is search(
+          'ip saddr @microsoft_media_source_ipv4 udp sport .*3478-3481.*49152-53247.*udp dport 20000-20255'
+        ))
+      - edge_active_firewall.stdout is not search('dport 5060\\b')
+      - edge_active_firewall.stdout is not search('dport (2223|2224)\\b')
+      - >-
+        edge_active_firewall.stdout is search(
+          'ip daddr 168\\.63\\.129\\.16 udp sport 68 udp dport 67 accept'
+        )
+      - >-
+        edge_active_firewall.stdout is search(
+          'ip daddr 169\\.254\\.169\\.254 tcp dport 80.*accept'
+        )
+      - >-
+        edge_active_firewall.stdout is search(
+          'ip daddr @ntp_server_ipv4 udp dport 123 accept'
+        )
+      - >-
+        (edge_runtime_profile != 'SYNTHETIC_PRIVATE') or
+        (edge_active_firewall.stdout is search(
+          'ip daddr @control_plane_ipv4 udp sport 20000-20255 udp dport .*21000-21127.*22000-22063.*accept'
+        ))
+      - >-
+        (edge_runtime_profile != 'SYNTHETIC_PRIVATE') or
+        (edge_active_firewall.stdout is not search(
+          'ip saddr @microsoft_(signaling|media)_source_ipv4'
+        ))
+      - >-
+        (edge_runtime_profile != 'SYNTHETIC_PRIVATE') or
+        (edge_active_firewall.stdout is not search(
+          'ip daddr @(microsoft_(signaling|media)_source_ipv4|pbx_source_ipv4)'
+        ))
+      - >-
+        (edge_runtime_profile != 'DIRECT_ROUTING') or
+        (edge_active_firewall.stdout is search(
+          'ip daddr @microsoft_media_source_ipv4 udp sport 20000-20255 udp dport .*3478-3481.*49152-53247.*accept'
+        ))
+      - >-
+        (edge_runtime_profile != 'DIRECT_ROUTING') or
+        (edge_active_firewall.stdout is search(
+          'ip daddr @pbx_source_ipv4 udp sport 20000-20255 udp dport ' ~
+          (edge_pbx_media_destination_port_start | string) ~ '-' ~
+          (edge_pbx_media_destination_port_end | string) ~ ' accept'
+        ))
+      - >-
+        (edge_runtime_profile != 'DIRECT_ROUTING') or
+        (edge_active_firewall.stdout is not search(
+          'ip (saddr @synthetic_teams_source_ipv4|daddr @control_plane_ipv4 (tcp dport .*16061.*25061|udp sport 20000-20255))'
+        ))
+    fail_msg: The active edge firewall is not the declared split, default-deny policy.

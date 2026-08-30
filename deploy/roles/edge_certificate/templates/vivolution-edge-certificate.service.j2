@@ -1,0 +1,28 @@
+[Unit]
+Description=Vivolution Edge Azure-DNS ACME certificate renewal
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=5min
+EnvironmentFile=/etc/vivolution-edge/acme-azure.env
+ExecStart=/usr/local/libexec/vivolution-edge/renew-edge-certificate
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/vivolution-edge/acme /var/lib/vivolution-edge/certificate-rotation /var/lib/vivolution-edge/runtime /etc/vivolution-edge/tls -/etc/vivolution-edge/runtime-authority.json
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native

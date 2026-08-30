@@ -1,0 +1,21 @@
+{
+  "description": "A tenant-scoped connector is relabelled for another tenant while the signed target remains Vivolution.",
+  "baseEnvelope": "../../schema/examples/v0.1-one-tenant-pbx-relay.json",
+  "mutations": [
+    {
+      "pointer": "/manifest/resourceSet/resources/0/tenantContextId",
+      "value": "tenant-other-customer"
+    }
+  ],
+  "context": {
+    "expectedClusterId": "cluster-uaen-poc-01",
+    "expectedNodeId": "sbc1",
+    "expectedGeneration": 1,
+    "expectedTenantContextId": "tenant-vivolution-poc",
+    "expectedAllocationId": "allocation-vivolution-uaen-poc",
+    "acceptedSequence": 6,
+    "acceptedDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "now": "2026-08-30T04:45:00Z"
+  },
+  "expectedError": "cross-scope resource identity"
+}

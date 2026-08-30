@@ -1,0 +1,46 @@
+[Unit]
+Description=Vivolution isolated no-PSTN Asterisk PBX fixture
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Container]
+Image={{ voice_fixture_asterisk_image_id }}
+Pull=never
+ContainerName=vivolution-voice-fixture-asterisk
+Network=host
+AddHost={{ voice_fixture_sbc1_server_name }}:{{ voice_fixture_sbc1_ipv4 }}
+AddHost={{ voice_fixture_sbc2_server_name }}:{{ voice_fixture_sbc2_ipv4 }}
+User=10001:10001
+Volume={{ voice_fixture_config_root }}/asterisk:/etc/asterisk:ro
+Volume={{ voice_fixture_pki_root }}:/run/fixture-pki:ro
+Volume={{ voice_fixture_state_root }}/asterisk-log:/var/log/asterisk:rw
+ReadOnly=true
+Tmpfs=/tmp:rw,size=16m,mode=1777
+Tmpfs=/var/lib/asterisk:rw,size=16m,mode=0750,uid=10001,gid=10001
+Tmpfs=/var/run/asterisk:rw,size=4m,mode=0750,uid=10001,gid=10001
+Tmpfs=/var/spool/asterisk:rw,size=8m,mode=0750,uid=10001,gid=10001
+DropCapability=all
+NoNewPrivileges=true
+Exec=-f -C /etc/asterisk/asterisk.conf
+
+[Service]
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=90
+TimeoutStopSec=20
+MemoryMax=512M
+CPUQuota=75%
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8
+IPAddressAllow={{ voice_fixture_controller_ipv4 }}/32
+IPAddressAllow={{ voice_fixture_edge_subnet_ipv4 }}
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET
+SocketBindDeny=any
+SocketBindAllow=ipv4:tcp:{{ voice_fixture_asterisk_tls_port }}
+SocketBindAllow=ipv4:tcp:{{ voice_fixture_asterisk_uac_tls_port }}
+SocketBindAllow=ipv4:udp:{{ voice_fixture_asterisk_rtp_start }}-{{ voice_fixture_asterisk_rtp_end }}
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

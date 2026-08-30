@@ -1,0 +1,12 @@
+{
+  "description": "Public deterministic interoperability vector; the private seed is test material and must never be used for deployment",
+  "manifestFile": "../examples/v0.1-one-tenant-pbx-relay.json",
+  "domainSeparatorUtf8": "edge.vivolution.ae/SignedDesiredState/v0.1\u0000",
+  "canonicalManifestLength": 6887,
+  "canonicalManifestSha256": "31825c369dfedf928effd0c16191ed986e4964c41a9d890d4bf6e2951d98dc72",
+  "signingInputLength": 6930,
+  "signingInputSha256": "2c9cbd7612e6294682b4bb2e5d275f93402723a86134418dde9aea415c238c13",
+  "testOnlyPrivateSeedHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "publicKeyRawBase64": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+  "signatureBase64": "N+Na8rV0qya/PhihE9xSV6U41AslWabHTHFeaSO8+E9wiHdQojq4RRjZNojcecnnkNdQZNasw1pwO5G4U4CZAg=="
+}

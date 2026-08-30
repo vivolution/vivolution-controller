@@ -1,0 +1,31 @@
+[rtpengine]
+# Userspace forwarding is an explicit POC constraint. Never change this to a
+# non-negative kernel table without a separately reviewed architecture.
+table = -1
+interface = {{ edge_effective_private_ipv4 }}!{{ edge_public_ipv4 }}
+
+# OpenSIPS and administrative control remain on loopback only.
+listen-ng = 127.0.0.1:{{ edge_rtpengine_ng_port }}
+listen-cli = 127.0.0.1:{{ edge_rtpengine_cli_port }}
+
+port-min = {{ edge_rtp_port_start }}
+port-max = {{ edge_rtp_port_end }}
+timeout = 60
+silent-timeout = 3600
+final-timeout = 10800
+tos = 184
+num-threads = 2
+media-num-threads = 2
+max-sessions = 50
+
+foreground = true
+log-stderr = true
+log-level = 5
+no-log-timestamps = true
+
+# Avoid privileged scheduler operations in the unprivileged userspace unit.
+scheduling = default
+priority = 0
+idle-scheduling = default
+idle-priority = 0
+io-uring = false

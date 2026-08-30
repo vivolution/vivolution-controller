@@ -1,0 +1,18 @@
+[Unit]
+Description=Recover Vivolution Edge protected runtime before data-plane boot
+Wants=network-online.target
+Requires=nftables.service
+After=local-fs.target network-online.target nftables.service
+ConditionPathExists=/var/lib/vivolution-edge/runtime/state.json
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/usr/local/sbin/vivolution-edge-runtime recover
+ExecStartPost=/usr/bin/systemctl --no-block start vivolution-edge-dataplane.target
+TimeoutStartSec=180
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

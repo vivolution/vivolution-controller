@@ -1,5 +1,10 @@
 .DS_Store
 *.retry
+__pycache__/
+*.py[cod]
+
+# Throwaway feasibility spikes and downloaded probe artifacts are never shipped.
+.tmp/
 
 # Local deployment state and evidence can contain credentials or host keys.
 deploy/.state/
@@ -20,6 +25,8 @@ controller/**/__pycache__/
 controller/staticfiles/
 controller/*.sqlite3
 deploy/tests/__pycache__/
+edge/**/__pycache__/
+edge/tests/node_modules/
 
 # Local controller test environment.
 controller/.test-venv/

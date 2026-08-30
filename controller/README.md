@@ -7,6 +7,13 @@ the narrow tenant/edge/configuration model, and PostgreSQL row-level security (R
 Enrollment, PKI, edge-agent commands, route compilation, customer-facing APIs, background
 jobs, artifact signing, and the SIP/media data plane are intentionally out of scope here.
 
+The bounded Azure POC can reconcile its first-tenant catalog with the owner-only
+`reconcile_vivolution_poc` management command. It creates Vivolution Technologies
+LLC, its still-unverified Microsoft 365 tenant, the two expected AMD64 Edge nodes,
+and draft configuration version 1 idempotently. It deliberately leaves the M365
+tenant `PENDING`, the cluster `PLANNED`, and both nodes `EXPECTED`; deployment alone
+is not proof of Microsoft verification or live data-plane health.
+
 ## Runtime assumptions
 
 - Python 3.13 and PostgreSQL 17 are the qualified targets. The code requires Python 3.11+.

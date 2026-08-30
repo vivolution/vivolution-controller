@@ -1,0 +1,268 @@
+---
+- name: Set the edge hostname
+  ansible.builtin.hostname:
+    name: "{{ edge_expected_hostname }}"
+    use: systemd
+
+- name: Keep local hostname resolution consistent
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s+'
+    line: "127.0.1.1\t{{ edge_expected_hostname }}"
+    state: present
+
+- name: Apply available Debian upgrades without removals
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+    upgrade: safe
+    lock_timeout: 120
+
+- name: Install the native edge foundation packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - iproute2
+      - nftables
+      - ntpsec
+      - openssl
+      - procps
+      - python3
+      - python3-cryptography
+      - python3-jsonschema
+      - unattended-upgrades
+      - util-linux
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 120
+
+- name: Pin network time to the reviewed fixed IPv4 endpoints
+  ansible.builtin.template:
+    src: ntpsec.conf.j2
+    dest: /etc/ntpsec/ntp.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart edge ntpsec
+
+- name: Keep the pinned network time service active across reboot
+  ansible.builtin.systemd_service:
+    name: ntpsec.service
+    enabled: true
+    state: started
+
+- name: Keep hardened OpenSSH enabled across reboot
+  ansible.builtin.systemd_service:
+    name: ssh.service
+    enabled: true
+    state: started
+
+- name: Install explicit single-NIC endpoint network invariants
+  ansible.builtin.template:
+    src: 99-vivolution-edge-network.conf.j2
+    dest: /etc/sysctl.d/99-vivolution-edge-network.conf
+    owner: root
+    group: root
+    mode: '0644'
+  register: edge_network_sysctl_policy
+
+- name: Reconcile only the owned edge network invariants
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/sysctl
+      - --load=/etc/sysctl.d/99-vivolution-edge-network.conf
+  changed_when: edge_network_sysctl_policy.changed
+
+- name: Inspect effective edge network invariants
+  ansible.builtin.command:
+    argv: [/usr/sbin/sysctl, --values, "{{ item }}"]
+  loop:
+    - net.ipv4.ip_forward
+    - net.ipv6.conf.all.forwarding
+    - net.ipv4.conf.all.accept_redirects
+    - net.ipv4.conf.default.accept_redirects
+    - "net.ipv4.conf.{{ ansible_facts['default_ipv4']['interface'] }}.accept_redirects"
+    - net.ipv6.conf.all.accept_redirects
+    - net.ipv6.conf.default.accept_redirects
+    - "net.ipv6.conf.{{ ansible_facts['default_ipv4']['interface'] }}.accept_redirects"
+    - net.ipv4.conf.all.send_redirects
+    - net.ipv4.conf.default.send_redirects
+    - "net.ipv4.conf.{{ ansible_facts['default_ipv4']['interface'] }}.send_redirects"
+    - net.ipv4.conf.all.accept_source_route
+    - net.ipv4.conf.default.accept_source_route
+    - "net.ipv4.conf.{{ ansible_facts['default_ipv4']['interface'] }}.accept_source_route"
+    - net.ipv6.conf.all.accept_source_route
+    - net.ipv6.conf.default.accept_source_route
+    - "net.ipv6.conf.{{ ansible_facts['default_ipv4']['interface'] }}.accept_source_route"
+    - net.ipv4.conf.all.rp_filter
+    - net.ipv4.conf.default.rp_filter
+    - "net.ipv4.conf.{{ ansible_facts['default_ipv4']['interface'] }}.rp_filter"
+  register: edge_effective_network_sysctls
+  changed_when: false
+
+- name: Require forwarding, redirects, and source routing off with strict RPF
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim == expected_sysctl_value
+    fail_msg: "Unsafe effective sysctl {{ item.item }}={{ item.stdout | trim }}."
+  loop: "{{ edge_effective_network_sysctls.results }}"
+  loop_control:
+    label: "{{ item.item }}={{ item.stdout | trim }}"
+  vars:
+    expected_sysctl_value: >-
+      {{ '1' if item.item.endswith('.rp_filter') else '0' }}
+
+- name: Create the edge state directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - path: /etc/vivolution-edge
+      mode: '0750'
+    - path: /var/lib/vivolution-edge
+      mode: '0750'
+
+- name: Inspect systemd-resolved without changing resolver ownership
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - systemd-resolved.service
+      - --property=LoadState
+      - --property=ActiveState
+  register: edge_systemd_resolved_state
+  changed_when: false
+  failed_when: false
+
+- name: Remember whether systemd-resolved is active
+  ansible.builtin.set_fact:
+    edge_systemd_resolved_active: >-
+      {{ edge_systemd_resolved_state.rc == 0 and
+         'LoadState=loaded' in edge_systemd_resolved_state.stdout_lines and
+         'ActiveState=active' in edge_systemd_resolved_state.stdout_lines }}
+
+- name: Create the resolver hardening directory
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Disable multicast resolver protocols
+  ansible.builtin.copy:
+    dest: /etc/systemd/resolved.conf.d/99-vivolution-edge-hardening.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Resolve]
+      LLMNR=no
+      MulticastDNS=no
+  register: edge_resolver_policy
+
+- name: Restart an active resolver after policy changes
+  ansible.builtin.systemd_service:
+    name: systemd-resolved.service
+    state: restarted
+  when:
+    - edge_systemd_resolved_active | bool
+    - edge_resolver_policy.changed
+
+- name: Inspect the merged resolver configuration
+  ansible.builtin.command:
+    argv: [systemd-analyze, cat-config, systemd/resolved.conf]
+  register: edge_resolver_merged_config
+  changed_when: false
+
+- name: Select effective multicast resolver assignments
+  ansible.builtin.set_fact:
+    edge_resolver_llmnr_assignments: >-
+      {{ edge_resolver_merged_config.stdout |
+         regex_findall('(?m)^\s*LLMNR\s*=\s*([^#;\s]+)\s*$') }}
+    edge_resolver_mdns_assignments: >-
+      {{ edge_resolver_merged_config.stdout |
+         regex_findall('(?m)^\s*MulticastDNS\s*=\s*([^#;\s]+)\s*$') }}
+
+- name: Require the managed resolver policy to remain effective
+  ansible.builtin.assert:
+    that:
+      - edge_resolver_llmnr_assignments | length > 0
+      - edge_resolver_llmnr_assignments | last | lower == 'no'
+      - edge_resolver_mdns_assignments | length > 0
+      - edge_resolver_mdns_assignments | last | lower == 'no'
+    fail_msg: A later resolver assignment overrides the managed multicast-disable policy.
+
+- name: Require working unicast DNS
+  ansible.builtin.command:
+    argv: [getent, ahostsv4, "{{ edge_dns_probe_name }}"]
+  register: edge_unicast_dns_probe
+  changed_when: false
+
+- name: Inspect prohibited multicast resolver listeners
+  ansible.builtin.command:
+    argv: [ss, -H, -lntu]
+  register: edge_resolver_listeners
+  changed_when: false
+
+- name: Require multicast resolver listeners to be absent
+  ansible.builtin.assert:
+    that:
+      - edge_unicast_dns_probe.stdout | trim | length > 0
+      - edge_resolver_listeners.stdout is not search(':(5353|5355)\\b')
+    fail_msg: Unicast DNS failed or an LLMNR/mDNS listener remains active.
+
+- name: Create the journald policy directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Bound persistent edge journal storage
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/20-vivolution-edge-limits.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Journal]
+      Storage=persistent
+      SystemMaxUse={{ edge_journal_max_use }}
+      RuntimeMaxUse=64M
+      MaxRetentionSec=14day
+      Compress=yes
+  notify: Restart edge journald
+
+- name: Limit unattended upgrades to Debian security updates
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52vivolution-edge-unattended-upgrades
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      Unattended-Upgrade::Origins-Pattern {
+          "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+      };
+      Unattended-Upgrade::Automatic-Reboot "false";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+- name: Enable periodic security maintenance
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+- name: Apply pending base-service handlers
+  ansible.builtin.meta: flush_handlers

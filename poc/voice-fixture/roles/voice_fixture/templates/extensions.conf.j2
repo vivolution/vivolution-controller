@@ -1,0 +1,58 @@
+[general]
+static=yes
+writeprotect=yes
+clearglobalvars=no
+
+[globals]
+VIVOLUTION_FIXTURE_TEST_ID=unset
+
+[from-edge]
+; The only inbound PBX route. The deliberately invalid UAE national part starts
+; with 0, so this can never be an assigned UAE E.164 number. It generates a
+; deterministic milliwatt tone until the synthetic caller ends the dialog.
+exten => +9710000001001,1,NoOp(Vivolution no-PSTN inbound fixture)
+ same => n,Set(CDR(accountcode)=vivo-synth-t2p)
+ same => n,Set(CDR(userfield)=${PJSIP_HEADER(read,X-Vivolution-Test-ID)})
+ same => n,Answer()
+ same => n,Milliwatt()
+ same => n,Hangup()
+
+; Explicit emergency and catch-all blocks. No context contains a carrier peer.
+exten => 911,1,Hangup(21)
+exten => 112,1,Hangup(21)
+exten => 999,1,Hangup(21)
+exten => 998,1,Hangup(21)
+exten => 997,1,Hangup(21)
+exten => 996,1,Hangup(21)
+exten => 995,1,Hangup(21)
+exten => 994,1,Hangup(21)
+exten => _X!,1,Hangup(21)
+exten => _+X!,1,Hangup(21)
+
+[fixture-origin]
+; These two local control extensions are not SIP listeners. Both call only the
+; deliberately invalid fixture number through the selected private Edge.
+exten => 9201,1,NoOp(Vivolution no-PSTN outbound through SBC1)
+ same => n,Set(CDR(accountcode)=vivo-synth-p2t)
+ same => n,Set(CDR(userfield)=${VIVOLUTION_FIXTURE_TEST_ID})
+ same => n,Dial(PJSIP/+9710000001001@sbc1,15,b(fixture-add-header^s^1(${VIVOLUTION_FIXTURE_TEST_ID})))
+ same => n,Hangup()
+
+exten => 9202,1,NoOp(Vivolution no-PSTN outbound through SBC2)
+ same => n,Set(CDR(accountcode)=vivo-synth-p2t)
+ same => n,Set(CDR(userfield)=${VIVOLUTION_FIXTURE_TEST_ID})
+ same => n,Dial(PJSIP/+9710000001001@sbc2,15,b(fixture-add-header^s^1(${VIVOLUTION_FIXTURE_TEST_ID})))
+ same => n,Hangup()
+
+[fixture-add-header]
+exten => s,1,Set(PJSIP_HEADER(add,X-Vivolution-Fixture)=no-pstn)
+ same => n,Set(PJSIP_HEADER(add,X-Vivolution-Test-ID)=${ARG1})
+ same => n,Return()
+
+[reject-all]
+exten => _X!,1,Hangup(21)
+exten => _+X!,1,Hangup(21)
+
+[default]
+exten => _X!,1,Hangup(21)
+exten => _+X!,1,Hangup(21)

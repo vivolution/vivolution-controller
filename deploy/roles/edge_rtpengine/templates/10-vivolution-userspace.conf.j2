@@ -1,0 +1,12 @@
+[Service]
+# The vendor unit grants network-administration and scheduler capabilities for
+# optional kernel forwarding. The POC is deliberately userspace-only.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+Restart=on-failure
+RestartSec=2s

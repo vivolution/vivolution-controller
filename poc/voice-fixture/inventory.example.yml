@@ -1,0 +1,17 @@
+---
+all:
+  children:
+    fixture_controller:
+      hosts:
+        cp1-fixture:
+          # Replace with the reachable SSH address from the generated POC
+          # inventory. The role independently requires private IP 10.20.1.4.
+          ansible_host: 203.0.113.10
+          ansible_user: cpadmin
+          # Keep the real private-key path outside this repository.
+          ansible_ssh_private_key_file: /absolute/path/outside/repo/cp1-ed25519
+  vars:
+    voice_fixture_acknowledge_no_pstn: NO_PSTN_SYNTHETIC_ONLY
+    # Change to true only after the exact private NSG and nftables rules in
+    # README.md are applied and independently inspected.
+    voice_fixture_firewall_contract_acknowledged: false

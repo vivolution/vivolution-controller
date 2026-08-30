@@ -1,0 +1,636 @@
+---
+- name: Verify, compile, and transactionally activate one signed Edge candidate
+  hosts: edge_nodes
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars:
+    edge_agent_tenant_state_dir: /var/lib/vivolution-edge/agent-state/tenant
+    edge_runtime_node_facts_for_compiler: /usr/lib/vivolution-edge/config/node-facts.json
+    edge_runtime_pinned_key_file: /usr/lib/vivolution-edge/config/signing-public-key.json
+    edge_runtime_authority_file: /etc/vivolution-edge/runtime-authority.json
+
+  pre_tasks:
+    - name: Require an explicit activation and exact immutable candidate identity
+      ansible.builtin.assert:
+        that:
+          - edge_activation_acknowledgement == 'ACTIVATE_SIGNED_EDGE_CANDIDATE'
+          - edge_activation_sequence is number
+          - edge_activation_sequence | int >= 1
+          - edge_activation_sequence | int <= 9007199254740991
+          - edge_activation_manifest_digest is match('^sha256:[0-9a-f]{64}$')
+          - edge_signed_envelope_sha256 is match('^[0-9a-f]{64}$')
+          - edge_signed_envelope_src is match('^/')
+          - edge_activation_local_evidence_dir is match('^/')
+          - edge_signed_envelope_src == inventory_dir ~ '/generated/envelopes/' ~ inventory_hostname ~ '.json'
+          - edge_activation_local_evidence_dir == inventory_dir ~ '/generated/activation-evidence'
+          - edge_runtime_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING']
+        fail_msg: >-
+          Refusing activation without the exact signed candidate identity,
+          protected local envelope digest, and explicit activation acknowledgement.
+
+    - name: Require the fixed synthetic activation boundary
+      ansible.builtin.assert:
+        that:
+          - edge_generation | int == 1
+          - edge_synthetic_teams_source_ipv4_cidrs == []
+          - edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32']
+        fail_msg: SYNTHETIC_PRIVATE activation must retain the fixed generation-1 CP1 fixture boundary.
+      when: edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+
+    - name: Require an explicit Direct Routing replacement activation
+      ansible.builtin.assert:
+        that:
+          - edge_generation | int >= 2
+          - edge_synthetic_teams_source_ipv4_cidrs == []
+          - edge_direct_activation_acknowledgement == 'ACTIVATE_DIRECT_ROUTING_REPLACEMENT_GENERATION'
+        fail_msg: >-
+          DIRECT_ROUTING activation requires an explicitly acknowledged
+          replacement/new-generation node; an active synthetic generation is
+          never rewritten in place.
+      when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+    - name: Validate canonical globally routable Direct Routing PBX source CIDRs
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - |
+            import ipaddress, json, sys
+            values = json.loads(sys.argv[1])
+            assert isinstance(values, list) and 1 <= len(values) <= 8
+            networks = [ipaddress.ip_network(value, strict=True) for value in values]
+            assert all(isinstance(network, ipaddress.IPv4Network) for network in networks)
+            assert all(str(network) == value for network, value in zip(networks, values))
+            assert all(network.prefixlen >= 24 and network.network_address.is_global and network.broadcast_address.is_global for network in networks)
+            assert len(set(values)) == len(values)
+            assert values == sorted(values, key=lambda value: (int(ipaddress.ip_network(value).network_address), ipaddress.ip_network(value).prefixlen))
+          - "{{ edge_pbx_source_ipv4_cidrs | to_json }}"
+      changed_when: false
+      when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+    - name: Read the installed root authority and compiler node facts
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ edge_runtime_authority_file }}"
+        - "{{ edge_runtime_node_facts_for_compiler }}"
+      register: edge_activation_installed_authority
+
+    - name: Bind activation inputs to the installed immutable profile generation
+      ansible.builtin.assert:
+        that:
+          - (edge_activation_installed_authority.results[0].content | b64decode | from_json).profile == edge_runtime_profile
+          - (edge_activation_installed_authority.results[0].content | b64decode | from_json).generation | int == edge_generation | int
+          - (edge_activation_installed_authority.results[0].content | b64decode | from_json).nodeId == inventory_hostname
+          - (edge_activation_installed_authority.results[0].content | b64decode | from_json).slot == edge_slot
+          - (edge_activation_installed_authority.results[1].content | b64decode | from_json).generation | int == edge_generation | int
+          - (edge_activation_installed_authority.results[1].content | b64decode | from_json).nodeId == inventory_hostname
+          - (edge_activation_installed_authority.results[1].content | b64decode | from_json).authorizedPbxSourceIpv4Cidrs == edge_pbx_source_ipv4_cidrs
+          - (edge_activation_installed_authority.results[1].content | b64decode | from_json).pbxMediaDestinationPortStart | int == edge_pbx_media_destination_port_start | int
+          - (edge_activation_installed_authority.results[1].content | b64decode | from_json).pbxMediaDestinationPortEnd | int == edge_pbx_media_destination_port_end | int
+        fail_msg: >-
+          Activation inventory differs from the installed immutable runtime
+          authority or node facts.
+
+    - name: Require Direct Routing authority to contain no synthetic fixture digest
+      ansible.builtin.assert:
+        that:
+          - >-
+            ((edge_activation_installed_authority.results[0].content | b64decode | from_json).secretDigests.keys() | list | sort) ==
+            ['edgeCertificateChainPem', 'edgePrivateKeyPem', 'microsoftCaBundlePem', 'pbxCaBundlePem', 'publicCaBundlePem']
+        fail_msg: Direct Routing authority contains a synthetic or unexpected secret digest.
+      when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+    - name: Define the canonical candidate slug and fixed remote paths
+      ansible.builtin.set_fact:
+        edge_activation_candidate_slug: >-
+          {{ '%016d' | format(edge_activation_sequence | int) }}-{{ edge_activation_manifest_digest | regex_replace('^sha256:', '') }}
+        edge_activation_work_dir: >-
+          /var/lib/vivolution-edge/agent-work/{{ '%016d' | format(edge_activation_sequence | int) }}-{{ edge_activation_manifest_digest | regex_replace('^sha256:', '') }}
+        edge_activation_inbox_dir: >-
+          /var/lib/vivolution-edge/runtime-inbox/{{ '%016d' | format(edge_activation_sequence | int) }}-{{ edge_activation_manifest_digest | regex_replace('^sha256:', '') }}
+        edge_activation_remote_evidence_dir: >-
+          /var/lib/vivolution-edge/activation-evidence/{{ '%016d' | format(edge_activation_sequence | int) }}-{{ edge_activation_manifest_digest | regex_replace('^sha256:', '') }}
+        edge_activation_local_host_evidence_dir: >-
+          {{ edge_activation_local_evidence_dir }}/{{ inventory_hostname }}/{{ '%016d' | format(edge_activation_sequence | int) }}-{{ edge_activation_manifest_digest | regex_replace('^sha256:', '') }}
+
+    - name: Inspect the protected signed envelope on the controller
+      ansible.builtin.stat:
+        path: "{{ edge_signed_envelope_src }}"
+        follow: false
+        get_checksum: true
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      register: edge_activation_envelope_source
+
+    - name: Require the exact bounded single-link envelope bytes
+      ansible.builtin.assert:
+        that:
+          - edge_activation_envelope_source.stat.exists
+          - edge_activation_envelope_source.stat.isreg | default(false)
+          - not (edge_activation_envelope_source.stat.islnk | default(false))
+          - edge_activation_envelope_source.stat.nlink | int == 1
+          - edge_activation_envelope_source.stat.size | int > 0
+          - edge_activation_envelope_source.stat.size | int <= 4194304
+          - edge_activation_envelope_source.stat.checksum == edge_signed_envelope_sha256
+        fail_msg: The signed envelope is missing, linked, oversized, or differs from its pinned transfer digest.
+
+    - name: Read the immutable installed signing public key
+      ansible.builtin.slurp:
+        src: "{{ edge_runtime_pinned_key_file }}"
+      register: edge_activation_installed_key
+
+    - name: Require inventory key inputs to equal the installed public pin
+      ansible.builtin.assert:
+        that:
+          - ((edge_activation_installed_key.content | b64decode | from_json).keys() | sort) == ['keyId', 'publicKeyBase64']
+          - (edge_activation_installed_key.content | b64decode | from_json).keyId == edge_signing_key_id
+          - (edge_activation_installed_key.content | b64decode | from_json).publicKeyBase64 == edge_signing_public_key_base64
+        fail_msg: Activation signing-key input differs from the root-installed public pin.
+
+    - name: Refuse to merge with an existing candidate workspace or root inbox
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ edge_activation_work_dir }}"
+        - "{{ edge_activation_inbox_dir }}"
+      register: edge_activation_existing_paths
+
+    - name: Require a brand-new immutable candidate handoff
+      ansible.builtin.assert:
+        that:
+          - not (edge_activation_existing_paths.results[0].stat.exists | default(false))
+          - not (edge_activation_existing_paths.results[0].stat.islnk | default(false))
+          - not (edge_activation_existing_paths.results[1].stat.exists | default(false))
+          - not (edge_activation_existing_paths.results[1].stat.islnk | default(false))
+        fail_msg: >-
+          This exact workspace or root inbox already exists. Refusing to merge,
+          overwrite, or replay it; inspect protected state before retrying.
+
+    - name: Create protected remote and local evidence directories
+      block:
+        - name: Create the root-only remote evidence directory
+          ansible.builtin.file:
+            path: "{{ edge_activation_remote_evidence_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: '0700'
+
+        - name: Create the controller evidence directory
+          ansible.builtin.file:
+            path: "{{ edge_activation_local_host_evidence_dir }}"
+            state: directory
+            mode: '0700'
+          delegate_to: localhost
+          become: false
+
+    - name: Create the isolated unprivileged candidate workspace
+      ansible.builtin.file:
+        path: "{{ edge_activation_work_dir }}"
+        state: directory
+        owner: vivolution-edge-agent
+        group: vivolution-edge-agent
+        mode: '0700'
+
+    - name: Securely stage the exact signed envelope for the unprivileged verifier
+      ansible.builtin.copy:
+        src: "{{ edge_signed_envelope_src }}"
+        dest: "{{ edge_activation_work_dir }}/signed-envelope.json"
+        owner: vivolution-edge-agent
+        group: vivolution-edge-agent
+        mode: '0400'
+        force: false
+
+    - name: Build the exact tenant-local Agent context arguments
+      ansible.builtin.set_fact:
+        edge_activation_agent_context_argv:
+          - --state-dir
+          - "{{ edge_agent_tenant_state_dir }}"
+          - --scope
+          - TENANT
+          - --cluster-id
+          - "{{ edge_cluster_id }}"
+          - --node-id
+          - "{{ inventory_hostname }}"
+          - --generation
+          - "{{ edge_generation | string }}"
+          - --slot
+          - "{{ edge_slot }}"
+          - --customer-account-id
+          - "{{ edge_customer_account_id }}"
+          - --m365-tenant-id
+          - "{{ edge_m365_tenant_id }}"
+          - --tenant-context-id
+          - "{{ edge_tenant_context_id }}"
+          - --service-instance-id
+          - "{{ edge_service_instance_id }}"
+          - --allocation-id
+          - "{{ edge_allocation_id }}"
+          - --tenant-listener-port
+          - '15061'
+          - --tenant-media-port-start
+          - '20000'
+          - --tenant-media-port-end
+          - '20255'
+          - --pbx-media-destination-port-start
+          - "{{ edge_pbx_media_destination_port_start | string }}"
+          - --pbx-media-destination-port-end
+          - "{{ edge_pbx_media_destination_port_end | string }}"
+          - --cluster-media-port-start
+          - '20000'
+          - --cluster-media-port-end
+          - '29999'
+          - --expected-advertised-public-ip
+          - "{{ edge_public_ipv4 }}"
+
+    - name: Add every exact PBX source authority to the Agent context
+      ansible.builtin.set_fact:
+        edge_activation_agent_context_argv: >-
+          {{ edge_activation_agent_context_argv + ['--authorized-pbx-source-cidr', item] }}
+      loop: "{{ edge_pbx_source_ipv4_cidrs }}"
+
+  tasks:
+    - name: Cryptographically verify and stage metadata as the unprivileged Agent
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/local/bin/vivolution-edge-agent', 'verify-and-stage',
+              edge_activation_work_dir ~ '/signed-envelope.json'] +
+             edge_activation_agent_context_argv +
+             ['--pinned-key', edge_signing_key_id ~ '=' ~ edge_signing_public_key_base64] }}
+      become_user: vivolution-edge-agent
+      register: edge_verifier_stage
+      changed_when: true
+
+    - name: Parse and require the canonical verifier receipt identity
+      ansible.builtin.set_fact:
+        edge_verifier_receipt: "{{ edge_verifier_stage.stdout | from_json }}"
+
+    - name: Require the real verifier to stage only the exact candidate
+      ansible.builtin.assert:
+        that:
+          - (edge_verifier_receipt.keys() | list | sort) == ['localHealthGatePlanDigest', 'manifestDigest', 'manifestId', 'sequence', 'status', 'verifiedKeyIds']
+          - edge_verifier_receipt.status == 'VERIFIED_AND_STAGED_METADATA_ONLY'
+          - edge_verifier_receipt.sequence | int == edge_activation_sequence | int
+          - edge_verifier_receipt.manifestDigest == edge_activation_manifest_digest
+          - edge_verifier_receipt.localHealthGatePlanDigest is match('^sha256:[0-9a-f]{64}$')
+          - edge_verifier_receipt.verifiedKeyIds == [edge_signing_key_id]
+        fail_msg: The verifier receipt does not bind the exact signed candidate and installed public key.
+
+    - name: Persist the exact canonical verifier receipt for compilation
+      ansible.builtin.copy:
+        content: "{{ edge_verifier_stage.stdout | trim }}\n"
+        dest: "{{ edge_activation_work_dir }}/verifier-receipt.json"
+        owner: vivolution-edge-agent
+        group: vivolution-edge-agent
+        mode: '0600'
+
+    - name: Preserve non-secret verifier evidence remotely
+      ansible.builtin.copy:
+        content: "{{ edge_verifier_stage.stdout | trim }}\n"
+        dest: "{{ edge_activation_remote_evidence_dir }}/verifier-receipt.json"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Preserve non-secret verifier evidence on the controller
+      ansible.builtin.copy:
+        content: "{{ edge_verifier_stage.stdout | trim }}\n"
+        dest: "{{ edge_activation_local_host_evidence_dir }}/verifier-receipt.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+
+    - name: Compile verifier-approved artifacts into a brand-new directory as the Agent
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/vivolution-edge-compiler
+          - "{{ edge_activation_work_dir }}/signed-envelope.json"
+          - "{{ edge_runtime_node_facts_for_compiler }}"
+          - "{{ edge_activation_work_dir }}/verifier-receipt.json"
+          - "{{ edge_activation_work_dir }}/compiled"
+      become_user: vivolution-edge-agent
+      register: edge_compiler_result
+      changed_when: true
+
+    - name: Parse the canonical compiler evidence
+      ansible.builtin.set_fact:
+        edge_compile_evidence: "{{ edge_compiler_result.stdout | from_json }}"
+
+    - name: Require compiler evidence to preserve the exact signed local health plan
+      ansible.builtin.assert:
+        that:
+          - >-
+            (edge_compile_evidence.keys() | list | sort) ==
+            ['apiVersion', 'artifactDigests', 'factsDigest', 'kind',
+             'localHealthGatePlan', 'localHealthGatePlanDigest',
+             'manifestDigest', 'manifestId', 'nodeId',
+             'pbxMediaDestinationPortRange', 'readiness', 'sequence']
+          - edge_compile_evidence.apiVersion == 'edge.vivolution.ae/compiler/v0.1'
+          - edge_compile_evidence.kind == 'TenantCompileEvidence'
+          - edge_compile_evidence.sequence | int == edge_activation_sequence | int
+          - edge_compile_evidence.manifestDigest == edge_activation_manifest_digest
+          - edge_compile_evidence.nodeId == inventory_hostname
+          - edge_compile_evidence.localHealthGatePlanDigest == edge_verifier_receipt.localHealthGatePlanDigest
+          - edge_compile_evidence.localHealthGatePlan.apiVersion == 'edge.vivolution.ae/local-health-plan/v0.1'
+          - edge_compile_evidence.localHealthGatePlan.kind == 'TenantLocalHealthGatePlan'
+          - edge_compile_evidence.localHealthGatePlan.manifestDigest == edge_activation_manifest_digest
+          - edge_compile_evidence.localHealthGatePlan.healthGates | length == 3
+          - edge_compile_evidence.localHealthGatePlan.healthGates | map(attribute='type') | list == ['ARTIFACT_DIGESTS', 'OPENSIPS_CONFIG', 'RTPENGINE_READY']
+          - edge_compile_evidence.readiness.liveTeamsInteroperability == 'NOT_ASSERTED'
+          - not (edge_compile_evidence.readiness.runtimeApplied | bool)
+        fail_msg: The compiler evidence does not preserve the exact verifier-bound signed local health plan.
+
+    - name: Inspect the complete unprivileged compiler output without following links
+      ansible.builtin.find:
+        paths: "{{ edge_activation_work_dir }}/compiled"
+        recurse: false
+        hidden: true
+        file_type: any
+        follow: false
+      register: edge_compiler_output_inventory
+
+    - name: Require exactly four single-link Agent-owned compiler files
+      ansible.builtin.assert:
+        that:
+          - >-
+            (edge_compiler_output_inventory.files | map(attribute='path') |
+             map('basename') | sort | list) ==
+            ['compile-evidence.json', 'nftables-tenant-policy.json',
+             'opensips-tenant.cfg', 'rtpengine-tenant.conf']
+          - edge_compiler_output_inventory.files | length == 4
+          - edge_compiler_output_inventory.files | selectattr('isreg', 'equalto', true) | list | length == 4
+          - edge_compiler_output_inventory.files | selectattr('nlink', 'equalto', 1) | list | length == 4
+          - edge_compiler_output_inventory.files | selectattr('mode', 'equalto', '0600') | list | length == 4
+          - edge_compiler_output_inventory.files | selectattr('pw_name', 'equalto', 'vivolution-edge-agent') | list | length == 4
+        fail_msg: The compiler output differs from its exact four-file unprivileged contract.
+
+    - name: Define the only six files allowed across the root handoff boundary
+      ansible.builtin.set_fact:
+        edge_activation_handoff_files:
+          - name: compile-evidence.json
+            src: "{{ edge_activation_work_dir }}/compiled/compile-evidence.json"
+          - name: nftables-tenant-policy.json
+            src: "{{ edge_activation_work_dir }}/compiled/nftables-tenant-policy.json"
+          - name: opensips-tenant.cfg
+            src: "{{ edge_activation_work_dir }}/compiled/opensips-tenant.cfg"
+          - name: rtpengine-tenant.conf
+            src: "{{ edge_activation_work_dir }}/compiled/rtpengine-tenant.conf"
+          - name: signed-envelope.json
+            src: "{{ edge_activation_work_dir }}/signed-envelope.json"
+          - name: verifier-receipt.json
+            src: "{{ edge_activation_work_dir }}/verifier-receipt.json"
+
+    - name: Create the canonical root-owned runtime inbox candidate
+      ansible.builtin.file:
+        path: "{{ edge_activation_inbox_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Root-copy exactly the six reviewed handoff files
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ edge_activation_inbox_dir }}/{{ item.name }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0600'
+        force: false
+      loop: "{{ edge_activation_handoff_files }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Inspect the canonical root inbox without following links
+      ansible.builtin.find:
+        paths: "{{ edge_activation_inbox_dir }}"
+        recurse: false
+        hidden: true
+        file_type: any
+        follow: false
+      register: edge_activation_root_inbox_inventory
+
+    - name: Require exactly six root-owned single-link mode-0600 inbox files
+      ansible.builtin.assert:
+        that:
+          - >-
+            (edge_activation_root_inbox_inventory.files | map(attribute='path') |
+             map('basename') | sort | list) ==
+            ['compile-evidence.json', 'nftables-tenant-policy.json',
+             'opensips-tenant.cfg', 'rtpengine-tenant.conf',
+             'signed-envelope.json', 'verifier-receipt.json']
+          - edge_activation_root_inbox_inventory.files | length == 6
+          - edge_activation_root_inbox_inventory.files | selectattr('isreg', 'equalto', true) | list | length == 6
+          - edge_activation_root_inbox_inventory.files | selectattr('nlink', 'equalto', 1) | list | length == 6
+          - edge_activation_root_inbox_inventory.files | selectattr('mode', 'equalto', '0600') | list | length == 6
+          - edge_activation_root_inbox_inventory.files | selectattr('pw_name', 'equalto', 'root') | list | length == 6
+        fail_msg: The privileged inbox differs from its exact six-file root-owned contract.
+
+    - name: Preserve the non-secret compiler evidence remotely
+      ansible.builtin.copy:
+        src: "{{ edge_activation_work_dir }}/compiled/compile-evidence.json"
+        dest: "{{ edge_activation_remote_evidence_dir }}/compile-evidence.json"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Preserve the non-secret compiler evidence on the controller
+      ansible.builtin.fetch:
+        src: "{{ edge_activation_work_dir }}/compiled/compile-evidence.json"
+        dest: "{{ edge_activation_local_host_evidence_dir }}/compile-evidence.json"
+        flat: true
+      become: true
+
+    - name: Invoke the fixed-path root runtime with identity arguments only
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/vivolution-edge-runtime
+          - activate
+          - --sequence
+          - "{{ edge_activation_sequence | string }}"
+          - --manifest-digest
+          - "{{ edge_activation_manifest_digest }}"
+      register: edge_runtime_activation
+      changed_when: edge_runtime_activation.rc == 0
+      failed_when: false
+
+    - name: Preserve the root helper output remotely before parsing it
+      ansible.builtin.copy:
+        content: "{{ edge_runtime_activation.stdout | trim }}\n"
+        dest: "{{ edge_activation_remote_evidence_dir }}/runtime-evidence.json"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Preserve the root helper output on the controller before parsing it
+      ansible.builtin.copy:
+        content: "{{ edge_runtime_activation.stdout | trim }}\n"
+        dest: "{{ edge_activation_local_host_evidence_dir }}/runtime-evidence.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+
+    - name: Parse the canonical runtime evidence
+      ansible.builtin.set_fact:
+        edge_runtime_evidence: "{{ edge_runtime_activation.stdout | from_json }}"
+
+    - name: Classify only exact healthy apply or exact healthy rollback evidence
+      ansible.builtin.set_fact:
+        edge_runtime_apply_healthy: >-
+          {{ edge_runtime_activation.rc == 0 and
+             edge_runtime_evidence.get('status', '') == 'RUNTIME_APPLIED_HEALTHY' and
+             edge_runtime_evidence.get('agentAction', '') == 'COMMIT_PENDING' and
+             edge_runtime_evidence.get('runtimeApplied', false) == true and
+             edge_runtime_evidence.get('rollback', {}).get('performed', true) == false and
+             edge_runtime_evidence.get('rollback', {}).get('status', '') == 'NOT_REQUIRED' }}
+        edge_runtime_safe_abort: >-
+          {{ edge_runtime_activation.rc == 1 and
+             edge_runtime_evidence.get('agentAction', '') == 'ABORT_PENDING' and
+             edge_runtime_evidence.get('runtimeApplied', true) == false and
+             ((edge_runtime_evidence.get('status', '') == 'RUNTIME_PREFLIGHT_FAILED_NO_LIVE_CHANGE' and
+               edge_runtime_evidence.get('rollback', {}).get('performed', true) == false and
+               edge_runtime_evidence.get('rollback', {}).get('status', '') == 'NOT_REQUIRED') or
+              (edge_runtime_evidence.get('status', '') == 'RUNTIME_APPLY_FAILED_ROLLED_BACK' and
+               edge_runtime_evidence.get('rollback', {}).get('performed', false) == true and
+               edge_runtime_evidence.get('rollback', {}).get('status', '') == 'HEALTHY')) }}
+
+    - name: Fail closed on every other root-helper result or identity
+      ansible.builtin.assert:
+        that:
+          - edge_runtime_apply_healthy | bool or edge_runtime_safe_abort | bool
+          - edge_runtime_evidence.get('apiVersion', '') == 'edge.vivolution.ae/runtime/v0.1'
+          - edge_runtime_evidence.get('kind', '') == 'EdgeRuntimeApplyEvidence'
+          - edge_runtime_evidence.get('sequence', 0) | int == edge_activation_sequence | int
+          - edge_runtime_evidence.get('manifestDigest', '') == edge_activation_manifest_digest
+          - edge_runtime_evidence.get('nodeId', '') == inventory_hostname
+          - edge_runtime_evidence.get('evidenceDigest', '') is match('^sha256:[0-9a-f]{64}$')
+          - edge_runtime_evidence.get('liveTeamsInteroperability', '') == 'NOT_ASSERTED'
+          - edge_runtime_evidence.get('runtimeProfile', '') == edge_runtime_profile
+          - edge_runtime_evidence.get('rtpAdvertisedIpv4', '') == (edge_private_ipv4 if edge_runtime_profile == 'SYNTHETIC_PRIVATE' else edge_public_ipv4)
+          - >-
+            edge_runtime_evidence.get('runtimeReleaseDigest') is none or
+            edge_runtime_evidence.get('runtimeReleaseDigest', '') is match('^sha256:[0-9a-f]{64}$')
+          - >-
+            (not (edge_runtime_apply_healthy | bool) and
+             edge_runtime_evidence.get('status', '') != 'RUNTIME_APPLY_FAILED_ROLLED_BACK') or
+            edge_runtime_evidence.get('runtimeReleaseDigest', '') is match('^sha256:[0-9a-f]{64}$')
+          - edge_runtime_evidence.get('healthGates', []) | length == (3 if edge_runtime_apply_healthy | bool else 0)
+          - edge_runtime_evidence.get('healthGates', []) | rejectattr('status', 'equalto', 'PASSED') | list | length == 0
+          - edge_runtime_evidence.get('runtimeChecks', []) | rejectattr('status', 'equalto', 'PASSED') | list | length == 0
+          - edge_runtime_evidence.get('localHealthGatePlanDigest', edge_compile_evidence.localHealthGatePlanDigest) == edge_compile_evidence.localHealthGatePlanDigest
+          - edge_runtime_evidence.get('localHealthGatePlan', edge_compile_evidence.localHealthGatePlan) == edge_compile_evidence.localHealthGatePlan
+          - >-
+            not (edge_runtime_apply_healthy | bool) or
+            (edge_runtime_evidence.keys() | list | sort) ==
+            ['agentAction', 'apiVersion', 'evidenceDigest', 'healthGates',
+             'kind', 'liveTeamsInteroperability', 'localHealthGatePlan',
+             'localHealthGatePlanDigest', 'manifestDigest', 'nodeId',
+             'rollback', 'rtpAdvertisedIpv4', 'runtimeApplied',
+             'runtimeChecks', 'runtimeProfile', 'runtimeReleaseDigest',
+             'sequence', 'status', 'timestamp']
+          - >-
+            not (edge_runtime_safe_abort | bool) or
+            (edge_runtime_evidence.keys() | list | sort) ==
+            ['agentAction', 'apiVersion', 'evidenceDigest', 'failure',
+             'healthGates', 'kind', 'liveTeamsInteroperability',
+             'manifestDigest', 'nodeId', 'rollback', 'rtpAdvertisedIpv4',
+             'runtimeApplied', 'runtimeChecks', 'runtimeProfile',
+             'runtimeReleaseDigest', 'sequence', 'status', 'timestamp']
+        fail_msg: >-
+          Runtime evidence is neither an exact healthy activation/COMMIT_PENDING
+          nor an exact no-live-change/healthy-rollback ABORT_PENDING. Pending Agent state is
+          intentionally preserved for operator recovery.
+
+    - name: Commit the exact pending Agent candidate only after healthy runtime evidence
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/local/bin/vivolution-edge-agent', 'commit-pending'] +
+             edge_activation_agent_context_argv +
+             ['--sequence', edge_activation_sequence | string,
+              '--manifest-digest', edge_activation_manifest_digest,
+              '--runtime-evidence-digest', edge_runtime_evidence.evidenceDigest] }}
+      become_user: vivolution-edge-agent
+      register: edge_agent_reconcile
+      changed_when: true
+      retries: 3
+      delay: 2
+      until: edge_agent_reconcile.rc == 0
+      when: edge_runtime_apply_healthy | bool
+
+    - name: Abort the exact pending Agent candidate after verified safe no-change or rollback
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/local/bin/vivolution-edge-agent', 'abort-pending'] +
+             edge_activation_agent_context_argv +
+             ['--sequence', edge_activation_sequence | string,
+              '--manifest-digest', edge_activation_manifest_digest] }}
+      become_user: vivolution-edge-agent
+      register: edge_agent_reconcile
+      changed_when: true
+      retries: 3
+      delay: 2
+      until: edge_agent_reconcile.rc == 0
+      when: edge_runtime_safe_abort | bool
+
+    - name: Parse the Agent reconciliation evidence
+      ansible.builtin.set_fact:
+        edge_agent_reconcile_evidence: "{{ edge_agent_reconcile.stdout | from_json }}"
+
+    - name: Require the exact commit or abort result
+      ansible.builtin.assert:
+        that:
+          - >-
+            (edge_runtime_apply_healthy | bool and
+             (edge_agent_reconcile_evidence.keys() | list | sort) ==
+             ['activeManifestDigest', 'activeSequence', 'healthGates',
+              'localHealthGatePlanDigest', 'runtimeEvidenceDigest',
+              'runtimeReleaseDigest', 'status'] and
+             edge_agent_reconcile_evidence.status == 'PENDING_COMMITTED_AFTER_SIGNED_LOCAL_HEALTH' and
+             edge_agent_reconcile_evidence.activeSequence | int == edge_activation_sequence | int and
+             edge_agent_reconcile_evidence.activeManifestDigest == edge_activation_manifest_digest and
+             edge_agent_reconcile_evidence.runtimeEvidenceDigest == edge_runtime_evidence.evidenceDigest and
+             edge_agent_reconcile_evidence.runtimeReleaseDigest == edge_runtime_evidence.runtimeReleaseDigest and
+             edge_agent_reconcile_evidence.localHealthGatePlanDigest == edge_runtime_evidence.localHealthGatePlanDigest and
+             edge_agent_reconcile_evidence.healthGates == edge_runtime_evidence.healthGates) or
+            (edge_runtime_safe_abort | bool and
+             edge_agent_reconcile_evidence.status == 'PENDING_ABORTED_ACTIVE_LKG_PRESERVED' and
+             edge_agent_reconcile_evidence.abortedSequence | int == edge_activation_sequence | int and
+             edge_agent_reconcile_evidence.abortedManifestDigest == edge_activation_manifest_digest)
+        fail_msg: Agent reconciliation did not commit or abort the exact runtime candidate.
+
+    - name: Preserve Agent reconciliation evidence remotely
+      ansible.builtin.copy:
+        content: "{{ edge_agent_reconcile.stdout | trim }}\n"
+        dest: "{{ edge_activation_remote_evidence_dir }}/agent-reconciliation.json"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Preserve Agent reconciliation evidence on the controller
+      ansible.builtin.copy:
+        content: "{{ edge_agent_reconcile.stdout | trim }}\n"
+        dest: "{{ edge_activation_local_host_evidence_dir }}/agent-reconciliation.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+
+    - name: Report a safely rejected activation as failed after aborting pending metadata
+      ansible.builtin.fail:
+        msg: >-
+          Candidate activation failed without an unsafe live state, and
+          the exact pending Agent candidate was aborted. Review preserved evidence.
+      when: edge_runtime_safe_abort | bool
+
+    - name: Confirm the exact candidate is active and committed
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} activated and committed sequence
+          {{ edge_activation_sequence }} ({{ edge_activation_manifest_digest }}).
