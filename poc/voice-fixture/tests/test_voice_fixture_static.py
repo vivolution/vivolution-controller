@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import re
+import subprocess
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -13,6 +14,22 @@ ROOT = Path(__file__).resolve().parents[1]
 class VoiceFixtureStaticTests(unittest.TestCase):
     def read(self, relative: str) -> str:
         return (ROOT / relative).read_text(encoding="utf-8")
+
+    def run_systemd_policy_helper(
+        self, call: str, *arguments: str
+    ) -> subprocess.CompletedProcess[str]:
+        readiness = self.read(
+            "roles/voice_fixture/templates/vivolution-voice-fixture-readiness.j2"
+        )
+        helpers = readiness.split("# BEGIN SYSTEMD POLICY HELPERS\n", 1)[1].split(
+            "# END SYSTEMD POLICY HELPERS\n", 1
+        )[0]
+        return subprocess.run(
+            ["bash", "-c", f"set -euo pipefail\n{helpers}\n{call}", "policy-test", *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
 
     def test_all_expected_artifacts_exist(self) -> None:
         required = [
@@ -97,12 +114,19 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         tmpfiles = self.read(
             "roles/voice_fixture/templates/vivolution-voice-fixture-tmpfiles.conf.j2"
         )
+        asterisk_quadlet = self.read(
+            "roles/voice_fixture/templates/"
+            "vivolution-voice-fixture-asterisk.container.j2"
+        )
+        test_driver = self.read(
+            "roles/voice_fixture/templates/vivolution-voice-fixture-test.j2"
+        )
         readiness = self.read(
             "roles/voice_fixture/templates/vivolution-voice-fixture-readiness.j2"
         )
         teardown = self.read("roles/voice_fixture_teardown/tasks/main.yml")
         self.assertIn("voice_fixture_runtime_root: /run/vivolution-voice-fixture", defaults)
-        self.assertEqual(tasks.count("owner: '10001'"), 5)
+        self.assertEqual(tasks.count("owner: '10001'"), 6)
         self.assertIn(
             "voice_fixture_runtime_root == '/run/vivolution-voice-fixture'",
             tasks,
@@ -115,12 +139,43 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertIn("10001 10001", tmpfiles)
         self.assertIn("stat --format='%u:%g:%a'", readiness)
         self.assertIn("'10001:10001:700'", readiness)
+        self.assertIn("asterisk-log/cdr-custom", tasks)
+        self.assertIn("asterisk-log/cdr-custom", readiness)
+        self.assertIn("'10001:10001:750'", readiness)
+        self.assertIn("Inspect the fixture CDR path without following links", tasks)
+        self.assertIn("Reject non-directory or symlinked fixture CDR paths", tasks)
+        self.assertIn("follow: false", tasks)
+        self.assertIn("(not item.stat.exists) or", tasks)
+        self.assertIn("not (item.stat.islnk | default(false))", tasks)
+        self.assertIn("! -L $asterisk_log_directory", readiness)
+        self.assertIn("! -L $asterisk_cdr_directory", readiness)
+        self.assertIn(
+            "Volume={{ voice_fixture_state_root }}/asterisk-log:"
+            "/var/log/asterisk:rw",
+            asterisk_quadlet,
+        )
+        self.assertIn(
+            'cdr_file="$state_root/asterisk-log/cdr-custom/'
+            'VivolutionFixture.csv"',
+            test_driver,
+        )
+        self.assertLess(
+            tasks.index("Inspect the fixture CDR path without following links"),
+            tasks.index("Create fixture directories"),
+        )
+        self.assertLess(
+            tasks.index("Create fixture directories"),
+            tasks.index("Install the isolated fixture Quadlets"),
+        )
         for option in ("nosuid", "nodev", "noexec"):
             self.assertIn(option, readiness)
         self.assertIn("/etc/tmpfiles.d/vivolution-voice-fixture.conf", teardown)
         self.assertIn('"{{ voice_fixture_runtime_root }}"', teardown)
 
     def test_asterisk_has_no_carrier_registration_or_command_execution(self) -> None:
+        modules = self.read(
+            "roles/voice_fixture/templates/modules.conf.j2"
+        ).lower()
         configs = "\n".join(
             path.read_text(encoding="utf-8")
             for path in (ROOT / "roles/voice_fixture/templates").glob("*.conf.j2")
@@ -128,8 +183,10 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertNotRegex(configs, r"(?m)^\s*register\s*=>")
         self.assertNotIn("system(", configs)
         self.assertNotIn("shell(", configs)
-        self.assertIn("noload=app_system.so", configs)
-        self.assertIn("noload=func_shell.so", configs)
+        self.assertIn("autoload=no", modules)
+        self.assertNotRegex(
+            modules, r"(?m)^require=(?:app_system|func_shell)\.so$"
+        )
         self.assertIn("+9710000001001", configs)
         self.assertIn("exten => +9710000001001,1,noop", configs)
         self.assertIn("exten => 911,1,hangup(21)", configs)
@@ -140,13 +197,17 @@ class VoiceFixtureStaticTests(unittest.TestCase):
 
     def test_asterisk_stasis_documentation_is_immutable_and_verified(self) -> None:
         defaults = self.read("roles/voice_fixture/defaults/main.yml")
+        teardown_defaults = self.read(
+            "roles/voice_fixture_teardown/defaults/main.yml"
+        )
         containerfile = self.read("roles/voice_fixture/files/asterisk/Containerfile")
         config = self.read("roles/voice_fixture/templates/asterisk.conf.j2")
         tasks = self.read("roles/voice_fixture/tasks/main.yml")
-        self.assertIn(
-            "voice-fixture-asterisk:22.10.1-xmldoc1",
-            defaults,
+        image_tag = (
+            "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind1"
         )
+        self.assertIn(image_tag, defaults)
+        self.assertIn(image_tag, teardown_defaults)
         self.assertIn(
             "/out/var/lib/asterisk/documentation/core-en_US.xml",
             containerfile,
@@ -279,10 +340,180 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertIn("-verify_ip", readiness)
         self.assertIn("-verify_return_error", readiness)
         self.assertIn("Verification: OK", readiness)
-        self.assertIn("SocketBindDeny --value) == any", readiness)
+        self.assertIn("socket_bind_deny == any", readiness)
         self.assertIn("accepted a TLS client without its fixture certificate", readiness)
         self.assertIn("nft list ruleset", readiness)
-        self.assertIn("IPAddressDeny=any", readiness)
+        self.assertIn("'::/0' '0.0.0.0/0'", readiness)
+        self.assertIn("normalize_socket_bind", readiness)
+        self.assertIn("require_exact_word_set", readiness)
+        self.assertNotIn("grep -Fq 'IPAddressDeny=any'", readiness)
+
+    def test_readiness_accepts_only_equivalent_systemd_policy_renderings(self) -> None:
+        socket_renderings = {
+            "ipv4:tcp:16061": "ipv4:tcp:16061",
+            "ipv4:tcp16061": "ipv4:tcp:16061",
+            "ipv4:tcp:16061-16061": "ipv4:tcp:16061",
+            "ipv4:udp:21000-21127": "ipv4:udp:21000-21127",
+            "ipv4:udp21000-21127": "ipv4:udp:21000-21127",
+        }
+        for rendered, canonical in socket_renderings.items():
+            with self.subTest(rendered=rendered):
+                result = self.run_systemd_policy_helper(
+                    'normalize_socket_bind "$1"', rendered
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), canonical)
+
+        for rejected in (
+            "any",
+            "ipv6:tcp16061",
+            "ipv4:sctp16061",
+            "ipv4:tcp0",
+            "ipv4:tcp65536",
+            "ipv4:udp21127-21000",
+            "ipv4:tcp16061:extra",
+        ):
+            with self.subTest(rejected=rejected):
+                result = self.run_systemd_policy_helper(
+                    'normalize_socket_bind "$1"', rejected
+                )
+                self.assertNotEqual(result.returncode, 0)
+
+        scalar_call = 'require_scalar_property_value fixture "$1"'
+        scalar_result = self.run_systemd_policy_helper(scalar_call, "AF_INET")
+        self.assertEqual(scalar_result.returncode, 0, scalar_result.stderr)
+        for rejected_scalar in ("", "AF_INET\nAF_UNIX", "AF_INET\rAF_UNIX"):
+            with self.subTest(rejected_scalar=rejected_scalar):
+                scalar_result = self.run_systemd_policy_helper(
+                    scalar_call, rejected_scalar
+                )
+                self.assertNotEqual(scalar_result.returncode, 0)
+
+        scalar_reader_call = """
+rendered=$1
+systemctl() { printf '%s' "$rendered"; }
+read_systemd_property fixture.service RestrictAddressFamilies
+"""
+        scalar_reader_result = self.run_systemd_policy_helper(
+            scalar_reader_call, "AF_INET\n"
+        )
+        self.assertEqual(
+            scalar_reader_result.returncode, 0, scalar_reader_result.stderr
+        )
+        self.assertEqual(scalar_reader_result.stdout, "AF_INET")
+        for rejected_rendering in (
+            "AF_INET",
+            "AF_INET\n\n",
+            "AF_INET\nAF_UNIX\n",
+            "AF_INET\r\n",
+        ):
+            with self.subTest(rejected_rendering=rejected_rendering):
+                scalar_reader_result = self.run_systemd_policy_helper(
+                    scalar_reader_call, rejected_rendering
+                )
+                self.assertNotEqual(scalar_reader_result.returncode, 0)
+
+        current_socket_list = (
+            "ipv4:udp21000-21127\n"
+            "ipv4:tcp16062\n"
+            "ipv4:tcp16061"
+        )
+        legacy_socket_list = (
+            "ipv4:udp21000-21127 ipv4:tcp16062 ipv4:tcp16061"
+        )
+        list_reader_call = """
+rendered=$1
+systemctl() { printf '%s\n' "$rendered"; }
+read_systemd_socket_bind_list fixture.service SocketBindAllow 3
+"""
+        expected_socket_list = (
+            "ipv4:udp:21000-21127\n"
+            "ipv4:tcp:16062\n"
+            "ipv4:tcp:16061"
+        )
+        for rendered_list in (current_socket_list, legacy_socket_list):
+            with self.subTest(rendered_list=rendered_list):
+                list_result = self.run_systemd_policy_helper(
+                    list_reader_call, rendered_list
+                )
+                self.assertEqual(list_result.returncode, 0, list_result.stderr)
+                self.assertEqual(list_result.stdout.strip(), expected_socket_list)
+
+        exact_socket_list_call = """
+rendered=$1
+systemctl() { printf '%s\n' "$rendered"; }
+normalized=$(read_systemd_socket_bind_list fixture.service SocketBindAllow 3)
+normalized_words=${normalized//$'\n'/ }
+require_exact_word_set 'fixture SocketBindAllow' "$normalized_words" \
+    ipv4:udp:21000-21127 ipv4:tcp:16062 ipv4:tcp:16061
+"""
+        for rendered_list in (current_socket_list, legacy_socket_list):
+            exact_result = self.run_systemd_policy_helper(
+                exact_socket_list_call, rendered_list
+            )
+            self.assertEqual(exact_result.returncode, 0, exact_result.stderr)
+
+        rejected_lists = {
+            "duplicate": (
+                "ipv4:udp21000-21127\n"
+                "ipv4:tcp16061\n"
+                "ipv4:tcp16061"
+            ),
+            "extra": (
+                f"{current_socket_list}\nipv4:tcp16063"
+            ),
+            "missing": "ipv4:udp21000-21127\nipv4:tcp16061",
+            "blank-internal": (
+                "ipv4:udp21000-21127\n\nipv4:tcp16062\nipv4:tcp16061"
+            ),
+            "blank-trailing": f"{current_socket_list}\n",
+            "malformed": (
+                "ipv4:udp21000-21127\n"
+                "ipv4:sctp16062\n"
+                "ipv4:tcp16061"
+            ),
+            "ambiguous-spaces": (
+                "ipv4:udp21000-21127  ipv4:tcp16062 ipv4:tcp16061"
+            ),
+        }
+        for reason, rendered_list in rejected_lists.items():
+            with self.subTest(reason=reason):
+                exact_result = self.run_systemd_policy_helper(
+                    exact_socket_list_call, rendered_list
+                )
+                self.assertNotEqual(exact_result.returncode, 0)
+
+        for rendered_deny in (
+            "any",
+            "::/0 0.0.0.0/0",
+            "0.0.0.0/0 ::/0",
+        ):
+            with self.subTest(rendered_deny=rendered_deny):
+                result = self.run_systemd_policy_helper(
+                    'require_ip_address_deny_any fixture.service "$1"',
+                    rendered_deny,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+        for rejected_deny in (
+            "::/0",
+            "0.0.0.0/0",
+            "::/0 0.0.0.0/0 10.0.0.0/8",
+        ):
+            with self.subTest(rejected_deny=rejected_deny):
+                result = self.run_systemd_policy_helper(
+                    'require_ip_address_deny_any fixture.service "$1"',
+                    rejected_deny,
+                )
+                self.assertNotEqual(result.returncode, 0)
+
+        exact_set_call = 'require_exact_word_set fixture "$1" one two three'
+        for accepted_set in ("one two three", "three one two"):
+            result = self.run_systemd_policy_helper(exact_set_call, accepted_set)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        for rejected_set in ("one two", "one two three four", "one two two"):
+            result = self.run_systemd_policy_helper(exact_set_call, rejected_set)
+            self.assertNotEqual(result.returncode, 0)
 
     def test_build_inputs_are_pinned(self) -> None:
         asterisk = self.read("roles/voice_fixture/files/asterisk/Containerfile")
@@ -296,6 +527,16 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertIn("04b2eb1f0f01aa0ad1945b167171843448a51aa6b7c3e806496d434f13a112b7", asterisk)
         self.assertIn("sha256sum --check --strict", asterisk)
         self.assertIn("declined_message_types", asterisk)
+        for category in (
+            "MENUSELECT_CORE_SOUNDS",
+            "MENUSELECT_MOH",
+            "MENUSELECT_EXTRA_SOUNDS",
+        ):
+            self.assertIn(f"--disable-category {category}", asterisk)
+            self.assertIn(f"grep -qx '{category}=' menuselect.makeopts", asterisk)
+        self.assertIn("make --jobs=2 DOWNLOAD=:", asterisk)
+        self.assertIn("make DESTDIR=/out DOWNLOAD=: install", asterisk)
+        self.assertNotIn("make DESTDIR=/out install", asterisk)
         self.assertIn("SIPP_DEBIAN_VERSION=1:3.7.3-2", sipp)
         self.assertIn('"sip-tester=${SIPP_DEBIAN_VERSION}"', sipp)
 

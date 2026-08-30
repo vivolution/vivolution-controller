@@ -11,11 +11,529 @@ controller_ip={{ voice_fixture_controller_ipv4 | quote }}
 edge_subnet={{ voice_fixture_edge_subnet_ipv4 | quote }}
 pki_root={{ voice_fixture_pki_root | quote }}
 runtime_root={{ voice_fixture_runtime_root | quote }}
+state_root={{ voice_fixture_state_root | quote }}
 asterisk_image_file={{ (voice_fixture_config_root + '/asterisk-image-id') | quote }}
 sipp_image_file={{ (voice_fixture_config_root + '/sipp-image-id') | quote }}
 
+# BEGIN SYSTEMD POLICY HELPERS
+policy_error() {
+    printf 'fixture systemd policy mismatch: %s\n' "$1" >&2
+    exit 3
+}
+
+require_scalar_property_value() {
+    local label=$1
+    local value=$2
+
+    if [[ -z $value || $value == *$'\n'* || $value == *$'\r'* ]]; then
+        policy_error "$label is not one nonempty line"
+    fi
+    printf '%s' "$value"
+}
+
+read_systemd_property() {
+    local unit=$1
+    local property=$2
+    local command_status
+    local framed_value
+    local value
+
+    # Keep systemctl's record terminator inside command substitution so an
+    # extra trailing blank record cannot collapse into a valid scalar value.
+    if ! framed_value=$(
+        systemctl show "$unit" --property="$property" --value
+        command_status=$?
+        printf '\034'
+        exit "$command_status"
+    ); then
+        policy_error "$unit could not read $property"
+    fi
+    if [[ ${framed_value: -1} != $'\034' ]]; then
+        policy_error "$unit $property framing is invalid"
+    fi
+    value=${framed_value%$'\034'}
+    if [[ $value != *$'\n' ]]; then
+        policy_error "$unit $property lacks its record terminator"
+    fi
+    value=${value%$'\n'}
+    require_scalar_property_value "$unit $property" "$value"
+}
+
+require_exact_word_set() {
+    local label=$1
+    local actual=$2
+    shift 2
+    local -a actual_words=()
+    local -a expected_words=("$@")
+    local -a actual_sorted=()
+    local -a expected_sorted=()
+    local actual_count=0
+    local expected_count=$#
+    local index
+    local word
+
+    read -r -a actual_words <<<"$actual"
+    for word in "${actual_words[@]}"; do
+        actual_count=$((actual_count + 1))
+    done
+    if (( actual_count != expected_count )); then
+        policy_error "$label has an unexpected entry count"
+    fi
+    while IFS= read -r word; do
+        actual_sorted+=("$word")
+    done < <(printf '%s\n' "${actual_words[@]}" | LC_ALL=C sort)
+    while IFS= read -r word; do
+        expected_sorted+=("$word")
+    done < <(printf '%s\n' "${expected_words[@]}" | LC_ALL=C sort)
+    for index in "${!expected_sorted[@]}"; do
+        if [[ ${actual_sorted[$index]} != "${expected_sorted[$index]}" ]]; then
+            policy_error "$label does not match the exact required set"
+        fi
+    done
+}
+
+require_ip_address_deny_any() {
+    local unit=$1
+    local value=$2
+
+    # Older systemd releases preserve the special value while current releases
+    # expose its exact IPv4/IPv6 D-Bus expansion through `systemctl show`.
+    if [[ $value == any ]]; then
+        return
+    fi
+    require_exact_word_set "$unit IPAddressDeny" "$value" '::/0' '0.0.0.0/0'
+}
+
+normalize_socket_bind() {
+    local raw=$1
+    local family
+    local protocol
+    local first_port
+    local last_port
+
+    # Unit syntax contains a separator before the port. systemctl's D-Bus
+    # formatter in current systemd releases omits only that separator.
+    if [[ $raw =~ ^(ipv4):(tcp|udp):([0-9]{1,5})(-([0-9]{1,5}))?$ ]]; then
+        family=${BASH_REMATCH[1]}
+        protocol=${BASH_REMATCH[2]}
+        first_port=${BASH_REMATCH[3]}
+        last_port=${BASH_REMATCH[5]:-${BASH_REMATCH[3]}}
+    elif [[ $raw =~ ^(ipv4):(tcp|udp)([0-9]{1,5})(-([0-9]{1,5}))?$ ]]; then
+        family=${BASH_REMATCH[1]}
+        protocol=${BASH_REMATCH[2]}
+        first_port=${BASH_REMATCH[3]}
+        last_port=${BASH_REMATCH[5]:-${BASH_REMATCH[3]}}
+    else
+        return 1
+    fi
+
+    if (( 10#$first_port < 1 || 10#$first_port > 65535 ||
+          10#$last_port < 1 || 10#$last_port > 65535 ||
+          10#$first_port > 10#$last_port )); then
+        return 1
+    fi
+    if (( 10#$first_port == 10#$last_port )); then
+        printf '%s:%s:%d\n' "$family" "$protocol" "$((10#$first_port))"
+    else
+        printf '%s:%s:%d-%d\n' \
+            "$family" "$protocol" "$((10#$first_port))" "$((10#$last_port))"
+    fi
+}
+
+normalize_socket_bind_list() {
+    local label=$1
+    local value=$2
+    local maximum_entries=$3
+    local entry
+    local entry_count=0
+    local normalized_entry
+    local -a entries=()
+
+    if [[ ! $maximum_entries =~ ^[1-9][0-9]*$ || $maximum_entries -gt 16 ]]; then
+        policy_error "$label has an invalid entry bound"
+    fi
+    if [[ -z $value || $value == *$'\r'* ]]; then
+        policy_error "$label is empty or contains a carriage return"
+    fi
+
+    if [[ $value == *$'\n'* ]]; then
+        # Current systemd emits one D-Bus list element per line.
+        while IFS= read -r entry; do
+            if [[ -z $entry || $entry == *[[:space:]]* ]]; then
+                policy_error "$label contains an empty or non-atomic list entry"
+            fi
+            entries+=("$entry")
+        done <<<"$value"
+    else
+        # Older systemd releases emitted the same list on one line, separated
+        # by exactly one ASCII space. Reject ambiguous whitespace forms.
+        if [[ $value == ' '* || $value == *' ' || $value == *'  '* ||
+              $value == *$'\t'* ]]; then
+            policy_error "$label has invalid single-line list whitespace"
+        fi
+        IFS=' ' read -r -a entries <<<"$value"
+    fi
+
+    for entry in "${entries[@]}"; do
+        entry_count=$((entry_count + 1))
+    done
+    if (( entry_count < 1 || entry_count > maximum_entries )); then
+        policy_error "$label exceeds its bounded entry count"
+    fi
+    for entry in "${entries[@]}"; do
+        if ! normalized_entry=$(normalize_socket_bind "$entry"); then
+            policy_error "$label contains a malformed entry"
+        fi
+        printf '%s\n' "$normalized_entry"
+    done
+}
+
+read_systemd_socket_bind_list() {
+    local unit=$1
+    local property=$2
+    local maximum_entries=$3
+    local command_status
+    local framed_value
+    local value
+
+    # The sentinel prevents command substitution from discarding significant
+    # trailing blank list entries. Remove only systemctl's one record terminator.
+    if ! framed_value=$(
+        systemctl show "$unit" --property="$property" --value
+        command_status=$?
+        printf '\034'
+        exit "$command_status"
+    ); then
+        policy_error "$unit could not read $property"
+    fi
+    if [[ ${framed_value: -1} != $'\034' ]]; then
+        policy_error "$unit $property framing is invalid"
+    fi
+    value=${framed_value%$'\034'}
+    if [[ $value != *$'\n' ]]; then
+        policy_error "$unit $property lacks its record terminator"
+    fi
+    value=${value%$'\n'}
+    normalize_socket_bind_list "$unit $property" "$value" "$maximum_entries"
+}
+# END SYSTEMD POLICY HELPERS
+
+# BEGIN ASTERISK CONTRACT HELPERS
+asterisk_contract_error() {
+    printf 'fixture Asterisk contract mismatch: %s\n' "$1" >&2
+    exit 7
+}
+
+asterisk_cli() {
+    local command=$1
+    local output
+
+    if ! output=$(podman exec vivolution-voice-fixture-asterisk \
+        /usr/sbin/asterisk -rx "$command"); then
+        asterisk_contract_error "CLI command failed: $command"
+    fi
+    if [[ -z $output || $output == *$'\r'* ]]; then
+        asterisk_contract_error "CLI command returned malformed output: $command"
+    fi
+    printf '%s\n' "$output"
+}
+
+require_exact_asterisk_modules() {
+    local output=$1
+    shift
+    local module
+    local parsed_modules
+    local actual_sorted
+    local actual_module_count=0
+    local expected_module_count=$#
+    local expected_sorted
+    local -a actual_modules=()
+    local -a expected_modules=("$@")
+
+    if [[ -z $output || $output == *$'\r'* ]] ||
+       (( expected_module_count < 1 || expected_module_count > 64 )); then
+        asterisk_contract_error 'dynamic module inventory is malformed or unbounded'
+    fi
+    for module in "${expected_modules[@]}"; do
+        if [[ ! $module =~ ^[A-Za-z0-9_]+\.so$ ]]; then
+            asterisk_contract_error 'expected dynamic module name is malformed'
+        fi
+    done
+
+    if ! parsed_modules=$(LC_ALL=C awk '
+        $1 ~ /[.]so$/ {
+            if (NF < 5) {
+                exit 2
+            }
+            print $1
+        }
+    ' <<<"$output"); then
+        asterisk_contract_error 'dynamic module table contains a malformed row'
+    fi
+    if [[ -n $parsed_modules ]]; then
+        while IFS= read -r module; do
+            actual_modules+=("$module")
+            actual_module_count=$((actual_module_count + 1))
+        done <<<"$parsed_modules"
+    fi
+    if (( actual_module_count != expected_module_count )); then
+        asterisk_contract_error 'dynamic module table has an unexpected entry count'
+    fi
+
+    actual_sorted=$(printf '%s\n' "${actual_modules[@]}" | LC_ALL=C sort)
+    expected_sorted=$(printf '%s\n' "${expected_modules[@]}" | LC_ALL=C sort)
+    if [[ $actual_sorted != "$expected_sorted" ]]; then
+        asterisk_contract_error 'dynamic module table does not match the exact allowlist'
+    fi
+
+    for module in "${expected_modules[@]}"; do
+        if ! LC_ALL=C awk -v target="$module" '
+            $1 == target {
+                rows++
+                if ($0 ~ /[[:space:]][0-9]+[[:space:]]+Running[[:space:]]+(core|extended|deprecated)[[:space:]]*$/) {
+                    running++
+                }
+            }
+            END {
+                if (rows != 1 || running != 1) {
+                    exit 1
+                }
+            }
+        ' <<<"$output"; then
+            asterisk_contract_error "$module is duplicated, malformed, or not Running"
+        fi
+    done
+}
+
+require_asterisk_cdr_contract() {
+    local output=$1
+    local backend
+    local backend_count=0
+    local parsed_backends
+    local -a backends=()
+
+    if [[ -z $output || $output == *$'\r'* ]]; then
+        asterisk_contract_error 'CDR status output is malformed'
+    fi
+    if ! LC_ALL=C awk '
+        $1 == "Logging:" {
+            rows++
+            if (NF == 2 && $2 == "Enabled") {
+                matches++
+            }
+        }
+        END {
+            if (rows != 1 || matches != 1) {
+                exit 1
+            }
+        }
+    ' <<<"$output"; then
+        asterisk_contract_error 'CDR logging is not exactly Enabled'
+    fi
+    if ! LC_ALL=C awk '
+        $1 == "Mode:" {
+            rows++
+            if (NF == 2 && $2 == "Simple") {
+                matches++
+            }
+        }
+        END {
+            if (rows != 1 || matches != 1) {
+                exit 1
+            }
+        }
+    ' <<<"$output"; then
+        asterisk_contract_error 'CDR mode is not exactly Simple'
+    fi
+
+    if ! parsed_backends=$(LC_ALL=C awk '
+        /^[[:space:]]*[*][[:space:]]Registered Backends[[:space:]]*$/ {
+            marker_count++
+            inside = 1
+            next
+        }
+        inside && /^[[:space:]]*-+[[:space:]]*$/ {
+            separator_count++
+            next
+        }
+        inside {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+            if (line != "") {
+                print line
+            }
+        }
+        END {
+            if (marker_count != 1 || separator_count != 1) {
+                exit 1
+            }
+        }
+    ' <<<"$output"); then
+        asterisk_contract_error 'registered CDR backend section is malformed'
+    fi
+    if [[ -n $parsed_backends ]]; then
+        while IFS= read -r backend; do
+            backends+=("$backend")
+            backend_count=$((backend_count + 1))
+        done <<<"$parsed_backends"
+    fi
+    if (( backend_count != 1 )) ||
+       [[ ${backends[0]:-} != 'CDR File custom backend' ]]; then
+        asterisk_contract_error 'registered CDR backend is not exactly the custom file backend'
+    fi
+}
+
+require_exact_pjsip_transport_table() {
+    local output=$1
+    local expected_ip=$2
+    local server_port=$3
+    local client_port=$4
+    local parsed_transports
+    local actual_sorted
+    local expected_sorted
+    local transport
+    local transport_count=0
+    local -a transports=()
+    local -a expected_transports=(
+        "fixture-mtls-server|tls|$expected_ip:$server_port"
+        "fixture-public-client|tls|$expected_ip:$client_port"
+    )
+
+    if [[ -z $output || $output == *$'\r'* ||
+          ! $expected_ip =~ ^[0-9]+([.][0-9]+){3}$ ||
+          ! $server_port =~ ^[1-9][0-9]{0,4}$ ||
+          ! $client_port =~ ^[1-9][0-9]{0,4}$ ]]; then
+        asterisk_contract_error 'PJSIP transport table inputs are malformed'
+    fi
+    if (( 10#$server_port > 65535 || 10#$client_port > 65535 )); then
+        asterisk_contract_error 'PJSIP transport port is out of range'
+    fi
+
+    if ! parsed_transports=$(LC_ALL=C awk '
+        $1 == "Transport:" && $2 ~ /^[A-Za-z0-9_.-]+$/ {
+            if (NF != 6) {
+                invalid = 1
+                next
+            }
+            rows++
+            print $2 "|" $3 "|" $6
+        }
+        $1 == "Objects" && $2 == "found:" {
+            object_lines++
+            if (NF != 3 || $3 !~ /^[0-9]+$/) {
+                invalid = 1
+            } else {
+                object_count = $3
+            }
+        }
+        END {
+            if (invalid || object_lines != 1 || object_count != rows) {
+                exit 1
+            }
+        }
+    ' <<<"$output"); then
+        asterisk_contract_error 'PJSIP transport table structure is malformed'
+    fi
+    if [[ -n $parsed_transports ]]; then
+        while IFS= read -r transport; do
+            transports+=("$transport")
+            transport_count=$((transport_count + 1))
+        done <<<"$parsed_transports"
+    fi
+    if (( transport_count != 2 )); then
+        asterisk_contract_error 'PJSIP transport table does not contain exactly two objects'
+    fi
+
+    actual_sorted=$(printf '%s\n' "${transports[@]}" | LC_ALL=C sort)
+    expected_sorted=$(printf '%s\n' "${expected_transports[@]}" | LC_ALL=C sort)
+    if [[ $actual_sorted != "$expected_sorted" ]]; then
+        asterisk_contract_error 'PJSIP transport identities, protocols, or binds differ'
+    fi
+}
+
+require_exact_pjsip_transport_detail() {
+    local output=$1
+    local expected_id=$2
+    local expected_bind=$3
+    shift 3
+    local key
+    local expected_value
+    local actual_value
+
+    if [[ -z $output || $output == *$'\r'* ||
+          ! $expected_id =~ ^[A-Za-z0-9_.-]+$ ||
+          ! $expected_bind =~ ^[0-9]+([.][0-9]+){3}:[1-9][0-9]{0,4}$ ||
+          $# -lt 2 || $(( $# % 2 )) -ne 0 ]]; then
+        asterisk_contract_error 'PJSIP transport detail inputs are malformed'
+    fi
+    if ! LC_ALL=C awk -v expected_id="$expected_id" -v expected_bind="$expected_bind" '
+        $1 == "Transport:" && $2 ~ /^[A-Za-z0-9_.-]+$/ {
+            rows++
+            if (NF != 6 || $2 != expected_id || $3 != "tls" || $6 != expected_bind) {
+                invalid = 1
+            }
+        }
+        END {
+            if (invalid || rows != 1) {
+                exit 1
+            }
+        }
+    ' <<<"$output"; then
+        asterisk_contract_error "$expected_id detail table is malformed"
+    fi
+
+    while (( $# > 0 )); do
+        key=$1
+        expected_value=$2
+        shift 2
+        if [[ ! $key =~ ^[a-z][a-z0-9_]*$ || -z $expected_value ||
+              $expected_value == *$'\n'* || $expected_value == *$'\r'* ]]; then
+            asterisk_contract_error "$expected_id expected parameter is malformed"
+        fi
+        if ! actual_value=$(LC_ALL=C awk -v wanted="$key" '
+            {
+                separator = index($0, ":")
+                if (separator == 0) {
+                    next
+                }
+                name = substr($0, 1, separator - 1)
+                value = substr($0, separator + 1)
+                sub(/^[[:space:]]+/, "", name)
+                sub(/[[:space:]]+$/, "", name)
+                sub(/^[[:space:]]+/, "", value)
+                sub(/[[:space:]]+$/, "", value)
+                if (name == wanted) {
+                    rows++
+                    found = value
+                }
+            }
+            END {
+                if (rows != 1) {
+                    exit 1
+                }
+                print found
+            }
+        ' <<<"$output"); then
+            asterisk_contract_error "$expected_id parameter $key is absent or duplicated"
+        fi
+        if [[ $actual_value != "$expected_value" ]]; then
+            asterisk_contract_error "$expected_id parameter $key differs"
+        fi
+    done
+}
+# END ASTERISK CONTRACT HELPERS
+
 [[ -d $runtime_root && ! -L $runtime_root ]]
 [[ $(stat --format='%u:%g:%a' -- "$runtime_root") == '0:0:750' ]]
+[[ -d $state_root && ! -L $state_root ]]
+[[ $(stat --format='%u:%g:%a' -- "$state_root") == '0:0:750' ]]
+asterisk_log_directory="$state_root/asterisk-log"
+[[ -d $asterisk_log_directory && ! -L $asterisk_log_directory ]]
+[[ $(stat --format='%u:%g:%a' -- "$asterisk_log_directory") == '10001:10001:750' ]]
+asterisk_cdr_directory="$state_root/asterisk-log/cdr-custom"
+[[ -d $asterisk_cdr_directory && ! -L $asterisk_cdr_directory ]]
+[[ $(stat --format='%u:%g:%a' -- "$asterisk_cdr_directory") == '10001:10001:750' ]]
 for runtime_directory in \
     "$runtime_root/asterisk" \
     "$runtime_root/asterisk/lib" \
@@ -42,28 +560,20 @@ units=(vivolution-voice-fixture-asterisk.service vivolution-voice-fixture-sipp.s
 for unit in "${units[@]}"; do
     systemctl is-enabled --quiet "$unit"
     systemctl is-active --quiet "$unit"
-    policy=$(systemctl show "$unit" --property=IPAddressAllow --property=IPAddressDeny --property=RestrictAddressFamilies --property=SocketBindAllow --property=SocketBindDeny)
-    grep -Fq 'IPAddressDeny=any' <<<"$policy"
-    grep -Fq "$controller_ip/32" <<<"$policy"
-    grep -Fq "$edge_subnet" <<<"$policy"
-    grep -Fq 'AF_INET' <<<"$policy"
-    if grep -Fq 'AF_INET6' <<<"$policy"; then
-        printf '%s unexpectedly permits IPv6\n' "$unit" >&2
-        exit 3
-    fi
-    [[ $(systemctl show "$unit" --property=SocketBindDeny --value) == any ]]
-    mapfile -t effective_socket_binds < <(
-        systemctl show "$unit" --property=SocketBindAllow --value \
-            | tr ' ' '\n' \
-            | sed '/^$/d' \
-            | sort --unique
-    )
-    effective_socket_bind_count=$(
-        printf '%s\n' "${effective_socket_binds[@]}" | sed '/^$/d' | wc -l
-    )
+    ip_address_allow=$(read_systemd_property "$unit" IPAddressAllow)
+    require_exact_word_set "$unit IPAddressAllow" "$ip_address_allow" \
+        '127.0.0.0/8' "$controller_ip/32" "$edge_subnet"
+    ip_address_deny=$(read_systemd_property "$unit" IPAddressDeny)
+    require_ip_address_deny_any "$unit" "$ip_address_deny"
+    address_families=$(read_systemd_property "$unit" RestrictAddressFamilies)
+    require_exact_word_set "$unit RestrictAddressFamilies" "$address_families" \
+        AF_UNIX AF_NETLINK AF_INET
+    socket_bind_deny=$(read_systemd_property "$unit" SocketBindDeny)
+    [[ $socket_bind_deny == any ]] || policy_error "$unit SocketBindDeny is not any"
+
     case "$unit" in
         vivolution-voice-fixture-asterisk.service)
-            [[ $effective_socket_bind_count -eq 3 ]]
+            expected_socket_bind_count=3
             expected_socket_binds=(
                 'ipv4:tcp:{{ voice_fixture_asterisk_tls_port }}'
                 'ipv4:tcp:{{ voice_fixture_asterisk_uac_tls_port }}'
@@ -71,18 +581,109 @@ for unit in "${units[@]}"; do
             )
             ;;
         vivolution-voice-fixture-sipp.service)
-            [[ $effective_socket_bind_count -eq 2 ]]
+            expected_socket_bind_count=2
             expected_socket_binds=(
                 'ipv4:tcp:{{ voice_fixture_sipp_uas_tls_port }}'
                 'ipv4:udp:{{ voice_fixture_sipp_uas_rtp_port }}'
             )
             ;;
     esac
-    for expected_bind in "${expected_socket_binds[@]}"; do
-        printf '%s\n' "${effective_socket_binds[@]}" \
-            | grep -Eq "^${expected_bind}(-${expected_bind##*:})?$"
-    done
+
+    normalized_socket_bind_output=$(
+        read_systemd_socket_bind_list \
+            "$unit" SocketBindAllow "$expected_socket_bind_count"
+    )
+    normalized_socket_binds=()
+    while IFS= read -r normalized_socket_bind; do
+        normalized_socket_binds+=("$normalized_socket_bind")
+    done <<<"$normalized_socket_bind_output"
+    require_exact_word_set "$unit SocketBindAllow" \
+        "${normalized_socket_binds[*]}" "${expected_socket_binds[@]}"
 done
+
+expected_asterisk_modules=(
+    app_dial.so
+    app_milliwatt.so
+    app_stack.so
+    bridge_builtin_features.so
+    bridge_native_rtp.so
+    bridge_simple.so
+    cdr_custom.so
+    chan_pjsip.so
+    codec_a_mu.so
+    codec_alaw.so
+    codec_ulaw.so
+    func_cdr.so
+    pbx_config.so
+    res_cdrel_custom.so
+    res_clioriginate.so
+    res_pjproject.so
+    res_pjsip.so
+    res_pjsip_caller_id.so
+    res_pjsip_endpoint_identifier_ip.so
+    res_pjsip_header_funcs.so
+    res_pjsip_pubsub.so
+    res_pjsip_rfc3326.so
+    res_pjsip_sdp_rtp.so
+    res_pjsip_session.so
+    res_pjsip_sips_contact.so
+    res_rtp_asterisk.so
+    res_sorcery_astdb.so
+    res_sorcery_config.so
+    res_sorcery_memory.so
+    res_timing_timerfd.so
+)
+asterisk_module_status=$(asterisk_cli 'module show')
+require_exact_asterisk_modules \
+    "$asterisk_module_status" "${expected_asterisk_modules[@]}"
+
+asterisk_cdr_status=$(asterisk_cli 'cdr show status')
+require_asterisk_cdr_contract "$asterisk_cdr_status"
+
+asterisk_transport_status=$(asterisk_cli 'pjsip show transports')
+require_exact_pjsip_transport_table \
+    "$asterisk_transport_status" \
+    "$controller_ip" \
+    '{{ voice_fixture_asterisk_tls_port }}' \
+    '{{ voice_fixture_asterisk_uac_tls_port }}'
+
+asterisk_server_transport=$(
+    asterisk_cli 'pjsip show transport fixture-mtls-server'
+)
+require_exact_pjsip_transport_detail \
+    "$asterisk_server_transport" \
+    fixture-mtls-server \
+    "$controller_ip:{{ voice_fixture_asterisk_tls_port }}" \
+    protocol tls \
+    bind "$controller_ip:{{ voice_fixture_asterisk_tls_port }}" \
+    method tlsv1_2 \
+    cert_file /run/fixture-pki/asterisk.crt \
+    priv_key_file /run/fixture-pki/asterisk.key \
+    ca_list_file /run/fixture-pki/ca.crt \
+    local_net 10.20.0.0/255.255.0.0 \
+    verify_client Yes \
+    require_client_cert Yes \
+    verify_server No \
+    allow_reload false
+
+asterisk_client_transport=$(
+    asterisk_cli 'pjsip show transport fixture-public-client'
+)
+require_exact_pjsip_transport_detail \
+    "$asterisk_client_transport" \
+    fixture-public-client \
+    "$controller_ip:{{ voice_fixture_asterisk_uac_tls_port }}" \
+    protocol tls \
+    bind "$controller_ip:{{ voice_fixture_asterisk_uac_tls_port }}" \
+    method tlsv1_2 \
+    cert_file /run/fixture-pki/asterisk.crt \
+    priv_key_file /run/fixture-pki/asterisk.key \
+    ca_list_file /run/fixture-pki/public-ca.crt \
+    local_net 10.20.0.0/255.255.0.0 \
+    verify_client No \
+    require_client_cert No \
+    verify_server Yes \
+    allow_reload false
 
 mapfile -t tcp_listeners < <(ss -H -lnt4 | awk '{print $4}')
 for endpoint in "$controller_ip:{{ voice_fixture_asterisk_tls_port }}" "$controller_ip:{{ voice_fixture_asterisk_uac_tls_port }}" "$controller_ip:{{ voice_fixture_sipp_uas_tls_port }}"; do

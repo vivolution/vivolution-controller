@@ -1,31 +1,37 @@
 [modules]
-autoload=yes
+autoload=no
 
-; No shell/process execution is available to fixture dialplan input.
-noload=app_system.so
-noload=func_shell.so
-noload=res_config_curl.so
-noload=func_curl.so
-
-; Disable every unused signaling/control listener family.
-noload=chan_iax2.so
-noload=chan_dahdi.so
-noload=chan_mgcp.so
-noload=chan_skinny.so
-noload=chan_unistim.so
-noload=res_http_websocket.so
-noload=res_ari.so
-noload=res_ari_applications.so
-noload=res_ari_asterisk.so
-noload=res_ari_bridges.so
-noload=res_ari_channels.so
-noload=res_ari_device_states.so
-noload=res_ari_endpoints.so
-noload=res_ari_events.so
-noload=res_ari_mailboxes.so
-noload=res_ari_model.so
-noload=res_ari_playbacks.so
-noload=res_ari_recordings.so
-noload=res_ari_sounds.so
-noload=res_prometheus.so
-noload=res_snmp.so
+; Every dynamic module in this synthetic no-PSTN fixture is an exact required
+; dependency. Asterisk exits instead of continuing with a partially loaded
+; signaling, media, dialplan, or evidence path. Built-in core modules are not
+; listed here and cannot be disabled through modules.conf.
+require=app_dial.so
+require=app_milliwatt.so
+require=app_stack.so
+require=bridge_builtin_features.so
+require=bridge_native_rtp.so
+require=bridge_simple.so
+require=cdr_custom.so
+require=chan_pjsip.so
+require=codec_a_mu.so
+require=codec_alaw.so
+require=codec_ulaw.so
+require=func_cdr.so
+require=pbx_config.so
+require=res_cdrel_custom.so
+require=res_clioriginate.so
+require=res_pjproject.so
+require=res_pjsip.so
+require=res_pjsip_caller_id.so
+require=res_pjsip_endpoint_identifier_ip.so
+require=res_pjsip_header_funcs.so
+require=res_pjsip_pubsub.so
+require=res_pjsip_rfc3326.so
+require=res_pjsip_sdp_rtp.so
+require=res_pjsip_session.so
+require=res_pjsip_sips_contact.so
+require=res_rtp_asterisk.so
+require=res_sorcery_astdb.so
+require=res_sorcery_config.so
+require=res_sorcery_memory.so
+require=res_timing_timerfd.so

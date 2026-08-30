@@ -7,6 +7,8 @@ ARG ASTERISK_SOURCE_SHA256=373c98f4d4a1b923b42def0aee03f4e36aca9d1c244a8eeda646d
 ARG PJPROJECT_VERSION=2.17
 ARG PJPROJECT_SOURCE_SHA256=04b2eb1f0f01aa0ad1945b167171843448a51aa6b7c3e806496d434f13a112b7
 
+COPY pjsip-tls-listener-bind-fail-closed.patch /tmp/pjsip-tls-listener-bind-fail-closed.patch
+
 RUN set -eux; \
     apt-get update; \
     apt-get install --yes --no-install-recommends \
@@ -60,10 +62,24 @@ RUN set -eux; \
         --localstatedir=/var \
         --with-jansson \
         --with-pjproject-bundled; \
+    patch --batch --forward --strip=1 \
+        --directory=third-party/pjproject/source \
+        < /tmp/pjsip-tls-listener-bind-fail-closed.patch; \
+    grep --fixed-strings --quiet \
+        'if (status != PJ_SUCCESS && status != PJ_EPENDING)' \
+        third-party/pjproject/source/pjsip/src/pjsip/sip_transport_tls.c; \
     make menuselect.makeopts; \
-    menuselect/menuselect --disable BUILD_NATIVE menuselect.makeopts; \
-    make --jobs=2; \
-    make DESTDIR=/out install; \
+    menuselect/menuselect \
+        --disable BUILD_NATIVE \
+        --disable-category MENUSELECT_CORE_SOUNDS \
+        --disable-category MENUSELECT_MOH \
+        --disable-category MENUSELECT_EXTRA_SOUNDS \
+        menuselect.makeopts; \
+    grep -qx 'MENUSELECT_CORE_SOUNDS=' menuselect.makeopts; \
+    grep -qx 'MENUSELECT_MOH=' menuselect.makeopts; \
+    grep -qx 'MENUSELECT_EXTRA_SOUNDS=' menuselect.makeopts; \
+    make --jobs=2 DOWNLOAD=:; \
+    make DESTDIR=/out DOWNLOAD=: install; \
     test -x /out/usr/sbin/asterisk; \
     test -f /out/usr/lib/asterisk/modules/chan_pjsip.so; \
     test -f /out/usr/lib/asterisk/modules/res_rtp_asterisk.so; \

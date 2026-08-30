@@ -193,9 +193,44 @@ directories are writable. The build now proves that exact definition exists,
 copies the generated documentation into immutable
 `/usr/share/asterisk/documentation/`, and points `astdatadir` there. The role
 re-verifies the definition as unprivileged UID `10001` with no network or
-capabilities before installing the Quadlet. The local image tag includes an
+capabilities before installing the Quadlet. The local image tag retains the
 `xmldoc1` revision so a host cannot silently reuse the earlier incomplete
 22.10.1 image.
+
+The no-PSTN scenarios do not use recorded prompts or music on hold. Their
+audio comes from Asterisk's in-process `Milliwatt()` generator and SIPp's
+bounded RTP counter/echo endpoint. The build therefore disables the core,
+extra, and music-on-hold sound categories explicitly, proves all three
+menuselect values are empty, and sets Asterisk's `DOWNLOAD` command to `:` for
+compilation and installation. This prevents `make install` from fetching
+mutable sound archives that are neither required nor copied into the runtime
+image. The `nosounds1` tag revision forces hosts with the earlier `xmldoc1`
+image to build and select this fail-closed variant while preserving the XML
+documentation fix.
+
+The runtime also uses `autoload=no` and an exact `require=` allowlist for its
+PJSIP, RTP, dialplan, codec, bridge, timing, and CDR modules. Any required
+module that is absent or declines to load makes Asterisk exit; unrelated
+channel drivers, ARI/websocket controls, shell/curl functions, provisioning,
+voicemail, monitoring, and database backends are not loaded. The synthetic
+CDR file uses Asterisk 22's native advanced DSV mapping with an exact ordered
+14-field schema. This avoids the legacy mapping auto-conversion path and makes
+the fixture evidence backend deterministic. Before installing the Quadlet, the
+role refuses symlinks or non-directories in the host CDR path and creates the
+bind-mounted `asterisk-log/cdr-custom` directory for UID/GID `10001` with mode
+`0750`; readiness revalidates the complete path and registered backend.
+
+The pinned PJProject 2.17 source has one narrowly scoped build-time patch for
+TLS listener startup. Upstream `pjsip_tls_transport_lis_start()` overwrites a
+failed `pj_ssl_sock_start_accept2()` result while updating the advertised
+address, so Asterisk can retain a configured transport object even though no
+socket is listening. The patch preserves the accept/bind and socket-info error
+statuses. A failed `16061` or `16062` listener startup is therefore rejected by
+Asterisk's transport configuration instead of appearing healthy. Asterisk
+logs `Transport '<id>' could not be started: <PJProject
+error>` and the exact transport/listener readiness contract blocks fixture
+acceptance. The composite `nosounds1-tlsbind1` image revision prevents reuse
+of either older variant.
 
 ## Readiness and calls
 

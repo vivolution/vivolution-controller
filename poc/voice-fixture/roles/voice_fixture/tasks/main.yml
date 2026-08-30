@@ -130,6 +130,31 @@
         raise SystemExit(1)
   changed_when: false
 
+- name: Inspect the fixture CDR path without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ voice_fixture_state_root }}"
+    - "{{ voice_fixture_state_root }}/asterisk-log"
+    - "{{ voice_fixture_state_root }}/asterisk-log/cdr-custom"
+  register: voice_fixture_cdr_path_status
+  changed_when: false
+
+- name: Reject non-directory or symlinked fixture CDR paths
+  ansible.builtin.assert:
+    that:
+      - >-
+        (not item.stat.exists) or
+        ((item.stat.isdir | default(false)) and
+         not (item.stat.islnk | default(false)))
+    fail_msg: >-
+      The fixture CDR path must be absent or an existing real directory;
+      files and symbolic links are refused.
+  loop: "{{ voice_fixture_cdr_path_status.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
 - name: Create fixture directories
   ansible.builtin.file:
     path: "{{ item.path }}"
@@ -177,6 +202,10 @@
       group: root
       mode: '0750'
     - path: "{{ voice_fixture_state_root }}/asterisk-log"
+      owner: '10001'
+      group: '10001'
+      mode: '0750'
+    - path: "{{ voice_fixture_state_root }}/asterisk-log/cdr-custom"
       owner: '10001'
       group: '10001'
       mode: '0750'
