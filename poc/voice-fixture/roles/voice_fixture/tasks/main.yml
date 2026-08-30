@@ -1054,6 +1054,27 @@
   register: voice_fixture_asterisk_version_output
   changed_when: false
 
+- name: Verify immutable Asterisk Stasis XML documentation
+  ansible.builtin.command:
+    argv:
+      - podman
+      - run
+      - --rm
+      - --network=none
+      - --read-only
+      - --cap-drop=all
+      - --security-opt=no-new-privileges
+      - --user
+      - '10001:10001'
+      - --entrypoint
+      - /usr/bin/grep
+      - "{{ voice_fixture_asterisk_image_id }}"
+      - --fixed-strings
+      - --quiet
+      - '<configObject name="declined_message_types">'
+      - /usr/share/asterisk/documentation/core-en_US.xml
+  changed_when: false
+
 - name: Verify the built SIPp version
   ansible.builtin.command:
     argv:

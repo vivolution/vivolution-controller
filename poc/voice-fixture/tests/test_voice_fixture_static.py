@@ -138,6 +138,32 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertEqual(configs.count("dial(pjsip/"), 2)
         self.assertNotRegex(configs, r"(?i)(pstn|carrier).*@")
 
+    def test_asterisk_stasis_documentation_is_immutable_and_verified(self) -> None:
+        defaults = self.read("roles/voice_fixture/defaults/main.yml")
+        containerfile = self.read("roles/voice_fixture/files/asterisk/Containerfile")
+        config = self.read("roles/voice_fixture/templates/asterisk.conf.j2")
+        tasks = self.read("roles/voice_fixture/tasks/main.yml")
+        self.assertIn(
+            "voice-fixture-asterisk:22.10.1-xmldoc1",
+            defaults,
+        )
+        self.assertIn(
+            "/out/var/lib/asterisk/documentation/core-en_US.xml",
+            containerfile,
+        )
+        self.assertIn('<configObject name="declined_message_types">', containerfile)
+        self.assertIn(
+            "COPY --from=builder /out/var/lib/asterisk/documentation/ "
+            "/usr/share/asterisk/documentation/",
+            containerfile,
+        )
+        self.assertIn("astdatadir => /usr/share/asterisk", config)
+        self.assertNotIn("astdatadir => /var/lib/asterisk", config)
+        self.assertIn("Verify immutable Asterisk Stasis XML documentation", tasks)
+        self.assertIn("/usr/share/asterisk/documentation/core-en_US.xml", tasks)
+        self.assertIn("--security-opt=no-new-privileges", tasks)
+        self.assertIn("      - '10001:10001'", tasks)
+
     def test_public_edge_server_and_private_client_trust_are_separated(self) -> None:
         pjsip = self.read("roles/voice_fixture/templates/pjsip.conf.j2")
         leaf_profile = self.read("roles/voice_fixture/templates/leaf-extensions.cnf.j2")
@@ -269,6 +295,7 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertIn("PJPROJECT_VERSION=2.17", asterisk)
         self.assertIn("04b2eb1f0f01aa0ad1945b167171843448a51aa6b7c3e806496d434f13a112b7", asterisk)
         self.assertIn("sha256sum --check --strict", asterisk)
+        self.assertIn("declined_message_types", asterisk)
         self.assertIn("SIPP_DEBIAN_VERSION=1:3.7.3-2", sipp)
         self.assertIn('"sip-tester=${SIPP_DEBIAN_VERSION}"', sipp)
 

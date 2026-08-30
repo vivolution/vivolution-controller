@@ -42,7 +42,7 @@ voice_fixture_python_base_image: docker.io/library/python@sha256:7e3a6aca9d74f93
 voice_fixture_asterisk_version: 22.10.1
 voice_fixture_asterisk_source_sha256: 373c98f4d4a1b923b42def0aee03f4e36aca9d1c244a8eeda646da8a97f89663
 voice_fixture_sipp_debian_version: '1:3.7.3-2'
-voice_fixture_asterisk_image_tag: localhost/vivolution/voice-fixture-asterisk:22.10.1
+voice_fixture_asterisk_image_tag: localhost/vivolution/voice-fixture-asterisk:22.10.1-xmldoc1
 voice_fixture_sipp_image_tag: localhost/vivolution/voice-fixture-sipp:3.7.3-2
 
 voice_fixture_ca_days: 30

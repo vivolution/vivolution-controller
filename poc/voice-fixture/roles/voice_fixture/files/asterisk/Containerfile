@@ -68,6 +68,10 @@ RUN set -eux; \
     test -f /out/usr/lib/asterisk/modules/chan_pjsip.so; \
     test -f /out/usr/lib/asterisk/modules/res_rtp_asterisk.so; \
     test -f /out/usr/lib/asterisk/modules/app_milliwatt.so; \
+    test -s /out/var/lib/asterisk/documentation/core-en_US.xml; \
+    grep --fixed-strings --quiet \
+        '<configObject name="declined_message_types">' \
+        /out/var/lib/asterisk/documentation/core-en_US.xml; \
     find /out/usr -type f -perm /111 -exec strip --strip-unneeded '{}' + 2>/dev/null || true; \
     { ldd /out/usr/sbin/asterisk; \
       find /out/usr/lib/asterisk/modules -type f -name '*.so' -exec ldd '{}' ';'; \
@@ -98,6 +102,7 @@ RUN set -eux; \
 
 COPY --from=builder /out/usr/ /usr/
 COPY --from=builder /runtime-libs/ /
+COPY --from=builder /out/var/lib/asterisk/documentation/ /usr/share/asterisk/documentation/
 
 USER 10001:10001
 EXPOSE 16061/tcp 16062/tcp 21000-21127/udp

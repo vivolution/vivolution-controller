@@ -185,6 +185,18 @@ Podman-version-specific tmpfs ownership options or widening those private
 paths to mode `0777`. The container root remains read-only, non-root, and
 capability-free; only its conventional sticky `/tmp` remains mode `1777`.
 
+The Asterisk build also treats generated XML documentation as required runtime
+code metadata. Asterisk 22's strict Stasis configuration initialization needs
+the `declined_message_types` definition from `core-en_US.xml`; without it the
+process exits before module loading even when its SQLite database and runtime
+directories are writable. The build now proves that exact definition exists,
+copies the generated documentation into immutable
+`/usr/share/asterisk/documentation/`, and points `astdatadir` there. The role
+re-verifies the definition as unprivileged UID `10001` with no network or
+capabilities before installing the Quadlet. The local image tag includes an
+`xmldoc1` revision so a host cannot silently reuse the earlier incomplete
+22.10.1 image.
+
 ## Readiness and calls
 
 On CP1:
