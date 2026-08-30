@@ -204,7 +204,10 @@ class CommandRunner:
                 response, peer = client.recvfrom(4096)
         except OSError:
             return False
-        return peer == ("127.0.0.1", 2223) and response.startswith(cookie + b" ") and b"6:result2:ok" in response
+        return (
+            peer == ("127.0.0.1", 2223)
+            and response == cookie + b" d6:result4:ponge"
+        )
 
     def checkpoint(self, name: str) -> None:
         """Crash-injection seam. Production intentionally does nothing."""

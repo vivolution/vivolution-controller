@@ -7,9 +7,11 @@ import ipaddress
 import json
 import os
 import shutil
+import socket
 import stat
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -373,6 +375,40 @@ class InjectedCrash(BaseException):
     pass
 
 
+class FakeDatagramSocket:
+    def __init__(
+        self,
+        response: bytes,
+        peer: tuple[str, int],
+        *,
+        recv_error: OSError | None = None,
+    ) -> None:
+        self.response = response
+        self.peer = peer
+        self.recv_error = recv_error
+        self.timeout: float | None = None
+        self.request: tuple[bytes, tuple[str, int]] | None = None
+        self.recv_size: int | None = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        return None
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def sendto(self, request: bytes, peer: tuple[str, int]) -> None:
+        self.request = (request, peer)
+
+    def recvfrom(self, size: int) -> tuple[bytes, tuple[str, int]]:
+        self.recv_size = size
+        if self.recv_error is not None:
+            raise self.recv_error
+        return self.response, self.peer
+
+
 class FakeRunner(CommandRunner):
     def __init__(self) -> None:
         self.commands: list[tuple[str, ...]] = []
@@ -551,6 +587,48 @@ class RuntimeTests(unittest.TestCase):
     def tearDown(self) -> None:
         contracts.MICROSOFT_SIP_ROOT_SHA1 = self.official_microsoft_sip_roots
         self.harness.close()
+
+    def test_rtpengine_ping_accepts_only_exact_pinned_pong_response(self) -> None:
+        cookie = b"vivo-runtime-ping"
+        exact_response = cookie + b" d6:result4:ponge"
+        cases = (
+            ("exact", exact_response, ("127.0.0.1", 2223), True),
+            ("generic-ok", cookie + b" d6:result2:oke", ("127.0.0.1", 2223), False),
+            ("wrong-cookie", b"other d6:result4:ponge", ("127.0.0.1", 2223), False),
+            ("trailing-data", exact_response + b"x", ("127.0.0.1", 2223), False),
+            ("wrong-peer-ip", exact_response, ("10.20.2.4", 2223), False),
+            ("wrong-peer", exact_response, ("127.0.0.1", 2224), False),
+        )
+        for name, response, peer, expected in cases:
+            with self.subTest(name=name):
+                client = FakeDatagramSocket(response, peer)
+                with mock.patch("edge.runtime.core.socket.socket", return_value=client):
+                    actual = CommandRunner().rtpengine_ping(timeout=1.25)
+                self.assertEqual(actual, expected)
+                self.assertEqual(client.timeout, 1.25)
+                self.assertEqual(
+                    client.request,
+                    (cookie + b" d7:command4:pinge", ("127.0.0.1", 2223)),
+                )
+                self.assertEqual(client.recv_size, 4096)
+
+    def test_rtpengine_ping_rejects_receive_timeout(self) -> None:
+        client = FakeDatagramSocket(
+            b"",
+            ("127.0.0.1", 2223),
+            recv_error=socket.timeout("timed out"),
+        )
+        with mock.patch("edge.runtime.core.socket.socket", return_value=client):
+            self.assertFalse(CommandRunner().rtpengine_ping(timeout=0.5))
+        self.assertEqual(client.timeout, 0.5)
+        self.assertEqual(
+            client.request,
+            (
+                b"vivo-runtime-ping d7:command4:pinge",
+                ("127.0.0.1", 2223),
+            ),
+        )
+        self.assertEqual(client.recv_size, 4096)
 
     def validate_with_edge_certificate(
         self,
