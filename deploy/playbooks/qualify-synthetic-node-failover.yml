@@ -949,7 +949,8 @@
               - "{{ edge_failover_deadman_unit }}.service"
           delegate_to: sbc1
           become: true
-          changed_when: true
+          changed_when: edge_failover_deadman_disarm.rc == 0
+          failed_when: edge_failover_deadman_disarm.rc not in [0, 5]
           register: edge_failover_deadman_disarm
           when: edge_failover_recovery_required | bool
 
@@ -1039,7 +1040,7 @@
           - >-
             edge_failover_restored_call.stdout | default('') is
             match('^fixture test [0-9]{8}T[0-9]{6}Z-sbc1-[0-9]+: PASS$')
-          - edge_failover_deadman_disarm.rc | default(1) == 0
+          - (edge_failover_deadman_disarm.rc | default(1)) in [0, 5]
           - >-
             edge_failover_deadman_inactive.results | default([]) |
             map(attribute='stdout') | unique | list == ['inactive']

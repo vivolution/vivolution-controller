@@ -464,7 +464,10 @@ remains. A rerun detects the marker, restores the same order, proves active
 services, exact protected runtime status/health, and a fresh SBC1 call, then
 disarms the timer and removes only the exact recovery directory. The normal
 unconditional recovery uses the same checks. Neither path disarms or removes
-the marker before the post-restore call passes.
+the marker before the post-restore call passes. Disarm also accepts systemd's
+"unit not loaded" result when a completed transient service has already been
+garbage-collected, but cleanup still requires both units to prove inactive
+before removing any recovery payload or marker.
 
 The offline compiler `scripts/synthetic_failover_evidence.py` verifies the
 complete bounded contents of all three fixture SHA-256 manifests, rejects

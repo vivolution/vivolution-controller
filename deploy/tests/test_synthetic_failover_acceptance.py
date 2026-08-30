@@ -807,6 +807,31 @@ class SyntheticFailoverPlaybookStaticTests(unittest.TestCase):
         self.assertIn("/var/lib/vivolution-edge/synthetic-failover-recovery", source)
         self.assertIn("Recover prior SBC1 media before signaling on safe rerun", source)
 
+        normal_disarm = source[
+            source.index("Disarm the node-local timer only after exact restoration") :
+            source.index("Prove the node-local deadman is inactive")
+        ]
+        self.assertIn(
+            "failed_when: edge_failover_deadman_disarm.rc not in [0, 5]",
+            normal_disarm,
+        )
+        self.assertIn(
+            "changed_when: edge_failover_deadman_disarm.rc == 0",
+            normal_disarm,
+        )
+        final_gate = source[
+            source.index("Require accepted failover and exact healthy primary restoration") :
+            source.index("Select alternate and restored fixture test identities")
+        ]
+        self.assertIn(
+            "(edge_failover_deadman_disarm.rc | default(1)) in [0, 5]",
+            final_gate,
+        )
+        self.assertIn(
+            "edge_failover_deadman_inactive.results | default([])",
+            final_gate,
+        )
+
     def test_all_manifested_artifacts_and_three_cdrs_are_bound(self) -> None:
         source = PLAYBOOK.read_text(encoding="utf-8")
         for token in (
