@@ -234,8 +234,8 @@ public certificate, while inbound calls still require a client certificate.
 The CP1 host policy admits the listener only from the fixed Edge subnet and
 PJSIP identifies only the two fixed Edge addresses.
 
-The pinned PJProject 2.17 source has one narrowly scoped build-time patch for
-TLS listener startup. Upstream `pjsip_tls_transport_lis_start()` overwrites a
+The pinned PJProject 2.17 source has two narrowly scoped build-time patches for
+TLS socket lifecycle. Upstream `pjsip_tls_transport_lis_start()` overwrites a
 failed `pj_ssl_sock_start_accept2()` result while updating the advertised
 address, so Asterisk can retain a configured transport object even though no
 socket is listening. The patch preserves the accept/bind and socket-info error
@@ -243,8 +243,16 @@ statuses. A failed `16061` listener startup is therefore rejected by
 Asterisk's transport configuration instead of appearing healthy. Asterisk
 logs `Transport '<id>' could not be started: <PJProject
 error>` and the exact transport/listener readiness contract blocks fixture
-acceptance. The composite `nosounds1-tlsbind2` image revision prevents reuse
-of either older variant.
+acceptance. PJProject also explicitly calls `bind()` with local
+port zero before an outbound TLS `connect()`. The fixture's systemd
+`SocketBindDeny=any` boundary correctly rejects that otherwise redundant
+operation. The second patch skips only that zero-port bind and lets `connect()`
+perform the normal kernel ephemeral auto-bind; positive listener and RTP binds
+remain subject to the exact systemd allow-list. Readiness also requires the
+kernel route for Asterisk's host UID `10001` to each fixed Edge address to
+select `eth0` with source `10.20.1.4`, preserving the source identity that
+PJProject's redundant bind would otherwise select. The composite
+`nosounds1-tlsbind3` image revision prevents reuse of either older variant.
 
 ## Readiness and calls
 

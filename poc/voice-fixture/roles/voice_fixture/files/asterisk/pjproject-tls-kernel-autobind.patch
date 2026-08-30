@@ -1,0 +1,18 @@
+--- a/pjlib/src/pj/ssl_sock_imp_common.c
++++ b/pjlib/src/pj/ssl_sock_imp_common.c
+@@ -2392,2 +2392,13 @@
+-    /* Bind socket */
+-    if (port_range) {
++    /*
++     * A zero local port asks the kernel to choose an ephemeral source port.
++     * Do not issue an explicit bind() for that case: connect() provides the
++     * same kernel auto-bind semantics and remains compatible with a systemd
++     * SocketBindDeny boundary that admits only positive listener ports.
++     */
++#if defined(VIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT) && \
++    VIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT == 1
++    if (!port_range && pj_sockaddr_get_port(localaddr) == 0) {
++        status = PJ_SUCCESS;
++    } else
++#endif
++    if (port_range) {

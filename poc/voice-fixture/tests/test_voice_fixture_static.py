@@ -59,6 +59,8 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         defaults = self.read("roles/voice_fixture/defaults/main.yml")
         for expected in [
             "voice_fixture_controller_ipv4: 10.20.1.4",
+            "voice_fixture_controller_interface: eth0",
+            "voice_fixture_controller_gateway_ipv4: 10.20.1.1",
             "voice_fixture_edge_subnet_ipv4: 10.20.2.0/24",
             "voice_fixture_sbc1_ipv4: 10.20.2.4",
             "voice_fixture_sbc2_ipv4: 10.20.2.5",
@@ -204,7 +206,7 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         config = self.read("roles/voice_fixture/templates/asterisk.conf.j2")
         tasks = self.read("roles/voice_fixture/tasks/main.yml")
         image_tag = (
-            "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind2"
+            "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind3"
         )
         self.assertIn(image_tag, defaults)
         self.assertIn(image_tag, teardown_defaults)
@@ -353,6 +355,13 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertIn("normalize_socket_bind", readiness)
         self.assertIn("require_exact_word_set", readiness)
         self.assertNotIn("grep -Fq 'IPAddressDeny=any'", readiness)
+        self.assertIn('ip -4 route get "$edge_ip" uid 10001 | head -n 1', readiness)
+        self.assertIn(
+            'via $controller_gateway dev $controller_interface src '
+            '$controller_ip uid 10001',
+            readiness,
+        )
+        self.assertIn("fixture kernel-autobind route identity is not exact", readiness)
 
     def test_readiness_accepts_only_equivalent_systemd_policy_renderings(self) -> None:
         socket_renderings = {

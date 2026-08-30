@@ -8,6 +8,8 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 controller_ip={{ voice_fixture_controller_ipv4 | quote }}
+controller_interface={{ voice_fixture_controller_interface | quote }}
+controller_gateway={{ voice_fixture_controller_gateway_ipv4 | quote }}
 edge_subnet={{ voice_fixture_edge_subnet_ipv4 | quote }}
 pki_root={{ voice_fixture_pki_root | quote }}
 runtime_root={{ voice_fixture_runtime_root | quote }}
@@ -554,6 +556,18 @@ for required_mount_option in nosuid nodev noexec; do
             exit 3
             ;;
     esac
+done
+
+for edge_ip in \
+    {{ voice_fixture_sbc1_ipv4 | quote }} \
+    {{ voice_fixture_sbc2_ipv4 | quote }}; do
+    edge_route=$(ip -4 route get "$edge_ip" uid 10001 | head -n 1)
+    expected_edge_route="$edge_ip via $controller_gateway dev $controller_interface src $controller_ip uid 10001"
+    if [[ $edge_route != "$expected_edge_route" ]]; then
+        printf 'fixture kernel-autobind route identity is not exact for %s\n' \
+            "$edge_ip" >&2
+        exit 3
+    fi
 done
 
 units=(vivolution-voice-fixture-asterisk.service vivolution-voice-fixture-sipp.service)

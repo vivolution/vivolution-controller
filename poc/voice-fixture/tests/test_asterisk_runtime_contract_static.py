@@ -164,13 +164,66 @@ class AsteriskRuntimeContractStaticTests(unittest.TestCase):
             "third-party/pjproject/source/pjsip/src/pjsip/sip_transport_tls.c",
             containerfile,
         )
-        tag = "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind2"
+        tag = "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind3"
         self.assertIn(tag, defaults)
         self.assertIn(tag, teardown_defaults)
 
         repeated_mkdir = "    mkdir --parents \\\n    mkdir --parents \\"
         self.assertNotIn(repeated_mkdir, containerfile)
         self.assertEqual(containerfile.count("    mkdir --parents \\\n"), 1)
+
+    def test_pjproject_tls_client_uses_kernel_autobind_for_zero_port(self) -> None:
+        patch = self.read(
+            "roles/voice_fixture/files/asterisk/"
+            "pjproject-tls-kernel-autobind.patch"
+        )
+        containerfile = self.read("roles/voice_fixture/files/asterisk/Containerfile")
+
+        self.assertEqual(patch.count("--- a/"), 1)
+        self.assertIn(
+            "--- a/pjlib/src/pj/ssl_sock_imp_common.c\n"
+            "+++ b/pjlib/src/pj/ssl_sock_imp_common.c\n",
+            patch,
+        )
+        self.assertIn(
+            "if (!port_range && pj_sockaddr_get_port(localaddr) == 0)",
+            patch,
+        )
+        self.assertIn(
+            "+#if defined(VIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT) && \\\n"
+            "+    VIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT == 1",
+            patch,
+        )
+        self.assertIn("status = PJ_SUCCESS", patch)
+        self.assertEqual(
+            [
+                line
+                for line in patch.splitlines()
+                if line.startswith("-") and not line.startswith("---")
+            ],
+            ["-    /* Bind socket */", "-    if (port_range) {"],
+        )
+        self.assertIn("+    if (port_range) {", patch)
+        self.assertIn(
+            "CFLAGS='-DVIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT=1' "
+            "./configure",
+            containerfile,
+        )
+        self.assertIn(
+            "'-DVIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT=1' \\\n"
+            "        third-party/pjproject/source/build.mak",
+            containerfile,
+        )
+        self.assertIn(
+            "COPY pjproject-tls-kernel-autobind.patch ", containerfile
+        )
+        self.assertIn(
+            "< /tmp/pjproject-tls-kernel-autobind.patch", containerfile
+        )
+        self.assertIn(
+            "third-party/pjproject/source/pjlib/src/pj/ssl_sock_imp_common.c",
+            containerfile,
+        )
 
     def test_readiness_executes_exact_asterisk_contract(self) -> None:
         readiness = self.read(

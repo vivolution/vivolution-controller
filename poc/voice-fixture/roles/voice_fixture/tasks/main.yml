@@ -24,6 +24,8 @@
   ansible.builtin.assert:
     that:
       - voice_fixture_controller_ipv4 == '10.20.1.4'
+      - voice_fixture_controller_interface == 'eth0'
+      - voice_fixture_controller_gateway_ipv4 == '10.20.1.1'
       - voice_fixture_edge_subnet_ipv4 == '10.20.2.0/24'
       - voice_fixture_sbc1_ipv4 == '10.20.2.4'
       - voice_fixture_sbc2_ipv4 == '10.20.2.5'

@@ -8,6 +8,7 @@ ARG PJPROJECT_VERSION=2.17
 ARG PJPROJECT_SOURCE_SHA256=04b2eb1f0f01aa0ad1945b167171843448a51aa6b7c3e806496d434f13a112b7
 
 COPY pjsip-tls-listener-bind-fail-closed.patch /tmp/pjsip-tls-listener-bind-fail-closed.patch
+COPY pjproject-tls-kernel-autobind.patch /tmp/pjproject-tls-kernel-autobind.patch
 
 RUN set -eux; \
     apt-get update; \
@@ -56,7 +57,7 @@ WORKDIR /usr/src/asterisk-${ASTERISK_VERSION}
 
 RUN set -eux; \
     export EXTERNALS_CACHE_DIR=/usr/src/cache; \
-    ./configure \
+    CFLAGS='-DVIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT=1' ./configure \
         --prefix=/usr \
         --sysconfdir=/etc \
         --localstatedir=/var \
@@ -65,9 +66,18 @@ RUN set -eux; \
     patch --batch --forward --strip=1 \
         --directory=third-party/pjproject/source \
         < /tmp/pjsip-tls-listener-bind-fail-closed.patch; \
+    patch --batch --forward --strip=1 \
+        --directory=third-party/pjproject/source \
+        < /tmp/pjproject-tls-kernel-autobind.patch; \
     grep --fixed-strings --quiet \
         'if (status != PJ_SUCCESS && status != PJ_EPENDING)' \
         third-party/pjproject/source/pjsip/src/pjsip/sip_transport_tls.c; \
+    grep --fixed-strings --quiet \
+        'if (!port_range && pj_sockaddr_get_port(localaddr) == 0)' \
+        third-party/pjproject/source/pjlib/src/pj/ssl_sock_imp_common.c; \
+    grep --fixed-strings --quiet -- \
+        '-DVIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT=1' \
+        third-party/pjproject/source/build.mak; \
     make menuselect.makeopts; \
     menuselect/menuselect \
         --disable BUILD_NATIVE \
