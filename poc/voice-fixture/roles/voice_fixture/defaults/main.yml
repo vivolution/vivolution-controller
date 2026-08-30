@@ -37,6 +37,7 @@ voice_fixture_pki_generations_root: /etc/vivolution/voice-fixture/pki-generation
 voice_fixture_pki_staging_root: /etc/vivolution/voice-fixture/pki-staging
 voice_fixture_pki_extensions_root: /etc/vivolution/voice-fixture/pki-extensions
 voice_fixture_edge_export_root: /var/lib/vivolution/voice-fixture/edge-export
+voice_fixture_pki_issuer_state_root: /var/lib/vivolution/voice-fixture/pki-issuer-state
 
 voice_fixture_base_image: docker.io/library/debian@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
 voice_fixture_python_base_image: docker.io/library/python@sha256:7e3a6aca9d74f93cca21a91d86a8dad8c34749afd5b4a98ee481c9c47b9f5ed4
@@ -52,3 +53,7 @@ voice_fixture_leaf_days: 7
 voice_fixture_minimum_certificate_seconds: 86400
 voice_fixture_leaf_renewal_seconds: 259200
 voice_fixture_ca_renewal_seconds: 1209600
+voice_fixture_force_leaf_rotation: false
+voice_fixture_force_leaf_rotation_acknowledgement: ''
+voice_fixture_force_leaf_rotation_request_id: ''
+voice_fixture_force_leaf_rotation_expected_generation: ''

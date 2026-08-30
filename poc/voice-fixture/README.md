@@ -130,9 +130,14 @@ certificate is renewed fourteen days before expiry with the same protected CA
 key and subject, so both the previous and renewed CA certificates validate the
 overlap while the two Edges are re-pinned serially. Prior generations are
 retained root-only for rollback and are never overwritten.
-The root-only CA serial counter is carried into each new generation and advanced
-for every leaf. Renewed certificates therefore never reuse a serial under the
-same CA subject/key, including during the overlap window.
+The CA serial high-water mark lives outside every selectable generation at
+`/var/lib/vivolution/voice-fixture/pki-issuer-state/ca.srl`. A root-only,
+single-link reservation helper locks that authority and atomically advances and
+fsyncs it before any leaf is signed. Each build copies the already-committed
+high-water mark into its staged generation and signs leaves with the explicitly
+reserved serials. A crash can therefore abandon serials, but neither selecting
+an older generation nor retrying an orphaned build can reuse them under the
+same CA subject/key.
 
 `deploy/playbooks/rotate-synthetic-fixture-pki.yml` performs the complete
 rotation transaction: refresh CP1, fetch only the current CA and node-specific
@@ -142,6 +147,54 @@ time with crash rollback, then rerun readiness and both bidirectional call
 paths. It requires the exact acknowledgement
 `ROTATE_SYNTHETIC_FIXTURE_PKI_ON_BOTH_EDGES`; it refuses Direct Routing nodes or
 an incomplete two-node fleet.
+
+That operational play remains expiry-aware and may correctly report an
+unchanged generation when every leaf is outside its renewal window. It is not
+evidence that a rotation actually occurred. The separate
+`deploy/playbooks/qualify-forced-synthetic-fixture-leaf-rotation.yml` gate
+requires a unique `YYYYMMDDTHHMMSSZ-<12 lowercase hex>` request ID plus the
+exact acknowledgement
+`FORCE_SYNTHETIC_FIXTURE_LEAVES_ONCE_AND_REPIN_BOTH_EDGES`. It refuses a CA
+inside its renewal window, forces exactly one complete four-leaf generation,
+and proves every leaf serial, PEM digest, and SHA-256 fingerprint changed while
+the CA certificate remained byte-for-byte identical. It then restarts both
+fixture services and binds their actively served mTLS leaf fingerprints to the
+selected Asterisk and SIPp certificate files.
+
+The forced gate writes a root-owned CP1 request journal before selection. A
+safe rerun either completes the pending atomic generation or recognizes the
+already-selected public transition; it never forces a second generation for
+the same request. The forced request ID is stored as canonical public metadata
+inside the generated content-addressed PKI directory, and the role also pins
+the exact PREPARED generation before building. Finalization therefore rejects
+an ordinary rotation or another request's otherwise valid all-leaf transition.
+Once canonical acceptance exists, the same request first
+revalidates every retained source against that acceptance, removes only
+leftover credential staging and snapshot helpers, and exits without another
+re-pin, call, or timestamped evidence write. This also closes the crash window
+between the atomic acceptance write and final cleanup.
+
+Previous immutable generations remain root-protected for operator recovery.
+Each Edge is re-pinned serially with the existing locked, journaled helper,
+which restores its prior credentials and runtime authority if service
+validation fails. Immediately before and after each re-pin, both the target and
+peer are captured through a root-only collector. The offline compiler requires
+byte-and-metadata-stable protected NodeFacts, exact runtime authority, complete
+ordered passing runtime health, Agent v3 file identity and committed LKG with
+no pending candidate, unchanged services/boot identity, and absent runtime and
+fixture-rotation journals. Only the selected fixture client certificate and
+key digests may change; the CA, candidate, facts, allocation, route identity,
+and peer must remain fixed.
+
+After both Edges pass that continuity contract, the gate runs fresh, fully
+manifested bidirectional calls through SBC1 and SBC2. It exports each exact Edge
+CDR and independently reconciles it to the fixture's raw Asterisk CDR and full
+manifest. The compiler then cross-binds both sides to the same call IDs, node,
+tenant allocation, route, generation, NodeFacts digest, and runtime-authority
+digest before atomically writing canonical mode-0600 acceptance under the
+inventory's ignored `generated/` tree. The result asserts only the bounded
+private synthetic POC: it does not claim Microsoft 365, PSTN, carrier, or
+production certificate-lifecycle interoperability.
 
 ## Install
 
@@ -400,6 +453,32 @@ prove Microsoft OPTIONS detection, Microsoft gateway selection, live Teams,
 PSTN interworking, or active-call migration. Evidence therefore fixes
 `liveM365Interoperability=NOT_ASSERTED` and
 `activeCallMigration=NOT_TESTED_NOT_CLAIMED`.
+
+### Reboot both active Edges without weakening activation authority
+
+Once both Edge candidates and the fixture calls are healthy, qualify boot
+persistence with the separate serialized reboot playbook. Use its one-run
+acknowledgement only on the command line:
+
+```bash
+ANSIBLE_ROLES_PATH=deploy/roles ansible-playbook \
+  -i /absolute/private/poc-edge/hosts.yml \
+  -e edge_active_reboot_acknowledgement=REBOOT_ACTIVE_SYNTHETIC_EDGES_SBC1_THEN_SBC2_ONCE \
+  deploy/playbooks/qualify-active-edge-reboots.yml
+```
+
+This reboots SBC1, proves a changed boot ID, identical committed runtime plus
+protected Agent last-known-good state with no pending candidate, and a new
+complete SBC1 fixture result plus exact Edge/fixture CDR reconciliation while
+SBC2 remains healthy. It durably stores the actual SBC2 snapshot observed
+during SBC1's SSH loss, then repeats the same gate for SBC2 while SBC1 remains
+healthy. A locked crash journal resumes the same evidence request and never
+schedules a second reboot after an ambiguous or late reconnect; epoch and
+monotonic deltas must retain one controller clock origin. It never calls the
+installation playbook and cannot stage, activate, recover, or replace a
+candidate. Canonical evidence is written below the ignored inventory's
+`generated/active-edge-reboot/` directory and remains explicitly private,
+synthetic, and no-PSTN.
 
 ## Teardown
 

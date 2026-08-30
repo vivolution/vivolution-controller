@@ -555,6 +555,111 @@ evidence is written only below the ignored private inventory's
 `activeCallMigration=NOT_TESTED_NOT_CLAIMED`: the private runner selects SBC2
 itself and does not simulate or claim Microsoft OPTIONS/gateway selection.
 
+## Forced synthetic fixture leaf-rotation gate
+
+`playbooks/qualify-forced-synthetic-fixture-leaf-rotation.yml` proves one real
+four-leaf fixture renewal and the serialized SBC1/SBC2 re-pin path; the normal
+expiry-aware rotation play is not sufficient because it may correctly remain
+unchanged. Supply a new bounded request ID and the exact one-time
+acknowledgement in protected extra-vars. The fixture CA must remain outside its
+renewal window, and its certificate bytes must not change.
+
+The fixture reserves all new leaf serials in a locked, root-owned high-water
+authority outside the selectable PKI generations. That counter is atomically
+advanced and fsynced before signing. An interrupted build can skip serials but
+cannot reuse them after an orphaned generation, rollback, or retry.
+The PREPARED generation path is passed back into the role as an exact
+precondition, while the request ID and acknowledgement are canonical metadata
+included in the new generation's content digest. Finalization accepts only
+that marker, so an intervening operational rotation or a different forced
+request cannot be mistaken for this transaction.
+
+The Edge transition is literal SBC1 then SBC2. A root-only collector captures
+both target and peer immediately before and after each re-pin and again after
+the calls. The compiler requires stable protected NodeFacts bytes and metadata,
+stable candidate/runtime/Agent v3 identity, exact ordered passing runtime
+checks, no pending Agent candidate, and absent runtime and fixture journals.
+The same tenant allocation, generation, cluster, service, Microsoft tenant,
+and two-direction route must bind both nodes. Only the selected fixture client
+certificate and key digests may change; the CA and every other runtime-
+authority member remain fixed.
+
+Each node then completes a new manifested two-direction synthetic call. The
+play exports that exact Edge CDR and reconciles it to the fixture's raw
+Asterisk CDR and complete manifest. Canonical acceptance is written only after
+the compiler cross-binds call IDs, route, generation, node, NodeFacts, and
+runtime authority across both evidence sources. If acceptance was already
+written, an exact-request rerun first recompiles all retained inputs and then
+performs cleanup only; it never repeats a re-pin or call. This makes a crash
+after acceptance but before cleanup safely resumable. The conclusion remains
+`liveM365Interoperability=NOT_ASSERTED` and
+`PSTN=NOT_TESTED_NOT_CLAIMED`.
+
+## Active Edge reboot-persistence gate
+
+After both signed candidates are committed and the ordinary synthetic call
+gates pass, run `playbooks/qualify-active-edge-reboots.yml` once. This is a
+dedicated post-activation workflow; it deliberately does not import or reuse
+`install-edge.yml`. Supply its exact acknowledgement only on that command
+line, never as an inventory default:
+
+```bash
+ANSIBLE_ROLES_PATH=deploy/roles ansible-playbook \
+  -i /absolute/private/poc-edge/hosts.yml \
+  -e edge_active_reboot_acknowledgement=REBOOT_ACTIVE_SYNTHETIC_EDGES_SBC1_THEN_SBC2_ONCE \
+  deploy/playbooks/qualify-active-edge-reboots.yml
+```
+
+The play is fail-closed and serialized in the literal order SBC1 then SBC2.
+Immediately before each reboot it binds the protected node-facts and runtime-
+authority bytes and hashes, the complete active candidate status, the exact
+ordered baseline `runtimeChecks`, the protected Agent v3 state-file metadata
+and hash, a committed Agent last-known-good identity matching the runtime with
+no pending candidate, required service/timer state, kernel boot ID, and the
+absence of a runtime transaction journal. The other SBC must carry the same
+first-tenant allocation and is checked before, during the target's observed
+SSH loss, and after the target's post-boot call.
+
+One node-local transient timer schedules the reboot only after the SSH command
+returns. The controller must observe port 22 close within 60 seconds, reconnect
+with Python within another 300 seconds, and finish SSH reconnection inside the
+360-second total-reconnect bound. It must separately observe the changed kernel
+boot ID and the full runtime/Agent readiness contract inside a 480-second
+total-ready bound. Reconnection alone is insufficient: immutable facts and
+authority metadata/hashes, committed Agent state, complete runtime status and
+health, recovery ownership, all required units, and journal absence must equal
+their pre-reboot values.
+Epoch and monotonic deltas must also identify one controller clock origin;
+runner reboot or an overdue reconnect is reconciled incomplete only after the
+returned target proves a changed boot, exact committed LKG, full health, and
+no journal. It is never converted into a second reboot attempt.
+
+The target then completes a fresh, fully manifested two-direction fixture
+call. The workflow exports the exact Edge CDR and reconciles it with the raw
+fixture CDR and complete fixture manifest; both target and peer are checked
+again afterward. The actual peer snapshot collected while target SSH is down
+is stored as protected canonical bytes and digest in the durable journal. It
+is not reconstructed from the preflight snapshot, and final observation
+timings and identity are required to equal their journal and preflight
+authorities exactly.
+
+Every run atomically reserves a new mode-0700 directory below the ignored
+private inventory's `generated/active-edge-reboot/` path. A locked,
+self-digested `.active-run/state.json` journals `PENDING`, `ARMED`,
+`SCHEDULED`, `SSH_LOST`, `RECONNECTED`, and `QUALIFIED` transitions. A rerun
+resumes that same request and evidence leaf. Ambiguous transient-unit,
+unobserved-loss, late-reconnect, missing-reboot, and late-readiness outcomes
+are durably reconciled terminally; a `COMPLETE` rerun only recompiles the
+fixed evidence and never schedules either node again. The offline compiler
+`scripts/active_edge_reboot_evidence.py` rejects missing or extra inputs,
+linked/unprotected files, changed identity hashes, an incomplete or reordered
+health inventory, an Agent/runtime mismatch, an unchanged boot ID, cross-play
+candidate drift, peer drift, controller clock-origin drift, timing outside the
+bounds, incomplete Edge/fixture CDR reconciliation, or an incomplete or
+tampered fixture manifest. Its canonical `acceptance.json`
+contains only runtime/public identity, hashes, timing, synthetic call summary,
+and the conclusion `liveM365Interoperability=NOT_ASSERTED`.
+
 ## Interrupted Edge activation recovery
 
 If SSH or the operator process is lost after Agent staging, do not delete state

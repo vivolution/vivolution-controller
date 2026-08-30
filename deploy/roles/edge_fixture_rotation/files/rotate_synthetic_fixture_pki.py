@@ -505,6 +505,10 @@ def main() -> int:
                     "authorityDigest": _digest(
                         _secure_read(AUTHORITY, modes=(0o600,), maximum=MAX_JSON_BYTES)
                     ),
+                    "fixtureCaDigest": _digest(incoming["fixtureCaCrt"]),
+                    "fixtureClientCertificateDigest": _digest(
+                        incoming["fixtureClientCrt"]
+                    ),
                     "nodeId": current_context[1].node_id,
                     "opensipsRestarted": False,
                     "status": "FIXTURE_PKI_UNCHANGED",

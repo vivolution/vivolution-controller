@@ -46,6 +46,9 @@
       - voice_fixture_sipp_uas_rtp_port | int == 22000
       - voice_fixture_sipp_uac_rtp_port | int == 22032
       - voice_fixture_runtime_root == '/run/vivolution-voice-fixture'
+      - >-
+        voice_fixture_pki_issuer_state_root ==
+        '/var/lib/vivolution/voice-fixture/pki-issuer-state'
       - voice_fixture_sipp_version == '3.7.7'
       - voice_fixture_sipp_source_sha256 == 'e55b15f567760e9febeef366a1ab51a5239d197a132ce931b78c826d22d31e69'
       - voice_fixture_sipp_image_tag == 'localhost/vivolution/voice-fixture-sipp:3.7.7-sni1-txn1-sips1'
@@ -572,6 +575,7 @@
   ansible.builtin.set_fact:
     voice_fixture_pki_rotation_required: >-
       {{ not (voice_fixture_current_pki_link.stat.exists | default(false)) or
+         (voice_fixture_force_leaf_rotation | bool) or
          (voice_fixture_current_ca_validity.rc | default(1) | int != 0) or
          ((voice_fixture_current_leaf_validity.results | default([]) |
            selectattr('rc', 'ne', 0) | list | length) > 0) or
@@ -584,6 +588,51 @@
     voice_fixture_ca_rotation_required: >-
       {{ not (voice_fixture_current_pki_link.stat.exists | default(false)) or
          (voice_fixture_current_ca_validity.rc | default(1) | int != 0) }}
+
+- name: Bound an explicitly forced fixture leaf-only rotation
+  ansible.builtin.assert:
+    that:
+      - voice_fixture_force_leaf_rotation | type_debug == 'bool'
+      - >-
+        not (voice_fixture_force_leaf_rotation | bool) or
+        voice_fixture_force_leaf_rotation_acknowledgement ==
+        'FORCE_SYNTHETIC_FIXTURE_LEAVES_ONCE_AND_REPIN_BOTH_EDGES'
+      - >-
+        not (voice_fixture_force_leaf_rotation | bool) or
+        (voice_fixture_current_pki_link.stat.exists | default(false))
+      - >-
+        not (voice_fixture_force_leaf_rotation | bool) or
+        (voice_fixture_current_ca_validity.rc | default(1) | int == 0)
+      - >-
+        not (voice_fixture_force_leaf_rotation | bool) or
+        not (voice_fixture_ca_rotation_required | bool)
+      - >-
+        not (voice_fixture_force_leaf_rotation | bool) or
+        voice_fixture_force_leaf_rotation_request_id is
+        match('^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$')
+      - >-
+        not (voice_fixture_force_leaf_rotation | bool) or
+        voice_fixture_force_leaf_rotation_expected_generation is
+        match('^' ~ (voice_fixture_pki_generations_root | regex_escape) ~
+              '/generation-[0-9a-f]{32}$')
+      - >-
+        not (voice_fixture_force_leaf_rotation | bool) or
+        voice_fixture_current_pki_generation.stdout ==
+        voice_fixture_force_leaf_rotation_expected_generation
+    fail_msg: >-
+      An explicit fixture leaf rotation requires the exact acknowledgement,
+      request ID, exact expected current generation, an existing atomic
+      generation, and a CA outside its renewal window. The forced
+      qualification never rotates the fixture trust anchor or crosses an
+      unrelated selected-generation transition.
+
+- name: Install the crash-safe fixture CA serial reservation helper
+  ansible.builtin.copy:
+    src: bin/reserve_fixture_ca_serials.py
+    dest: /usr/local/libexec/vivolution-reserve-fixture-ca-serials
+    owner: root
+    group: root
+    mode: '0500'
 
 - name: Read the current per-issuer leaf serial inventory
   ansible.builtin.command:
@@ -646,16 +695,6 @@
       no_log: true
       when: voice_fixture_current_pki_link.stat.exists | default(false)
 
-    - name: Continue the current CA serial counter without reuse
-      ansible.builtin.copy:
-        src: "{{ voice_fixture_pki_root }}/ca.srl"
-        dest: "{{ voice_fixture_pki_staging_root }}/ca.srl"
-        remote_src: true
-        owner: root
-        group: root
-        mode: '0600'
-      when: voice_fixture_current_pki_link.stat.exists | default(false)
-
     - name: Generate missing first-generation private keys
       ansible.builtin.command:
         argv:
@@ -671,17 +710,55 @@
       no_log: true
       when: not (voice_fixture_current_pki_link.stat.exists | default(false))
 
-    - name: Seed the first CA serial counter with 128 random bits
+    - name: Durably reserve every leaf serial before signing any certificate
       ansible.builtin.command:
         argv:
-          - openssl
-          - rand
-          - -hex
-          - -out
-          - "{{ voice_fixture_pki_staging_root }}/ca.srl"
-          - '16'
-      no_log: true
-      when: not (voice_fixture_current_pki_link.stat.exists | default(false))
+          - /usr/bin/python3
+          - -I
+          - -B
+          - /usr/local/libexec/vivolution-reserve-fixture-ca-serials
+          - --count
+          - "{{ voice_fixture_leaf_certificates | length | string }}"
+      register: voice_fixture_ca_serial_reservation_raw
+      changed_when: true
+
+    - name: Require one exact durable serial reservation
+      ansible.builtin.set_fact:
+        voice_fixture_ca_serial_reservation: >-
+          {{ voice_fixture_ca_serial_reservation_raw.stdout | from_json }}
+
+    - name: Validate the complete reserved serial inventory
+      ansible.builtin.assert:
+        that:
+          - >-
+            voice_fixture_ca_serial_reservation.apiVersion ==
+            'edge.vivolution.ae/synthetic-fixture-ca-serial-reservation/v0.1'
+          - >-
+            voice_fixture_ca_serial_reservation.status ==
+            'FIXTURE_CA_SERIALS_RESERVED_DURABLY'
+          - >-
+            voice_fixture_ca_serial_reservation.count | int ==
+            voice_fixture_leaf_certificates | length
+          - >-
+            voice_fixture_ca_serial_reservation.serials | length ==
+            voice_fixture_leaf_certificates | length
+          - >-
+            voice_fixture_ca_serial_reservation.serials | unique | length ==
+            voice_fixture_leaf_certificates | length
+          - >-
+            voice_fixture_ca_serial_reservation.serials |
+            select('match', '^0x[0-9A-F]{1,40}$') | list | length ==
+            voice_fixture_leaf_certificates | length
+        fail_msg: The fixture CA did not durably reserve one unique serial per leaf.
+
+    - name: Snapshot the durable issuer high-water mark into the staged generation
+      ansible.builtin.copy:
+        src: "{{ voice_fixture_pki_issuer_state_root }}/ca.srl"
+        dest: "{{ voice_fixture_pki_staging_root }}/ca.srl"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0600'
 
     - name: Retain the current CA certificate when it is outside renewal
       ansible.builtin.copy:
@@ -749,13 +826,15 @@
           - "{{ voice_fixture_pki_staging_root }}/ca.crt"
           - -CAkey
           - "{{ voice_fixture_pki_staging_root }}/ca.key"
-          - -CAserial
-          - "{{ voice_fixture_pki_staging_root }}/ca.srl"
+          - -set_serial
+          - "{{ voice_fixture_ca_serial_reservation.serials[voice_fixture_leaf_index] }}"
           - -extfile
           - "{{ voice_fixture_pki_extensions_root }}/{{ item.name }}-extensions.cnf"
           - -out
           - "{{ voice_fixture_pki_staging_root }}/{{ item.name }}.crt"
       loop: "{{ voice_fixture_leaf_certificates }}"
+      loop_control:
+        index_var: voice_fixture_leaf_index
       no_log: true
 
     - name: Read the renewed per-issuer leaf serial inventory
@@ -815,6 +894,28 @@
         group: root
         mode: '0644'
 
+    - name: Bind this generation to its exact rotation authority
+      ansible.builtin.copy:
+        content: >
+          {{ {
+               'acknowledgement':
+                 (voice_fixture_force_leaf_rotation_acknowledgement
+                  if (voice_fixture_force_leaf_rotation | bool) else none),
+               'apiVersion':
+                 'edge.vivolution.ae/synthetic-fixture-generation-request/v0.1',
+               'requestId':
+                 (voice_fixture_force_leaf_rotation_request_id
+                  if (voice_fixture_force_leaf_rotation | bool) else none),
+               'scope':
+                 ('BOUNDED_PRIVATE_SYNTHETIC_POC'
+                  if (voice_fixture_force_leaf_rotation | bool)
+                  else 'EXPIRY_AWARE_OPERATIONAL')
+             } | to_json(sort_keys=True, separators=(',', ':')) }}
+        dest: "{{ voice_fixture_pki_staging_root }}/generation-request.json"
+        owner: root
+        group: root
+        mode: '0644'
+
     - name: Verify staged fixture leaves before selection
       ansible.builtin.command:
         argv:
@@ -844,7 +945,7 @@
         - { path: sbc2.crt, seconds: "{{ voice_fixture_leaf_renewal_seconds }}" }
       changed_when: false
 
-    - name: Calculate staged PKI content digests
+    - name: Calculate staged PKI public and request-identity digests
       ansible.builtin.stat:
         path: "{{ voice_fixture_pki_staging_root }}/{{ item }}"
         follow: false
@@ -858,6 +959,7 @@
         - sbc2.crt
         - public-ca.crt
         - combined-ca.crt
+        - generation-request.json
       register: voice_fixture_staged_public_digests
 
     - name: Derive the immutable generation path from all public certificates
@@ -975,7 +1077,6 @@
     owner: root
     group: root
     mode: '0644'
-
 - name: Protect the persistent fixture CA serial counter
   ansible.builtin.file:
     path: "{{ voice_fixture_pki_root }}/ca.srl"
@@ -996,6 +1097,20 @@
     owner: root
     group: root
     mode: '0644'
+
+- name: Inspect generation-bound rotation authority metadata
+  ansible.builtin.stat:
+    path: "{{ voice_fixture_pki_root }}/generation-request.json"
+    follow: false
+  register: voice_fixture_generation_request_metadata
+
+- name: Protect the generation-bound rotation authority
+  ansible.builtin.file:
+    path: "{{ voice_fixture_pki_root }}/generation-request.json"
+    owner: root
+    group: root
+    mode: '0644'
+  when: voice_fixture_generation_request_metadata.stat.exists | default(false)
 
 - name: Require every fixture leaf to be valid for client authentication
   ansible.builtin.command:

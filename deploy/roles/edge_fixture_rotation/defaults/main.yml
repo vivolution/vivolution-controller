@@ -11,3 +11,12 @@ edge_fixture_rotation_client_certificate_sha256: ''
 edge_fixture_rotation_client_key_sha256: ''
 edge_fixture_rotation_local_evidence_root: >-
   {{ edge_fixture_rotation_controller_staging_root }}/evidence
+edge_fixture_rotation_required_runtime_checks:
+  - systemd-nftables
+  - systemd-rtpengine-daemon
+  - systemd-opensips
+  - opensips-active-parse
+  - nft-owned-default-deny
+  - rtpengine-ng-ping
+  - listeners-exact
+  - rtpengine-control-loopback

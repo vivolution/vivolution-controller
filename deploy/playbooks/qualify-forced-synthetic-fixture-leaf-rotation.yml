@@ -1,0 +1,994 @@
+---
+- name: Force and journal one exact CP1 synthetic fixture leaf generation
+  hosts: fixture_controller
+  become: true
+  gather_facts: false
+  serial: 1
+  order: sorted
+  any_errors_fatal: true
+  vars:
+    fixture_rotation_acknowledgement: >-
+      FORCE_SYNTHETIC_FIXTURE_LEAVES_ONCE_AND_REPIN_BOTH_EDGES
+    fixture_rotation_inventory_dir: "{{ inventory_dir }}"
+    fixture_rotation_local_root: >-
+      {{ fixture_rotation_inventory_dir }}/generated/forced-fixture-leaf-rotation/{{ fixture_rotation_request_id }}
+    fixture_rotation_local_credentials: >-
+      {{ fixture_rotation_inventory_dir }}/generated/forced-fixture-leaf-rotation/.credentials-{{ fixture_rotation_request_id }}
+    fixture_rotation_state_helper: >-
+      {{ playbook_dir }}/../scripts/forced_fixture_leaf_rotation_state.py
+    fixture_rotation_remote_state_helper: >-
+      /usr/local/libexec/vivolution-voice-fixture-forced-leaf-rotation
+    fixture_rotation_evidence_compiler: >-
+      {{ playbook_dir }}/../scripts/forced_fixture_leaf_rotation_evidence.py
+    fixture_rotation_edge_snapshot_source: >-
+      {{ playbook_dir }}/../scripts/forced_fixture_leaf_rotation_edge_snapshot.py
+    fixture_rotation_edge_snapshot_remote: >-
+      /run/lock/vivolution-forced-fixture-rotation-edge-snapshot.py
+  pre_tasks:
+    - name: Require the exact bounded forced-rotation identity
+      ansible.builtin.assert:
+        that:
+          - groups.get('fixture_controller', []) | length == 1
+          - groups.get('edge_nodes', []) | sort == ['sbc1', 'sbc2']
+          - inventory_hostname == groups['fixture_controller'][0]
+          - >-
+            voice_fixture_forced_rotation_acknowledgement | default('') ==
+            fixture_rotation_acknowledgement
+          - >-
+            fixture_rotation_request_id | default('') is
+            match('^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$')
+          - fixture_rotation_inventory_dir is match('^/')
+          - hostvars['sbc1']['inventory_dir'] == fixture_rotation_inventory_dir
+          - hostvars['sbc2']['inventory_dir'] == fixture_rotation_inventory_dir
+          - hostvars['sbc1'].edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+          - hostvars['sbc2'].edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+          - hostvars['sbc1'].edge_generation | int >= 1
+          - >-
+            hostvars['sbc1'].edge_generation | int ==
+            hostvars['sbc2'].edge_generation | int
+          - fixture_rotation_local_root is match('^/.+/generated/forced-fixture-leaf-rotation/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$')
+        fail_msg: >-
+          Forced fixture leaf qualification requires one CP1, the exact two
+          positive-generation synthetic Edges, one absolute ignored inventory
+          root, a unique request ID, and the explicit one-run acknowledgement.
+  tasks:
+    - name: Create the protected ignored local evidence directory
+      ansible.builtin.file:
+        path: "{{ fixture_rotation_local_root }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      become: false
+
+    - name: Create the protected transient credential directory
+      ansible.builtin.file:
+        path: "{{ fixture_rotation_local_credentials }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      become: false
+
+    - name: Inspect an immutable acceptance from this exact prior request
+      ansible.builtin.stat:
+        path: "{{ fixture_rotation_local_root }}/acceptance.json"
+        follow: false
+        get_checksum: true
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      register: fixture_rotation_existing_acceptance
+
+    - name: Default this request to unfinished
+      ansible.builtin.set_fact:
+        fixture_rotation_request_already_accepted: false
+
+    - name: Revalidate an existing exact-request acceptance before any mutation
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ fixture_rotation_evidence_compiler }}"
+          - --evidence-dir
+          - "{{ fixture_rotation_local_root }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      register: fixture_rotation_existing_acceptance_validation
+      when: fixture_rotation_existing_acceptance.stat.exists | default(false) | bool
+
+    - name: Read the revalidated exact-request acceptance
+      ansible.builtin.slurp:
+        src: "{{ fixture_rotation_local_root }}/acceptance.json"
+      delegate_to: localhost
+      become: false
+      register: fixture_rotation_existing_acceptance_raw
+      when: fixture_rotation_existing_acceptance.stat.exists | default(false) | bool
+
+    - name: Require the complete immutable acceptance to name this exact request
+      ansible.builtin.assert:
+        that:
+          - >-
+            fixture_rotation_existing_acceptance_validation.stdout is
+            match('^FORCED_FIXTURE_LEAF_ROTATION_ACCEPTED sha256:[0-9a-f]{64}$')
+          - >-
+            (fixture_rotation_existing_acceptance_raw.content | b64decode |
+             from_json).requestId == fixture_rotation_request_id
+          - >-
+            (fixture_rotation_existing_acceptance_raw.content | b64decode |
+             from_json).status == 'SYNTHETIC_FIXTURE_LEAF_ROTATION_ACCEPTED'
+        fail_msg: Existing acceptance is not the exact complete immutable request.
+      when: fixture_rotation_existing_acceptance.stat.exists | default(false) | bool
+
+    - name: Recognize the revalidated immutable exact-request acceptance
+      ansible.builtin.set_fact:
+        fixture_rotation_request_already_accepted: true
+      when: fixture_rotation_existing_acceptance.stat.exists | default(false) | bool
+
+    - name: Remove only leftover transient credentials from an accepted request
+      ansible.builtin.file:
+        path: "{{ fixture_rotation_local_credentials }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      when: fixture_rotation_request_already_accepted | bool
+
+    - name: Remove only the transient Edge snapshot collectors from an accepted request
+      ansible.builtin.file:
+        path: "{{ fixture_rotation_edge_snapshot_remote }}"
+        state: absent
+      loop: [sbc1, sbc2]
+      delegate_to: "{{ item }}"
+      when: fixture_rotation_request_already_accepted | bool
+
+    - name: Finish an already accepted exact request without re-pinning or new calls
+      ansible.builtin.meta: end_play
+      when: fixture_rotation_request_already_accepted | bool
+
+    - name: Install the fixed forced-rotation state helper
+      ansible.builtin.copy:
+        src: "{{ fixture_rotation_state_helper }}"
+        dest: "{{ fixture_rotation_remote_state_helper }}"
+        owner: root
+        group: root
+        mode: '0500'
+
+    - name: Prepare or reconcile the durable forced-rotation request
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - "{{ fixture_rotation_remote_state_helper }}"
+          - prepare
+          - --request-id
+          - "{{ fixture_rotation_request_id }}"
+      changed_when: >-
+        (fixture_rotation_prepare.stdout | from_json).action == 'ROTATE_REQUIRED'
+      register: fixture_rotation_prepare
+
+    - name: Require an exact resumable forced-rotation decision
+      ansible.builtin.assert:
+        that:
+          - >-
+            (fixture_rotation_prepare.stdout | from_json).keys() | sort ==
+            ['action', 'requestId', 'state']
+          - >-
+            (fixture_rotation_prepare.stdout | from_json).action in
+            ['ROTATE_REQUIRED', 'ROTATION_SELECTED', 'ROTATION_ALREADY_SELECTED']
+          - >-
+            (fixture_rotation_prepare.stdout | from_json).requestId ==
+            fixture_rotation_request_id
+        fail_msg: The forced fixture rotation journal did not return an exact decision.
+
+    - name: Build and atomically select the explicitly forced leaf generation
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../../poc/voice-fixture/roles/voice_fixture"
+      vars:
+        voice_fixture_force_leaf_rotation: >-
+          {{ (fixture_rotation_prepare.stdout | from_json).action == 'ROTATE_REQUIRED' }}
+        voice_fixture_force_leaf_rotation_acknowledgement: >-
+          {{ fixture_rotation_acknowledgement }}
+        voice_fixture_force_leaf_rotation_request_id: >-
+          {{ fixture_rotation_request_id }}
+        voice_fixture_force_leaf_rotation_expected_generation: >-
+          {{ (fixture_rotation_prepare.stdout | from_json).state.before.generation }}
+
+    - name: Apply a selected generation before inspecting it
+      ansible.builtin.meta: flush_handlers
+
+    - name: Finalize or revalidate the exact public-certificate transition
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - "{{ fixture_rotation_remote_state_helper }}"
+          - finalize
+          - --request-id
+          - "{{ fixture_rotation_request_id }}"
+      changed_when: >-
+        (fixture_rotation_finalize.stdout | from_json).action == 'ROTATION_SELECTED'
+      register: fixture_rotation_finalize
+
+    - name: Require all four leaves changed under the unchanged fixture CA
+      ansible.builtin.assert:
+        that:
+          - >-
+            (fixture_rotation_finalize.stdout | from_json).action in
+            ['ROTATION_SELECTED', 'ROTATION_ALREADY_SELECTED']
+          - >-
+            (fixture_rotation_finalize.stdout | from_json).state.phase == 'SELECTED'
+          - >-
+            (fixture_rotation_finalize.stdout | from_json).state.before.ca ==
+            (fixture_rotation_finalize.stdout | from_json).state.after.ca
+          - >-
+            (fixture_rotation_finalize.stdout | from_json).state.before.generation !=
+            (fixture_rotation_finalize.stdout | from_json).state.after.generation
+          - >-
+            (fixture_rotation_finalize.stdout | from_json).state.before.leaves.asterisk.serial !=
+            (fixture_rotation_finalize.stdout | from_json).state.after.leaves.asterisk.serial
+          - >-
+            (fixture_rotation_finalize.stdout | from_json).state.before.leaves.sipp.serial !=
+            (fixture_rotation_finalize.stdout | from_json).state.after.leaves.sipp.serial
+          - >-
+            (fixture_rotation_finalize.stdout | from_json).state.before.leaves.sbc1.serial !=
+            (fixture_rotation_finalize.stdout | from_json).state.after.leaves.sbc1.serial
+          - >-
+            (fixture_rotation_finalize.stdout | from_json).state.before.leaves.sbc2.serial !=
+            (fixture_rotation_finalize.stdout | from_json).state.after.leaves.sbc2.serial
+          - >-
+            (fixture_rotation_finalize.stdout | from_json).state.before.leaves.asterisk.sha256Fingerprint !=
+            (fixture_rotation_finalize.stdout | from_json).state.after.leaves.asterisk.sha256Fingerprint
+          - >-
+            (fixture_rotation_finalize.stdout | from_json).state.before.leaves.sipp.sha256Fingerprint !=
+            (fixture_rotation_finalize.stdout | from_json).state.after.leaves.sipp.sha256Fingerprint
+          - >-
+            (fixture_rotation_finalize.stdout | from_json).state.before.leaves.sbc1.sha256Fingerprint !=
+            (fixture_rotation_finalize.stdout | from_json).state.after.leaves.sbc1.sha256Fingerprint
+          - >-
+            (fixture_rotation_finalize.stdout | from_json).state.before.leaves.sbc2.sha256Fingerprint !=
+            (fixture_rotation_finalize.stdout | from_json).state.after.leaves.sbc2.sha256Fingerprint
+        fail_msg: The forced transaction did not prove an unchanged CA and four changed leaves.
+
+    - name: Restart both fixture services onto the selected generation
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - vivolution-voice-fixture-asterisk.service
+        - vivolution-voice-fixture-sipp.service
+
+    - name: Require both fixture services active on the selected generation
+      ansible.builtin.command:
+        argv: [systemctl, is-active, --quiet, "{{ item }}"]
+      loop:
+        - vivolution-voice-fixture-asterisk.service
+        - vivolution-voice-fixture-sipp.service
+      changed_when: false
+
+    - name: Read the actively served fixture leaves over mutual TLS
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/openssl
+          - s_client
+          - -connect
+          - "10.20.1.4:{{ item.port }}"
+          - -servername
+          - "{{ item.serverName }}"
+          - -cert
+          - /etc/vivolution/voice-fixture/pki-current/sbc1.crt
+          - -key
+          - /etc/vivolution/voice-fixture/pki-current/sbc1.key
+          - -CAfile
+          - /etc/vivolution/voice-fixture/pki-current/ca.crt
+          - -verify_hostname
+          - "{{ item.serverName }}"
+          - -verify_return_error
+          - -showcerts
+        stdin: ''
+      loop:
+        - { name: asterisk, port: 16061, serverName: pbx-fixture.invalid }
+        - { name: sipp, port: 25061, serverName: teams-fixture.invalid }
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+      register: fixture_rotation_active_server_pems
+      no_log: true
+
+    - name: Calculate actively served fixture leaf fingerprints
+      ansible.builtin.command:
+        argv: [/usr/bin/openssl, x509, -noout, -fingerprint, -sha256]
+        stdin: "{{ item.stdout }}"
+      loop: "{{ fixture_rotation_active_server_pems.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      changed_when: false
+      register: fixture_rotation_active_server_fingerprint_results
+
+    - name: Initialize the active fixture server fingerprint map
+      ansible.builtin.set_fact:
+        fixture_rotation_active_server_fingerprints: {}
+
+    - name: Build the active fixture server fingerprint map
+      ansible.builtin.set_fact:
+        fixture_rotation_active_server_fingerprints: >-
+          {{ fixture_rotation_active_server_fingerprints | combine({
+             item.item.item.name:
+               (item.stdout |
+                regex_replace('^SHA256 Fingerprint=', '') |
+                replace(':', '') | lower)
+          }) }}
+      loop: "{{ fixture_rotation_active_server_fingerprint_results.results }}"
+      loop_control:
+        label: "{{ item.item.item.name }}"
+
+    - name: Require the exact selected fixture leaves to be actively served
+      ansible.builtin.assert:
+        that:
+          - >-
+            fixture_rotation_active_server_fingerprints.asterisk ==
+            (fixture_rotation_finalize.stdout | from_json).state.after.leaves.asterisk.sha256Fingerprint
+          - >-
+            fixture_rotation_active_server_fingerprints.sipp ==
+            (fixture_rotation_finalize.stdout | from_json).state.after.leaves.sipp.sha256Fingerprint
+        fail_msg: A fixture service is not actively serving its selected renewed leaf.
+
+    - name: Preserve canonical public rotation state locally
+      ansible.builtin.copy:
+        content: >
+          {{ (fixture_rotation_finalize.stdout | from_json).state |
+             to_json(sort_keys=True, separators=(',', ':')) }}
+        dest: "{{ fixture_rotation_local_root }}/state.json"
+        mode: '0600'
+        force: false
+      delegate_to: localhost
+      become: false
+
+    - name: Preserve canonical active fixture server leaf evidence locally
+      ansible.builtin.copy:
+        content: >
+          {{ fixture_rotation_active_server_fingerprints |
+             to_json(sort_keys=True, separators=(',', ':')) }}
+        dest: "{{ fixture_rotation_local_root }}/active-server-leaves.json"
+        mode: '0600'
+        force: false
+      delegate_to: localhost
+      become: false
+
+    - name: Fetch only the selected CA and node-specific Edge client pairs
+      ansible.builtin.fetch:
+        src: "/var/lib/vivolution/voice-fixture/edge-export/{{ item }}"
+        dest: "{{ fixture_rotation_local_credentials }}/{{ item }}"
+        flat: true
+        fail_on_missing: true
+        validate_checksum: true
+      loop:
+        - fixture-ca.crt
+        - sbc1.crt
+        - sbc1.key
+        - sbc2.crt
+        - sbc2.key
+      no_log: true
+
+    - name: Protect fetched rotation credentials
+      ansible.builtin.file:
+        path: "{{ fixture_rotation_local_credentials }}/{{ item }}"
+        mode: '0400'
+      loop:
+        - fixture-ca.crt
+        - sbc1.crt
+        - sbc1.key
+        - sbc2.crt
+        - sbc2.key
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Pin selected rotation credential digests
+      ansible.builtin.stat:
+        path: "{{ fixture_rotation_local_credentials }}/{{ item }}"
+        follow: false
+        get_checksum: true
+        checksum_algorithm: sha256
+      loop:
+        - fixture-ca.crt
+        - sbc1.crt
+        - sbc1.key
+        - sbc2.crt
+        - sbc2.key
+      delegate_to: localhost
+      become: false
+      register: fixture_rotation_export_stats
+      no_log: true
+
+    - name: Initialize selected rotation credential digest map
+      ansible.builtin.set_fact:
+        fixture_rotation_export_checksums: {}
+
+    - name: Build selected rotation credential digest map
+      ansible.builtin.set_fact:
+        fixture_rotation_export_checksums: >-
+          {{ fixture_rotation_export_checksums |
+             combine({item.item: item.stat.checksum}) }}
+      loop: "{{ fixture_rotation_export_stats.results }}"
+      no_log: true
+
+    - name: Preserve exact non-secret selected credential digests
+      ansible.builtin.copy:
+        content: >-
+          {{ {
+             'fixtureCaCrt': 'sha256:' ~ fixture_rotation_export_checksums['fixture-ca.crt'],
+             'sbc1': {
+               'fixtureClientCrt': 'sha256:' ~ fixture_rotation_export_checksums['sbc1.crt'],
+               'fixtureClientKey': 'sha256:' ~ fixture_rotation_export_checksums['sbc1.key']
+             },
+             'sbc2': {
+               'fixtureClientCrt': 'sha256:' ~ fixture_rotation_export_checksums['sbc2.crt'],
+               'fixtureClientKey': 'sha256:' ~ fixture_rotation_export_checksums['sbc2.key']
+             }
+          } | to_json(sort_keys=True, separators=(',', ':')) }}
+        dest: "{{ fixture_rotation_local_root }}/credential-digests.json"
+        mode: '0600'
+        force: false
+      delegate_to: localhost
+      become: false
+
+    - name: Install the fixed transient Edge snapshot collector on both nodes
+      ansible.builtin.copy:
+        src: "{{ fixture_rotation_edge_snapshot_source }}"
+        dest: "{{ fixture_rotation_edge_snapshot_remote }}"
+        owner: root
+        group: root
+        mode: '0500'
+      loop: [sbc1, sbc2]
+      delegate_to: "{{ item }}"
+
+    - name: Establish both exact healthy Edge identities before the first re-pin
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - "{{ fixture_rotation_edge_snapshot_remote }}"
+          - --expected-node-id
+          - "{{ item }}"
+      loop: [sbc1, sbc2]
+      delegate_to: "{{ item }}"
+      changed_when: false
+      register: fixture_rotation_fleet_pre_snapshots
+
+    - name: Require exact initial Edge snapshot identities
+      ansible.builtin.assert:
+        that:
+          - (item.stdout | from_json).nodeId == item.item
+          - >-
+            (item.stdout | from_json).apiVersion ==
+            'edge.vivolution.ae/forced-fixture-leaf-rotation-edge-snapshot/v0.1'
+          - not ((item.stdout | from_json).fixtureRotationJournalPresent | bool)
+          - not ((item.stdout | from_json).snapshot.transactionJournalPresent | bool)
+        fail_msg: Both Edges must be exact, healthy, and journal-free before re-pin.
+      loop: "{{ fixture_rotation_fleet_pre_snapshots.results }}"
+
+    - name: Preserve the immutable pre-re-pin fleet phase
+      ansible.builtin.copy:
+        content: >-
+          {{ {
+             'apiVersion': 'edge.vivolution.ae/forced-fixture-leaf-rotation-fleet-phase/v0.1',
+             'phase': 'fleet-pre',
+             'snapshots': {
+               'sbc1': (fixture_rotation_fleet_pre_snapshots.results[0].stdout | from_json),
+               'sbc2': (fixture_rotation_fleet_pre_snapshots.results[1].stdout | from_json)
+             }
+          } | to_json(sort_keys=True, separators=(',', ':')) }}
+        dest: "{{ fixture_rotation_local_root }}/fleet-pre.json"
+        mode: '0600'
+        force: false
+      delegate_to: localhost
+      become: false
+
+- name: Transactionally re-pin the selected fixture clients one Edge at a time
+  hosts: edge_nodes
+  become: true
+  gather_facts: false
+  serial: 1
+  order: sorted
+  any_errors_fatal: true
+  vars:
+    fixture_rotation_controller: "{{ groups['fixture_controller'][0] }}"
+    fixture_rotation_inventory_dir: >-
+      {{ hostvars[fixture_rotation_controller]['inventory_dir'] }}
+    fixture_rotation_local_root: >-
+      {{ fixture_rotation_inventory_dir }}/generated/forced-fixture-leaf-rotation/{{ fixture_rotation_request_id }}
+    fixture_rotation_local_credentials: >-
+      {{ fixture_rotation_inventory_dir }}/generated/forced-fixture-leaf-rotation/.credentials-{{ fixture_rotation_request_id }}
+    edge_fixture_rotation_acknowledgement: ROTATE_SYNTHETIC_FIXTURE_PKI_ON_BOTH_EDGES
+    edge_fixture_rotation_controller_staging_root: >-
+      {{ fixture_rotation_local_credentials }}
+    edge_fixture_rotation_ca_sha256: >-
+      {{ hostvars[fixture_rotation_controller].fixture_rotation_export_checksums['fixture-ca.crt'] }}
+    edge_fixture_rotation_client_certificate_sha256: >-
+      {{ hostvars[fixture_rotation_controller].fixture_rotation_export_checksums[inventory_hostname ~ '.crt'] }}
+    edge_fixture_rotation_client_key_sha256: >-
+      {{ hostvars[fixture_rotation_controller].fixture_rotation_export_checksums[inventory_hostname ~ '.key'] }}
+    fixture_rotation_edge_snapshot_remote: >-
+      /run/lock/vivolution-forced-fixture-rotation-edge-snapshot.py
+    fixture_rotation_peer: "{{ 'sbc2' if inventory_hostname == 'sbc1' else 'sbc1' }}"
+  pre_tasks:
+    - name: Skip every Edge action for an already accepted exact request
+      ansible.builtin.meta: end_play
+      when: >-
+        hostvars[fixture_rotation_controller].fixture_rotation_request_already_accepted |
+        default(false) | bool
+  tasks:
+    - name: Capture target and peer immediately before the serialized re-pin
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - "{{ fixture_rotation_edge_snapshot_remote }}"
+          - --expected-node-id
+          - "{{ item }}"
+      loop:
+        - "{{ inventory_hostname }}"
+        - "{{ fixture_rotation_peer }}"
+      delegate_to: "{{ item }}"
+      changed_when: false
+      register: fixture_rotation_serial_pre_snapshots
+
+    - name: Preserve exact immutable target and peer pre-re-pin phase
+      ansible.builtin.copy:
+        content: >-
+          {{ {
+             'apiVersion': 'edge.vivolution.ae/forced-fixture-leaf-rotation-fleet-phase/v0.1',
+             'phase': inventory_hostname ~ '-pre',
+             'snapshots': {
+               inventory_hostname: (fixture_rotation_serial_pre_snapshots.results[0].stdout | from_json),
+               fixture_rotation_peer: (fixture_rotation_serial_pre_snapshots.results[1].stdout | from_json)
+             }
+          } | to_json(sort_keys=True, separators=(',', ':')) }}
+        dest: "{{ fixture_rotation_local_root }}/{{ inventory_hostname }}-pre.json"
+        mode: '0600'
+        force: false
+      delegate_to: localhost
+      become: false
+
+    - name: Transactionally re-pin only this serialized Edge
+      ansible.builtin.include_role:
+        name: edge_fixture_rotation
+
+    - name: Capture target and peer immediately after the serialized re-pin
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - "{{ fixture_rotation_edge_snapshot_remote }}"
+          - --expected-node-id
+          - "{{ item }}"
+      loop:
+        - "{{ inventory_hostname }}"
+        - "{{ fixture_rotation_peer }}"
+      delegate_to: "{{ item }}"
+      changed_when: false
+      register: fixture_rotation_serial_post_snapshots
+
+    - name: Preserve exact immutable target and peer post-re-pin phase
+      ansible.builtin.copy:
+        content: >-
+          {{ {
+             'apiVersion': 'edge.vivolution.ae/forced-fixture-leaf-rotation-fleet-phase/v0.1',
+             'phase': inventory_hostname ~ '-post',
+             'snapshots': {
+               inventory_hostname: (fixture_rotation_serial_post_snapshots.results[0].stdout | from_json),
+               fixture_rotation_peer: (fixture_rotation_serial_post_snapshots.results[1].stdout | from_json)
+             }
+          } | to_json(sort_keys=True, separators=(',', ':')) }}
+        dest: "{{ fixture_rotation_local_root }}/{{ inventory_hostname }}-post.json"
+        mode: '0600'
+        force: false
+      delegate_to: localhost
+      become: false
+
+    - name: Preserve the first exact per-Edge re-pin evidence for this request
+      ansible.builtin.copy:
+        src: "{{ fixture_rotation_local_credentials }}/evidence/{{ inventory_hostname }}.json"
+        dest: "{{ fixture_rotation_local_root }}/{{ inventory_hostname }}-edge.json"
+        remote_src: true
+        mode: '0600'
+        force: false
+      delegate_to: localhost
+      become: false
+
+- name: Reprove exact readiness and both bidirectional calls after forced rotation
+  hosts: fixture_controller
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  vars:
+    fixture_rotation_inventory_dir: "{{ inventory_dir }}"
+    fixture_rotation_local_root: >-
+      {{ fixture_rotation_inventory_dir }}/generated/forced-fixture-leaf-rotation/{{ fixture_rotation_request_id }}
+    fixture_rotation_local_credentials: >-
+      {{ fixture_rotation_inventory_dir }}/generated/forced-fixture-leaf-rotation/.credentials-{{ fixture_rotation_request_id }}
+    fixture_rotation_result_collector: >-
+      {{ playbook_dir }}/../scripts/synthetic_failover_evidence.py
+    fixture_rotation_remote_collector: >-
+      /run/lock/vivolution-forced-fixture-rotation-collector.py
+    fixture_rotation_evidence_compiler: >-
+      {{ playbook_dir }}/../scripts/forced_fixture_leaf_rotation_evidence.py
+    fixture_rotation_cdr_reconciler: >-
+      {{ playbook_dir }}/../../poc/voice-fixture/roles/voice_fixture/files/bin/synthetic_cdr_evidence.py
+    fixture_rotation_edge_snapshot_remote: >-
+      /run/lock/vivolution-forced-fixture-rotation-edge-snapshot.py
+    fixture_rotation_state_helper: >-
+      /usr/local/libexec/vivolution-voice-fixture-forced-leaf-rotation
+  pre_tasks:
+    - name: Skip calls and compilation for an already accepted exact request
+      ansible.builtin.meta: end_play
+      when: fixture_rotation_request_already_accepted | default(false) | bool
+  tasks:
+    - name: Require exact fixture readiness after both serialized re-pins
+      ansible.builtin.command:
+        argv: [/usr/local/libexec/vivolution-voice-fixture-readiness]
+      changed_when: false
+      register: fixture_rotation_readiness
+
+    - name: Require the exact private no-PSTN readiness result
+      ansible.builtin.assert:
+        that:
+          - >-
+            fixture_rotation_readiness.stdout is
+            search('^READY no-pstn fixture=10.20.1.4 edges=10.20.2.0/24$')
+
+    - name: Place one fresh bidirectional synthetic call test through each Edge
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/vivolution-voice-fixture-test
+          - "{{ item }}"
+      loop: [sbc1, sbc2]
+      changed_when: true
+      register: fixture_rotation_calls
+
+    - name: Require an exact passing fresh result from each Edge
+      ansible.builtin.assert:
+        that:
+          - >-
+            item.stdout is match(
+              '^fixture test [0-9]{8}T[0-9]{6}Z-' ~ item.item ~ '-[0-9]+: PASS$')
+      loop: "{{ fixture_rotation_calls.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Define exact post-rotation fixture call identities
+      ansible.builtin.set_fact:
+        fixture_rotation_call_records: >-
+          {{ (fixture_rotation_call_records | default([])) + [{
+             'nodeId': item.item,
+             'testId': (item.stdout |
+               regex_replace('^fixture test ([0-9]{8}T[0-9]{6}Z-' ~ item.item ~ '-[0-9]+): PASS$', '\1'))
+          }] }}
+      loop: "{{ fixture_rotation_calls.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Collect complete manifested fixture results
+      block:
+        - name: Install the fixed transient fixture result collector
+          ansible.builtin.copy:
+            src: "{{ fixture_rotation_result_collector }}"
+            dest: "{{ fixture_rotation_remote_collector }}"
+            owner: root
+            group: root
+            mode: '0500'
+
+        - name: Build exact canonical post-rotation call bundles
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - "{{ fixture_rotation_remote_collector }}"
+              - --collect-result-dir
+              - "/var/lib/vivolution/voice-fixture/results/{{ item.testId }}"
+          loop: "{{ fixture_rotation_call_records }}"
+          loop_control:
+            label: "{{ item.nodeId }}:{{ item.testId }}"
+          changed_when: false
+          register: fixture_rotation_call_bundles
+      always:
+        - name: Remove the transient fixture result collector
+          ansible.builtin.file:
+            path: "{{ fixture_rotation_remote_collector }}"
+            state: absent
+
+    - name: Preserve complete canonical post-rotation call bundles locally
+      ansible.builtin.copy:
+        content: "{{ item.stdout }}\n"
+        dest: "{{ fixture_rotation_local_root }}/{{ item.item.nodeId }}-bundle.json"
+        mode: '0600'
+      loop: "{{ fixture_rotation_call_bundles.results }}"
+      loop_control:
+        label: "{{ item.item.nodeId }}-bundle.json"
+      delegate_to: localhost
+      become: false
+
+    - name: Export exact Edge-side CDR evidence for both renewed-leaf calls
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/vivolution-edge-synthetic-cdr-export
+          - --test-id
+          - "{{ item.testId }}"
+      loop: "{{ fixture_rotation_call_records }}"
+      loop_control:
+        label: "{{ item.nodeId }}:{{ item.testId }}"
+      delegate_to: "{{ item.nodeId }}"
+      become: true
+      changed_when: true
+      register: fixture_rotation_edge_cdr_exports
+
+    - name: Require exact Edge CDR identity for both renewed-leaf calls
+      ansible.builtin.assert:
+        that:
+          - (item.stdout | from_json).testId == item.item.testId
+          - (item.stdout | from_json).nodeIdentity.nodeId == item.item.nodeId
+          - >-
+            (item.stdout | from_json).nodeIdentity.generation | int ==
+            hostvars[item.item.nodeId].edge_generation | int
+          - >-
+            (item.stdout | from_json).status ==
+            'TWO_LOGICAL_SYNTHETIC_CALLS_ACCOUNTED'
+          - (item.stdout | from_json).liveM365Interoperability == 'NOT_ASSERTED'
+        fail_msg: A renewed-leaf call lacks exact Edge-side CDR evidence.
+      loop: "{{ fixture_rotation_edge_cdr_exports.results }}"
+
+    - name: Preserve exact raw Edge CDR evidence in the acceptance root
+      ansible.builtin.copy:
+        content: "{{ item.stdout }}\n"
+        dest: "{{ fixture_rotation_local_root }}/{{ item.item.nodeId }}-edge-cdr.json"
+        mode: '0600'
+      loop: "{{ fixture_rotation_edge_cdr_exports.results }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Remove only an abandoned transient CDR reconciliation workspace
+      ansible.builtin.file:
+        path: "{{ fixture_rotation_local_root }}/.cdr"
+        state: absent
+      delegate_to: localhost
+      become: false
+
+    - name: Create protected transient per-call CDR reconciliation directories
+      ansible.builtin.file:
+        path: >-
+          {{ fixture_rotation_local_root }}/.cdr/{{ item.nodeId }}
+        state: directory
+        mode: '0700'
+      loop: "{{ fixture_rotation_call_records }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Preserve exact Edge CDR inputs for offline reconciliation
+      ansible.builtin.copy:
+        content: "{{ item.stdout }}\n"
+        dest: >-
+          {{ fixture_rotation_local_root }}/.cdr/{{ item.item.nodeId }}/edge-cdr.json
+        mode: '0600'
+      loop: "{{ fixture_rotation_edge_cdr_exports.results }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Preserve normalized fixture CDR inputs for offline reconciliation
+      ansible.builtin.copy:
+        content: >-
+          {{ (item.stdout | from_json).artifacts['fixture-cdr.json'] | b64decode }}
+        dest: >-
+          {{ fixture_rotation_local_root }}/.cdr/{{ item.item.nodeId }}/fixture-cdr.json
+        mode: '0600'
+      loop: "{{ fixture_rotation_call_bundles.results }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Preserve raw fixture CDR inputs for offline reconciliation
+      ansible.builtin.copy:
+        content: >-
+          {{ (item.stdout | from_json).artifacts['asterisk-cdr-delta.csv'] | b64decode }}
+        dest: >-
+          {{ fixture_rotation_local_root }}/.cdr/{{ item.item.nodeId }}/fixture-asterisk-cdr-delta.csv
+        mode: '0600'
+      loop: "{{ fixture_rotation_call_bundles.results }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Preserve fixture result inputs for offline reconciliation
+      ansible.builtin.copy:
+        content: "{{ (item.stdout | from_json).artifacts['RESULT'] | b64decode }}"
+        dest: >-
+          {{ fixture_rotation_local_root }}/.cdr/{{ item.item.nodeId }}/fixture-RESULT
+        mode: '0600'
+      loop: "{{ fixture_rotation_call_bundles.results }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Preserve complete fixture manifest inputs for offline reconciliation
+      ansible.builtin.copy:
+        content: "{{ (item.stdout | from_json).manifestBase64 | b64decode }}"
+        dest: >-
+          {{ fixture_rotation_local_root }}/.cdr/{{ item.item.nodeId }}/fixture-MANIFEST.sha256
+        mode: '0600'
+      loop: "{{ fixture_rotation_call_bundles.results }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Reconcile exact Edge and fixture CDR evidence offline
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ fixture_rotation_cdr_reconciler }}"
+          - reconcile
+          - --evidence-dir
+          - "{{ fixture_rotation_local_root }}/.cdr/{{ item.nodeId }}"
+      loop: "{{ fixture_rotation_call_records }}"
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      register: fixture_rotation_cdr_reconciliations
+
+    - name: Read exact Edge-to-fixture CDR reconciliations
+      ansible.builtin.slurp:
+        src: "{{ fixture_rotation_local_root }}/.cdr/{{ item.nodeId }}/reconciliation.json"
+      loop: "{{ fixture_rotation_call_records }}"
+      delegate_to: localhost
+      become: false
+      register: fixture_rotation_cdr_reconciliation_files
+
+    - name: Require successful exact CDR reconciliation for both calls
+      ansible.builtin.assert:
+        that:
+          - >-
+            (item.content | b64decode | from_json).status ==
+            'SYNTHETIC_EDGE_FIXTURE_CDR_RECONCILED'
+          - >-
+            (item.content | b64decode | from_json).liveM365Interoperability ==
+            'NOT_ASSERTED'
+          - (item.content | b64decode | from_json).testId == item.item.testId
+          - >-
+            (item.content | b64decode | from_json).nodeIdentity.nodeId ==
+            item.item.nodeId
+          - (item.content | b64decode | from_json).matchedCalls | length == 2
+          - >-
+            (item.content | b64decode | from_json).reconciliationDigest is
+            match('^sha256:[0-9a-f]{64}$')
+        fail_msg: A renewed-leaf call lacks exact Edge-to-fixture CDR reconciliation.
+      loop: "{{ fixture_rotation_cdr_reconciliation_files.results }}"
+
+    - name: Bind exact CDR reconciliations into acceptance evidence
+      ansible.builtin.copy:
+        content: "{{ item.content | b64decode }}"
+        dest: >-
+          {{ fixture_rotation_local_root }}/{{ item.item.nodeId }}-cdr-reconciliation.json
+        mode: '0600'
+      loop: "{{ fixture_rotation_cdr_reconciliation_files.results }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Remove transient local CDR reconciliation workspaces
+      ansible.builtin.file:
+        path: "{{ fixture_rotation_local_root }}/.cdr"
+        state: absent
+      delegate_to: localhost
+      become: false
+
+    - name: Reprove both exact Edge identities and health after both calls
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - "{{ fixture_rotation_edge_snapshot_remote }}"
+          - --expected-node-id
+          - "{{ item }}"
+      loop: [sbc1, sbc2]
+      delegate_to: "{{ item }}"
+      become: true
+      changed_when: false
+      register: fixture_rotation_post_call_snapshots
+
+    - name: Preserve canonical post-call fleet continuity phase
+      ansible.builtin.copy:
+        content: >-
+          {{ {
+             'apiVersion': 'edge.vivolution.ae/forced-fixture-leaf-rotation-fleet-phase/v0.1',
+             'phase': 'post-calls',
+             'snapshots': {
+               'sbc1': (fixture_rotation_post_call_snapshots.results[0].stdout | from_json),
+               'sbc2': (fixture_rotation_post_call_snapshots.results[1].stdout | from_json)
+             }
+          } | to_json(sort_keys=True, separators=(',', ':')) }}
+        dest: "{{ fixture_rotation_local_root }}/post-calls.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+
+    - name: Revalidate the selected CP1 request after calls
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - "{{ fixture_rotation_state_helper }}"
+          - status
+          - --request-id
+          - "{{ fixture_rotation_request_id }}"
+      changed_when: false
+      register: fixture_rotation_final_state
+
+    - name: Require the same selected generation after both calls
+      ansible.builtin.assert:
+        that:
+          - (fixture_rotation_final_state.stdout | from_json).action == 'ROTATION_STATUS'
+          - (fixture_rotation_final_state.stdout | from_json).state.phase == 'SELECTED'
+
+    - name: Refresh canonical final public state after both calls
+      ansible.builtin.copy:
+        content: >
+          {{ (fixture_rotation_final_state.stdout | from_json).state |
+             to_json(sort_keys=True, separators=(',', ':')) }}
+        dest: "{{ fixture_rotation_local_root }}/state.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+
+    - name: Compile strict forced leaf-rotation acceptance evidence offline
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ fixture_rotation_evidence_compiler }}"
+          - --evidence-dir
+          - "{{ fixture_rotation_local_root }}"
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      register: fixture_rotation_acceptance_compilation
+
+    - name: Read forced leaf-rotation acceptance evidence
+      ansible.builtin.slurp:
+        src: "{{ fixture_rotation_local_root }}/acceptance.json"
+      delegate_to: localhost
+      become: false
+      register: fixture_rotation_acceptance_raw
+
+    - name: Require the exact synthetic-only forced-rotation conclusion
+      ansible.builtin.assert:
+        that:
+          - >-
+            fixture_rotation_acceptance_compilation.stdout is
+            match('^FORCED_FIXTURE_LEAF_ROTATION_ACCEPTED sha256:[0-9a-f]{64}$')
+          - >-
+            (fixture_rotation_acceptance_raw.content | b64decode | from_json).status ==
+            'SYNTHETIC_FIXTURE_LEAF_ROTATION_ACCEPTED'
+          - >-
+            (fixture_rotation_acceptance_raw.content | b64decode | from_json).fixtureCaUnchanged | bool
+          - >-
+            (fixture_rotation_acceptance_raw.content | b64decode | from_json).leafCertificatesChanged ==
+            ['asterisk', 'sipp', 'sbc1', 'sbc2']
+          - >-
+            (fixture_rotation_acceptance_raw.content | b64decode | from_json).liveM365Interoperability ==
+            'NOT_ASSERTED'
+          - >-
+            (fixture_rotation_acceptance_raw.content | b64decode | from_json).pstnInteroperability ==
+            'NOT_TESTED_NOT_CLAIMED'
+
+    - name: Remove only the protected transient credential staging tree after acceptance
+      ansible.builtin.file:
+        path: "{{ fixture_rotation_local_credentials }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+
+    - name: Remove the transient Edge snapshot collectors after acceptance
+      ansible.builtin.file:
+        path: "{{ fixture_rotation_edge_snapshot_remote }}"
+        state: absent
+      loop: [sbc1, sbc2]
+      delegate_to: "{{ item }}"

@@ -1,0 +1,2486 @@
+---
+- name: Allocate one protected active Edge reboot qualification run
+  hosts: localhost
+  gather_facts: false
+  any_errors_fatal: true
+
+  vars:
+    edge_active_reboot_inventory_dir: "{{ hostvars['sbc1']['inventory_dir'] }}"
+    edge_active_reboot_evidence_root: >-
+      {{ edge_active_reboot_inventory_dir }}/generated/active-edge-reboot
+    edge_active_reboot_compiler: >-
+      {{ playbook_dir }}/../scripts/active_edge_reboot_evidence.py
+    edge_active_reboot_journal: >-
+      {{ playbook_dir }}/../scripts/active_edge_reboot_journal.py
+    edge_active_reboot_fixture_collector_source: >-
+      {{ playbook_dir }}/../scripts/synthetic_failover_evidence.py
+    edge_active_reboot_cdr_reconciler_source: >-
+      {{ playbook_dir }}/../../poc/voice-fixture/roles/voice_fixture/files/bin/synthetic_cdr_evidence.py
+    edge_active_reboot_required_checks:
+      - systemd-nftables
+      - systemd-rtpengine-daemon
+      - systemd-opensips
+      - opensips-active-parse
+      - nft-owned-default-deny
+      - rtpengine-ng-ping
+      - listeners-exact
+      - rtpengine-control-loopback
+    edge_active_reboot_required_units:
+      - nftables.service
+      - ntpsec.service
+      - opensips.service
+      - rtpengine-daemon.service
+      - ssh.service
+      - vivolution-edge-certificate.timer
+
+  tasks:
+    - name: Require the exact one-run two-node reboot acknowledgement
+      ansible.builtin.assert:
+        that:
+          - groups.get('edge_nodes', []) | sort == ['sbc1', 'sbc2']
+          - groups.get('fixture_controller', []) | length == 1
+          - groups['fixture_controller'][0] not in groups['edge_nodes']
+          - >-
+            edge_active_reboot_acknowledgement | default('') ==
+            'REBOOT_ACTIVE_SYNTHETIC_EDGES_SBC1_THEN_SBC2_ONCE'
+          - edge_active_reboot_inventory_dir is match('^/')
+          - hostvars['sbc1']['inventory_dir'] == edge_active_reboot_inventory_dir
+          - hostvars['sbc2']['inventory_dir'] == edge_active_reboot_inventory_dir
+          - >-
+            hostvars[groups['fixture_controller'][0]]['inventory_dir'] ==
+            edge_active_reboot_inventory_dir
+          - >-
+            edge_active_reboot_evidence_root ==
+            edge_active_reboot_inventory_dir ~ '/generated/active-edge-reboot'
+          - hostvars['sbc1'].edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+          - hostvars['sbc2'].edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+          - hostvars['sbc1'].edge_generation | int >= 1
+          - >-
+            hostvars['sbc1'].edge_generation | int ==
+            hostvars['sbc2'].edge_generation | int
+          - hostvars['sbc1'].edge_slot == 'A'
+          - hostvars['sbc2'].edge_slot == 'B'
+          - hostvars['sbc1'].edge_private_ipv4 == '10.20.2.4'
+          - hostvars['sbc2'].edge_private_ipv4 == '10.20.2.5'
+          - >-
+            edge_active_reboot_required_checks ==
+            ['systemd-nftables', 'systemd-rtpengine-daemon',
+             'systemd-opensips', 'opensips-active-parse',
+             'nft-owned-default-deny', 'rtpengine-ng-ping',
+             'listeners-exact', 'rtpengine-control-loopback']
+          - >-
+            edge_active_reboot_required_units ==
+            ['nftables.service', 'ntpsec.service', 'opensips.service',
+             'rtpengine-daemon.service', 'ssh.service',
+             'vivolution-edge-certificate.timer']
+        fail_msg: >-
+          Active Edge reboot qualification requires the exact one-run
+          acknowledgement, the fixed two-node private synthetic fleet, one
+          separate fixture controller, and one absolute private inventory.
+
+    - name: Bind immutable local workflow programs and contracts
+      ansible.builtin.set_fact:
+        edge_active_reboot_compiler_path: "{{ edge_active_reboot_compiler }}"
+        edge_active_reboot_journal_path: "{{ edge_active_reboot_journal }}"
+        edge_active_reboot_fixture_collector_path: >-
+          {{ edge_active_reboot_fixture_collector_source }}
+        edge_active_reboot_cdr_reconciler_path: >-
+          {{ edge_active_reboot_cdr_reconciler_source }}
+        edge_active_reboot_runtime_checks_contract: >-
+          {{ edge_active_reboot_required_checks }}
+        edge_active_reboot_units_contract: >-
+          {{ edge_active_reboot_required_units }}
+
+    - name: Require exact local workflow program identity
+      ansible.builtin.assert:
+        that:
+          - edge_active_reboot_compiler_path == playbook_dir ~ '/../scripts/active_edge_reboot_evidence.py'
+          - edge_active_reboot_journal_path == playbook_dir ~ '/../scripts/active_edge_reboot_journal.py'
+          - >-
+            edge_active_reboot_fixture_collector_path ==
+            playbook_dir ~ '/../scripts/synthetic_failover_evidence.py'
+          - >-
+            edge_active_reboot_cdr_reconciler_path ==
+            playbook_dir ~
+            '/../../poc/voice-fixture/roles/voice_fixture/files/bin/synthetic_cdr_evidence.py'
+
+    - name: Create the ignored protected reboot evidence parent
+      ansible.builtin.file:
+        path: "{{ edge_active_reboot_evidence_root }}"
+        state: directory
+        mode: '0700'
+
+    - name: Begin or resume the one durable exact reboot request
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ edge_active_reboot_journal_path }}"
+          - --evidence-root
+          - "{{ edge_active_reboot_evidence_root }}"
+          - begin
+          - --acknowledgement
+          - REBOOT_ACTIVE_SYNTHETIC_EDGES_SBC1_THEN_SBC2_ONCE
+      changed_when: true
+      register: edge_active_reboot_journal_begin_raw
+
+    - name: Bind the durable one-run evidence and journal authority
+      ansible.builtin.set_fact:
+        edge_active_reboot_journal_state: >-
+          {{ edge_active_reboot_journal_begin_raw.stdout | from_json }}
+        edge_active_reboot_run_id: >-
+          {{ (edge_active_reboot_journal_begin_raw.stdout | from_json).runId }}
+        edge_active_reboot_evidence_dir: >-
+          {{ (edge_active_reboot_journal_begin_raw.stdout | from_json).evidenceDirectory }}
+
+    - name: Require one exact resumable in-progress or completed request
+      ansible.builtin.assert:
+        that:
+          - edge_active_reboot_run_id is match('^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$')
+          - edge_active_reboot_evidence_dir == edge_active_reboot_evidence_root ~ '/' ~ edge_active_reboot_run_id
+          - edge_active_reboot_journal_state.apiVersion == 'edge.vivolution.ae/active-edge-reboot-journal/v0.1'
+          - edge_active_reboot_journal_state.status in ['IN_PROGRESS', 'COMPLETE']
+          - edge_active_reboot_journal_state.rebootOrder == ['sbc1', 'sbc2']
+          - edge_active_reboot_journal_state.scope == 'BOUNDED_PRIVATE_SYNTHETIC_POC'
+        fail_msg: >-
+          A prior reboot request is invalid or was reconciled incomplete; no
+          new reboot will be scheduled under the same acknowledgement.
+
+
+- name: Qualify active Edge reboot persistence in exact SBC1 then SBC2 order
+  hosts: edge_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  order: sorted
+  serial: 1
+
+  vars:
+    edge_active_reboot_peer: "{{ 'sbc2' if inventory_hostname == 'sbc1' else 'sbc1' }}"
+    edge_active_reboot_expected_slot: "{{ 'A' if inventory_hostname == 'sbc1' else 'B' }}"
+    edge_active_reboot_expected_private_ipv4: >-
+      {{ '10.20.2.4' if inventory_hostname == 'sbc1' else '10.20.2.5' }}
+    edge_active_reboot_remote_collector: /run/lock/vivolution-active-edge-reboot-collector.py
+    edge_active_reboot_transaction_path: /var/lib/vivolution-edge/runtime/transaction.json
+    edge_active_reboot_runtime_authority_path: /var/lib/vivolution-edge/runtime/runtime-authority.json
+    edge_active_reboot_node_facts_path: /etc/vivolution-edge/node-facts.json
+    edge_active_reboot_agent_state_v3: /var/lib/vivolution-edge/agent-state/tenant/edge-state-v3.json
+    edge_active_reboot_agent_state_v2: /var/lib/vivolution-edge/agent-state/tenant/edge-state-v2.json
+    edge_active_reboot_agent_state_v1: /var/lib/vivolution-edge/agent-state/tenant/accepted-state-v1.json
+    edge_active_reboot_transient_unit: vivolution-active-edge-reboot-qualifier
+    edge_active_reboot_required_checks: "{{ hostvars['localhost'].edge_active_reboot_runtime_checks_contract }}"
+    edge_active_reboot_required_units: "{{ hostvars['localhost'].edge_active_reboot_units_contract }}"
+    edge_active_reboot_evidence_dir: "{{ hostvars['localhost'].edge_active_reboot_evidence_dir }}"
+    edge_active_reboot_evidence_root: "{{ hostvars['localhost'].edge_active_reboot_evidence_root }}"
+    edge_active_reboot_journal: "{{ hostvars['localhost'].edge_active_reboot_journal_path }}"
+    edge_active_reboot_cdr_reconciler: "{{ hostvars['localhost'].edge_active_reboot_cdr_reconciler_path }}"
+
+  pre_tasks:
+    - name: Require exact sorted serialization and fixed per-node authority
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all == ['sbc1', 'sbc2']
+          - ansible_play_batch == [inventory_hostname]
+          - inventory_hostname in ['sbc1', 'sbc2']
+          - edge_active_reboot_peer == ('sbc2' if inventory_hostname == 'sbc1' else 'sbc1')
+          - edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+          - edge_generation | int == hostvars[edge_active_reboot_peer].edge_generation | int
+          - edge_generation | int >= 1
+          - edge_slot == edge_active_reboot_expected_slot
+          - edge_private_ipv4 == edge_active_reboot_expected_private_ipv4
+          - edge_active_reboot_evidence_dir == hostvars['localhost'].edge_active_reboot_evidence_dir
+          - edge_active_reboot_evidence_dir is match('^/')
+          - edge_active_reboot_evidence_root == hostvars['localhost'].edge_active_reboot_evidence_root
+          - edge_active_reboot_journal == playbook_dir ~ '/../scripts/active_edge_reboot_journal.py'
+          - >-
+            edge_active_reboot_cdr_reconciler ==
+            playbook_dir ~
+            '/../../poc/voice-fixture/roles/voice_fixture/files/bin/synthetic_cdr_evidence.py'
+          - ansible_host == edge_public_ipv4
+          - ansible_port | default(22) | int == 22
+          - edge_active_reboot_expected_slot == ('A' if inventory_hostname == 'sbc1' else 'B')
+          - edge_active_reboot_expected_private_ipv4 == ('10.20.2.4' if inventory_hostname == 'sbc1' else '10.20.2.5')
+          - edge_active_reboot_remote_collector == '/run/lock/vivolution-active-edge-reboot-collector.py'
+          - edge_active_reboot_transaction_path == '/var/lib/vivolution-edge/runtime/transaction.json'
+          - edge_active_reboot_runtime_authority_path == '/var/lib/vivolution-edge/runtime/runtime-authority.json'
+          - edge_active_reboot_node_facts_path == '/etc/vivolution-edge/node-facts.json'
+          - edge_active_reboot_agent_state_v3 == '/var/lib/vivolution-edge/agent-state/tenant/edge-state-v3.json'
+          - edge_active_reboot_agent_state_v2 == '/var/lib/vivolution-edge/agent-state/tenant/edge-state-v2.json'
+          - edge_active_reboot_agent_state_v1 == '/var/lib/vivolution-edge/agent-state/tenant/accepted-state-v1.json'
+          - edge_active_reboot_transient_unit == 'vivolution-active-edge-reboot-qualifier'
+          - >-
+            edge_active_reboot_required_checks ==
+            ['systemd-nftables', 'systemd-rtpengine-daemon',
+             'systemd-opensips', 'opensips-active-parse',
+             'nft-owned-default-deny', 'rtpengine-ng-ping',
+             'listeners-exact', 'rtpengine-control-loopback']
+          - >-
+            edge_active_reboot_required_units ==
+            ['nftables.service', 'ntpsec.service', 'opensips.service',
+             'rtpengine-daemon.service', 'ssh.service',
+             'vivolution-edge-certificate.timer']
+        fail_msg: >-
+          Reboot order or the immutable private synthetic node authority is not exact.
+
+    - name: Read the durable serialized request before this node
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ edge_active_reboot_journal }}"
+          - --evidence-root
+          - "{{ edge_active_reboot_evidence_root }}"
+          - status
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      register: edge_active_reboot_journal_before_raw
+
+    - name: Bind this node's exact durable phase
+      ansible.builtin.set_fact:
+        edge_active_reboot_journal_before: >-
+          {{ edge_active_reboot_journal_before_raw.stdout | from_json }}
+        edge_active_reboot_journal_phase: >-
+          {{ (edge_active_reboot_journal_before_raw.stdout | from_json).nodes[inventory_hostname].phase }}
+
+    - name: Require exact durable run identity and serialized ownership
+      ansible.builtin.assert:
+        that:
+          - edge_active_reboot_journal_before.evidenceDirectory == edge_active_reboot_evidence_dir
+          - edge_active_reboot_journal_before.runId == hostvars['localhost'].edge_active_reboot_run_id
+          - edge_active_reboot_journal_before.status in ['IN_PROGRESS', 'COMPLETE']
+          - >-
+            (edge_active_reboot_journal_before.status == 'COMPLETE' and
+             edge_active_reboot_journal_phase == 'QUALIFIED') or
+            (edge_active_reboot_journal_before.status == 'IN_PROGRESS' and
+             ((edge_active_reboot_journal_phase == 'QUALIFIED' and
+               edge_active_reboot_journal_before.currentNode != inventory_hostname) or
+              (edge_active_reboot_journal_phase != 'QUALIFIED' and
+               edge_active_reboot_journal_before.currentNode == inventory_hostname)))
+        fail_msg: The durable journal does not authorize this serialized node phase.
+
+  tasks:
+    - name: Qualify one active Edge reboot without reusing installation
+      block:
+        - name: Recover bounded SSH access for an already armed request
+          ansible.builtin.wait_for_connection:
+            connect_timeout: 5
+            delay: 0
+            sleep: 3
+            timeout: 300
+          when: edge_active_reboot_journal_phase != 'PENDING'
+
+        - name: Read an existing durable preflight for a resumed request
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_journal }}"
+              - --evidence-root
+              - "{{ edge_active_reboot_evidence_root }}"
+              - preflight
+              - --node
+              - "{{ inventory_hostname }}"
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_durable_preflight_raw
+          when: edge_active_reboot_journal_phase != 'PENDING'
+
+        - name: Build exact target and peer Agent status contexts
+          ansible.builtin.set_fact:
+            edge_active_reboot_target_agent_argv:
+              - /usr/local/bin/vivolution-edge-agent
+              - status
+              - --state-dir
+              - /var/lib/vivolution-edge/agent-state/tenant
+              - --scope
+              - TENANT
+              - --cluster-id
+              - "{{ edge_cluster_id }}"
+              - --node-id
+              - "{{ inventory_hostname }}"
+              - --generation
+              - "{{ edge_generation | string }}"
+              - --slot
+              - "{{ edge_slot }}"
+              - --customer-account-id
+              - "{{ edge_customer_account_id }}"
+              - --m365-tenant-id
+              - "{{ edge_m365_tenant_id }}"
+              - --tenant-context-id
+              - "{{ edge_tenant_context_id }}"
+              - --service-instance-id
+              - "{{ edge_service_instance_id }}"
+              - --allocation-id
+              - "{{ edge_allocation_id }}"
+              - --tenant-listener-port
+              - '15061'
+              - --tenant-media-port-start
+              - '20000'
+              - --tenant-media-port-end
+              - '20255'
+              - --pbx-media-destination-port-start
+              - "{{ edge_pbx_media_destination_port_start | string }}"
+              - --pbx-media-destination-port-end
+              - "{{ edge_pbx_media_destination_port_end | string }}"
+              - --cluster-media-port-start
+              - '20000'
+              - --cluster-media-port-end
+              - '29999'
+              - --expected-advertised-public-ip
+              - "{{ edge_public_ipv4 }}"
+              - --authorized-pbx-source-cidr
+              - 10.20.1.4/32
+            edge_active_reboot_peer_agent_argv:
+              - /usr/local/bin/vivolution-edge-agent
+              - status
+              - --state-dir
+              - /var/lib/vivolution-edge/agent-state/tenant
+              - --scope
+              - TENANT
+              - --cluster-id
+              - "{{ hostvars[edge_active_reboot_peer].edge_cluster_id }}"
+              - --node-id
+              - "{{ edge_active_reboot_peer }}"
+              - --generation
+              - "{{ hostvars[edge_active_reboot_peer].edge_generation | string }}"
+              - --slot
+              - "{{ hostvars[edge_active_reboot_peer].edge_slot }}"
+              - --customer-account-id
+              - "{{ hostvars[edge_active_reboot_peer].edge_customer_account_id }}"
+              - --m365-tenant-id
+              - "{{ hostvars[edge_active_reboot_peer].edge_m365_tenant_id }}"
+              - --tenant-context-id
+              - "{{ hostvars[edge_active_reboot_peer].edge_tenant_context_id }}"
+              - --service-instance-id
+              - "{{ hostvars[edge_active_reboot_peer].edge_service_instance_id }}"
+              - --allocation-id
+              - "{{ hostvars[edge_active_reboot_peer].edge_allocation_id }}"
+              - --tenant-listener-port
+              - '15061'
+              - --tenant-media-port-start
+              - '20000'
+              - --tenant-media-port-end
+              - '20255'
+              - --pbx-media-destination-port-start
+              - "{{ hostvars[edge_active_reboot_peer].edge_pbx_media_destination_port_start | string }}"
+              - --pbx-media-destination-port-end
+              - "{{ hostvars[edge_active_reboot_peer].edge_pbx_media_destination_port_end | string }}"
+              - --cluster-media-port-start
+              - '20000'
+              - --cluster-media-port-end
+              - '29999'
+              - --expected-advertised-public-ip
+              - "{{ hostvars[edge_active_reboot_peer].edge_public_ipv4 }}"
+              - --authorized-pbx-source-cidr
+              - 10.20.1.4/32
+
+        - name: Inspect exact target and peer protected Agent state generations
+          ansible.builtin.stat:
+            path: "{{ item.path }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          loop:
+            - { node: "{{ inventory_hostname }}", path: "{{ edge_active_reboot_agent_state_v3 }}" }
+            - { node: "{{ inventory_hostname }}", path: "{{ edge_active_reboot_agent_state_v2 }}" }
+            - { node: "{{ inventory_hostname }}", path: "{{ edge_active_reboot_agent_state_v1 }}" }
+            - { node: "{{ edge_active_reboot_peer }}", path: "{{ edge_active_reboot_agent_state_v3 }}" }
+            - { node: "{{ edge_active_reboot_peer }}", path: "{{ edge_active_reboot_agent_state_v2 }}" }
+            - { node: "{{ edge_active_reboot_peer }}", path: "{{ edge_active_reboot_agent_state_v1 }}" }
+          delegate_to: "{{ item.node }}"
+          register: edge_active_reboot_agent_state_before
+
+        - name: Require one exact protected Agent v3 state per node and no legacy state
+          ansible.builtin.assert:
+            that:
+              - item.stat.exists
+              - item.stat.isreg | default(false)
+              - not (item.stat.islnk | default(false))
+              - item.stat.nlink | int == 1
+              - item.stat.pw_name == 'vivolution-edge-agent'
+              - item.stat.gr_name == 'vivolution-edge-agent'
+              - item.stat.mode == '0600'
+              - item.stat.checksum is match('^[0-9a-f]{64}$')
+            fail_msg: A current protected Agent state file is missing, linked, or misowned.
+          loop:
+            - "{{ edge_active_reboot_agent_state_before.results[0] }}"
+            - "{{ edge_active_reboot_agent_state_before.results[3] }}"
+
+        - name: Require every legacy Agent state generation absent
+          ansible.builtin.assert:
+            that:
+              - not (item.stat.exists | default(false))
+              - not (item.stat.islnk | default(false))
+            fail_msg: A legacy Agent state generation remains installed.
+          loop:
+            - "{{ edge_active_reboot_agent_state_before.results[1] }}"
+            - "{{ edge_active_reboot_agent_state_before.results[2] }}"
+            - "{{ edge_active_reboot_agent_state_before.results[4] }}"
+            - "{{ edge_active_reboot_agent_state_before.results[5] }}"
+
+        - name: Read fully validated target and peer Agent protected state before reboot
+          ansible.builtin.command:
+            argv: "{{ item.argv }}"
+          loop:
+            - { node: "{{ inventory_hostname }}", argv: "{{ edge_active_reboot_target_agent_argv }}" }
+            - { node: "{{ edge_active_reboot_peer }}", argv: "{{ edge_active_reboot_peer_agent_argv }}" }
+          delegate_to: "{{ item.node }}"
+          become_user: vivolution-edge-agent
+          changed_when: false
+          register: edge_active_reboot_agent_status_before_raw
+
+        - name: Inspect exact target and peer immutable identity sources before reboot
+          ansible.builtin.stat:
+            path: "{{ item.path }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          loop:
+            - { node: "{{ inventory_hostname }}", path: /etc/vivolution-edge/node-facts.json }
+            - { node: "{{ inventory_hostname }}", path: /var/lib/vivolution-edge/runtime/runtime-authority.json }
+            - { node: "{{ edge_active_reboot_peer }}", path: /etc/vivolution-edge/node-facts.json }
+            - { node: "{{ edge_active_reboot_peer }}", path: /var/lib/vivolution-edge/runtime/runtime-authority.json }
+          delegate_to: "{{ item.node }}"
+          register: edge_active_reboot_identity_stats_before
+
+        - name: Require protected single-link immutable identity sources
+          ansible.builtin.assert:
+            that:
+              - item.stat.exists
+              - item.stat.isreg | default(false)
+              - not (item.stat.islnk | default(false))
+              - item.stat.nlink | int == 1
+              - item.stat.pw_name == 'root'
+              - item.stat.gr_name == 'root'
+              - item.stat.mode == '0600'
+              - item.stat.size | int > 0
+              - item.stat.size | int <= 524288
+              - item.stat.checksum is match('^[0-9a-f]{64}$')
+            fail_msg: An immutable Edge identity source is linked, writable, oversized, or misowned.
+          loop: "{{ edge_active_reboot_identity_stats_before.results }}"
+          loop_control:
+            label: "{{ item.item.node }}:{{ item.item.path }}"
+
+        - name: Read exact target and peer immutable identity bytes before reboot
+          ansible.builtin.slurp:
+            src: "{{ item.path }}"
+          loop:
+            - { node: "{{ inventory_hostname }}", path: /etc/vivolution-edge/node-facts.json }
+            - { node: "{{ inventory_hostname }}", path: /var/lib/vivolution-edge/runtime/runtime-authority.json }
+            - { node: "{{ edge_active_reboot_peer }}", path: /etc/vivolution-edge/node-facts.json }
+            - { node: "{{ edge_active_reboot_peer }}", path: /var/lib/vivolution-edge/runtime/runtime-authority.json }
+          delegate_to: "{{ item.node }}"
+          register: edge_active_reboot_identity_raw_before
+
+        - name: Read target and peer protected runtime status before reboot
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+          loop:
+            - "{{ inventory_hostname }}"
+            - "{{ edge_active_reboot_peer }}"
+          delegate_to: "{{ item }}"
+          changed_when: false
+          register: edge_active_reboot_status_raw_before
+
+        - name: Prove target and peer protected runtime health before reboot
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+          loop:
+            - "{{ inventory_hostname }}"
+            - "{{ edge_active_reboot_peer }}"
+          delegate_to: "{{ item }}"
+          changed_when: false
+          register: edge_active_reboot_health_raw_before
+
+        - name: Read target and peer kernel boot IDs before reboot
+          ansible.builtin.command:
+            argv: [/usr/bin/cat, /proc/sys/kernel/random/boot_id]
+          loop:
+            - "{{ inventory_hostname }}"
+            - "{{ edge_active_reboot_peer }}"
+          delegate_to: "{{ item }}"
+          changed_when: false
+          register: edge_active_reboot_boot_ids_before
+
+        - name: Prove target and peer required units active before reboot
+          ansible.builtin.command:
+            argv: [/usr/bin/systemctl, is-active, "{{ item.1 }}"]
+          loop: "{{ [inventory_hostname, edge_active_reboot_peer] | product(edge_active_reboot_required_units) | list }}"
+          delegate_to: "{{ item.0 }}"
+          changed_when: false
+          register: edge_active_reboot_units_before
+
+        - name: Prove target and peer recovery authority enabled before reboot
+          ansible.builtin.command:
+            argv: [/usr/bin/systemctl, is-enabled, vivolution-edge-runtime-recover.service]
+          loop:
+            - "{{ inventory_hostname }}"
+            - "{{ edge_active_reboot_peer }}"
+          delegate_to: "{{ item }}"
+          changed_when: false
+          register: edge_active_reboot_recovery_enabled_before
+
+        - name: Inspect target and peer runtime journals before reboot
+          ansible.builtin.stat:
+            path: "{{ edge_active_reboot_transaction_path }}"
+            follow: false
+            get_attributes: false
+            get_checksum: false
+            get_mime: false
+          loop:
+            - "{{ inventory_hostname }}"
+            - "{{ edge_active_reboot_peer }}"
+          delegate_to: "{{ item }}"
+          register: edge_active_reboot_journals_before
+
+        - name: Decode exact pre-reboot target and peer state
+          ansible.builtin.set_fact:
+            edge_active_reboot_target_facts: >-
+              {{ edge_active_reboot_identity_raw_before.results[0].content | b64decode | from_json }}
+            edge_active_reboot_target_authority: >-
+              {{ edge_active_reboot_identity_raw_before.results[1].content | b64decode | from_json }}
+            edge_active_reboot_peer_facts: >-
+              {{ edge_active_reboot_identity_raw_before.results[2].content | b64decode | from_json }}
+            edge_active_reboot_peer_authority: >-
+              {{ edge_active_reboot_identity_raw_before.results[3].content | b64decode | from_json }}
+            edge_active_reboot_target_status_before: >-
+              {{ edge_active_reboot_status_raw_before.results[0].stdout | from_json }}
+            edge_active_reboot_peer_status_before: >-
+              {{ edge_active_reboot_status_raw_before.results[1].stdout | from_json }}
+            edge_active_reboot_target_health_before: >-
+              {{ edge_active_reboot_health_raw_before.results[0].stdout | from_json }}
+            edge_active_reboot_peer_health_before: >-
+              {{ edge_active_reboot_health_raw_before.results[1].stdout | from_json }}
+            edge_active_reboot_target_agent_before: >-
+              {{ edge_active_reboot_agent_status_before_raw.results[0].stdout | from_json }}
+            edge_active_reboot_peer_agent_before: >-
+              {{ edge_active_reboot_agent_status_before_raw.results[1].stdout | from_json }}
+
+        - name: Require exact immutable candidate and complete journal-free health before reboot
+          ansible.builtin.assert:
+            that:
+              - >-
+                edge_active_reboot_target_facts.keys() | sort ==
+                ['allocationId', 'authorizedPbxSourceIpv4Cidrs', 'clusterId',
+                 'clusterMediaPortEnd', 'clusterMediaPortStart', 'customerAccountId',
+                 'generation', 'm365TenantId', 'nodeFqdn', 'nodeId',
+                 'pbxMediaDestinationPortEnd', 'pbxMediaDestinationPortStart',
+                 'privateIpv4', 'publicIpv4', 'rtpengineNgHost', 'rtpengineNgPort',
+                 'serviceInstanceId', 'slot', 'syntheticTeamsSourceIpv4Cidrs',
+                 'teamsMediaSourceIpv4Cidrs', 'teamsSignalingSourceIpv4Cidrs',
+                 'teamsTlsPort', 'tenantContextId', 'tenantListenerPort',
+                 'tenantMediaPortEnd', 'tenantMediaPortStart']
+              - edge_active_reboot_peer_facts.keys() | sort == edge_active_reboot_target_facts.keys() | sort
+              - >-
+                edge_active_reboot_target_authority.keys() | sort ==
+                ['administratorSourceIpv4Cidrs', 'apiVersion', 'azureDhcpServerIpv4',
+                 'generation', 'nodeId', 'profile', 'secretDigests', 'slot']
+              - edge_active_reboot_peer_authority.keys() | sort == edge_active_reboot_target_authority.keys() | sort
+              - >-
+                edge_active_reboot_target_authority.secretDigests.keys() | sort ==
+                ['edgeCertificateChainPem', 'edgePrivateKeyPem', 'fixtureCaCrt',
+                 'fixtureClientCrt', 'fixtureClientKey', 'microsoftCaBundlePem',
+                 'pbxCaBundlePem', 'publicCaBundlePem']
+              - >-
+                edge_active_reboot_peer_authority.secretDigests.keys() | sort ==
+                edge_active_reboot_target_authority.secretDigests.keys() | sort
+              - edge_active_reboot_target_facts.nodeId == inventory_hostname
+              - edge_active_reboot_target_facts.slot == edge_active_reboot_expected_slot
+              - edge_active_reboot_target_facts.privateIpv4 == edge_active_reboot_expected_private_ipv4
+              - edge_active_reboot_target_facts.publicIpv4 == edge_public_ipv4
+              - edge_active_reboot_target_facts.nodeFqdn == edge_acme_node_fqdn
+              - edge_active_reboot_target_facts.generation | int == edge_generation | int
+              - edge_active_reboot_peer_facts.nodeId == edge_active_reboot_peer
+              - edge_active_reboot_peer_facts.slot == hostvars[edge_active_reboot_peer].edge_slot
+              - edge_active_reboot_peer_facts.privateIpv4 == hostvars[edge_active_reboot_peer].edge_private_ipv4
+              - edge_active_reboot_peer_facts.publicIpv4 == hostvars[edge_active_reboot_peer].edge_public_ipv4
+              - edge_active_reboot_peer_facts.nodeFqdn == hostvars[edge_active_reboot_peer].edge_acme_node_fqdn
+              - edge_active_reboot_peer_facts.generation | int == hostvars[edge_active_reboot_peer].edge_generation | int
+              - edge_active_reboot_target_authority.apiVersion == 'edge.vivolution.ae/runtime-authority/v0.1'
+              - edge_active_reboot_target_authority.nodeId == inventory_hostname
+              - edge_active_reboot_target_authority.slot == edge_active_reboot_expected_slot
+              - edge_active_reboot_target_authority.profile == 'SYNTHETIC_PRIVATE'
+              - edge_active_reboot_target_authority.generation | int == edge_generation | int
+              - edge_active_reboot_peer_authority.apiVersion == 'edge.vivolution.ae/runtime-authority/v0.1'
+              - edge_active_reboot_peer_authority.nodeId == edge_active_reboot_peer
+              - edge_active_reboot_peer_authority.slot == hostvars[edge_active_reboot_peer].edge_slot
+              - edge_active_reboot_peer_authority.profile == 'SYNTHETIC_PRIVATE'
+              - edge_active_reboot_peer_authority.generation | int == hostvars[edge_active_reboot_peer].edge_generation | int
+              - >-
+                edge_active_reboot_target_facts.clusterId == edge_active_reboot_peer_facts.clusterId
+              - >-
+                edge_active_reboot_target_facts.customerAccountId == edge_active_reboot_peer_facts.customerAccountId
+              - >-
+                edge_active_reboot_target_facts.m365TenantId == edge_active_reboot_peer_facts.m365TenantId
+              - >-
+                edge_active_reboot_target_facts.tenantContextId == edge_active_reboot_peer_facts.tenantContextId
+              - >-
+                edge_active_reboot_target_facts.serviceInstanceId == edge_active_reboot_peer_facts.serviceInstanceId
+              - >-
+                edge_active_reboot_target_facts.allocationId == edge_active_reboot_peer_facts.allocationId
+              - edge_active_reboot_target_status_before.keys() | sort == ['active', 'apiVersion', 'highestSeenSequence', 'journalPresent', 'kind', 'lastEvidenceDigest', 'previous']
+              - edge_active_reboot_peer_status_before.keys() | sort == ['active', 'apiVersion', 'highestSeenSequence', 'journalPresent', 'kind', 'lastEvidenceDigest', 'previous']
+              - edge_active_reboot_target_status_before.active.keys() | sort == ['kind', 'manifestDigest', 'relativePath', 'releaseDigest', 'sequence', 'slot']
+              - edge_active_reboot_peer_status_before.active.keys() | sort == ['kind', 'manifestDigest', 'relativePath', 'releaseDigest', 'sequence', 'slot']
+              - edge_active_reboot_target_health_before.keys() | sort == ['active', 'apiVersion', 'highestSeenSequence', 'kind', 'runtimeChecks']
+              - edge_active_reboot_peer_health_before.keys() | sort == ['active', 'apiVersion', 'highestSeenSequence', 'kind', 'runtimeChecks']
+              - edge_active_reboot_target_status_before.kind == 'EdgeRuntimeStatus'
+              - edge_active_reboot_peer_status_before.kind == 'EdgeRuntimeStatus'
+              - edge_active_reboot_target_health_before.kind == 'EdgeRuntimeHealth'
+              - edge_active_reboot_peer_health_before.kind == 'EdgeRuntimeHealth'
+              - edge_active_reboot_agent_status_before_raw.results[0].stderr | trim == ''
+              - edge_active_reboot_agent_status_before_raw.results[1].stderr | trim == ''
+              - edge_active_reboot_target_agent_before.keys() | sort == ['activeLastKnownGood', 'apiVersion', 'highestSeenSequence', 'kind', 'lastAbortedCandidate', 'pendingCandidate']
+              - edge_active_reboot_peer_agent_before.keys() | sort == ['activeLastKnownGood', 'apiVersion', 'highestSeenSequence', 'kind', 'lastAbortedCandidate', 'pendingCandidate']
+              - edge_active_reboot_target_agent_before.apiVersion == 'edge.vivolution.ae/agent-state/v0.1'
+              - edge_active_reboot_peer_agent_before.apiVersion == 'edge.vivolution.ae/agent-state/v0.1'
+              - edge_active_reboot_target_agent_before.kind == 'EdgeAgentProtectedStateStatus'
+              - edge_active_reboot_peer_agent_before.kind == 'EdgeAgentProtectedStateStatus'
+              - edge_active_reboot_target_agent_before.pendingCandidate is none
+              - edge_active_reboot_peer_agent_before.pendingCandidate is none
+              - not (edge_active_reboot_target_status_before.journalPresent | bool)
+              - not (edge_active_reboot_peer_status_before.journalPresent | bool)
+              - edge_active_reboot_target_status_before.active.kind == 'CANDIDATE'
+              - edge_active_reboot_peer_status_before.active.kind == 'CANDIDATE'
+              - edge_active_reboot_target_status_before.active.sequence | int == edge_active_reboot_target_status_before.highestSeenSequence | int
+              - edge_active_reboot_peer_status_before.active.sequence | int == edge_active_reboot_peer_status_before.highestSeenSequence | int
+              - edge_active_reboot_target_status_before.active.manifestDigest is match('^sha256:[0-9a-f]{64}$')
+              - edge_active_reboot_peer_status_before.active.manifestDigest is match('^sha256:[0-9a-f]{64}$')
+              - edge_active_reboot_target_status_before.active.releaseDigest is match('^sha256:[0-9a-f]{64}$')
+              - edge_active_reboot_peer_status_before.active.releaseDigest is match('^sha256:[0-9a-f]{64}$')
+              - edge_active_reboot_target_status_before.active.relativePath is match('^slots/[AB]/[0-9]{16}-[0-9a-f]{64}$')
+              - edge_active_reboot_peer_status_before.active.relativePath is match('^slots/[AB]/[0-9]{16}-[0-9a-f]{64}$')
+              - edge_active_reboot_target_status_before.lastEvidenceDigest is match('^sha256:[0-9a-f]{64}$')
+              - edge_active_reboot_peer_status_before.lastEvidenceDigest is match('^sha256:[0-9a-f]{64}$')
+              - >-
+                edge_active_reboot_target_agent_before.activeLastKnownGood ==
+                {'manifestDigest': edge_active_reboot_target_status_before.active.manifestDigest,
+                 'sequence': edge_active_reboot_target_status_before.active.sequence}
+              - >-
+                edge_active_reboot_peer_agent_before.activeLastKnownGood ==
+                {'manifestDigest': edge_active_reboot_peer_status_before.active.manifestDigest,
+                 'sequence': edge_active_reboot_peer_status_before.active.sequence}
+              - edge_active_reboot_target_agent_before.highestSeenSequence | int == edge_active_reboot_target_status_before.highestSeenSequence | int
+              - edge_active_reboot_peer_agent_before.highestSeenSequence | int == edge_active_reboot_peer_status_before.highestSeenSequence | int
+              - edge_active_reboot_target_health_before.active == edge_active_reboot_target_status_before.active
+              - edge_active_reboot_peer_health_before.active == edge_active_reboot_peer_status_before.active
+              - edge_active_reboot_target_health_before.highestSeenSequence | int == edge_active_reboot_target_status_before.highestSeenSequence | int
+              - edge_active_reboot_peer_health_before.highestSeenSequence | int == edge_active_reboot_peer_status_before.highestSeenSequence | int
+              - edge_active_reboot_target_health_before.runtimeChecks | map(attribute='name') | list == edge_active_reboot_required_checks
+              - edge_active_reboot_peer_health_before.runtimeChecks | map(attribute='name') | list == edge_active_reboot_required_checks
+              - edge_active_reboot_target_health_before.runtimeChecks | map(attribute='status') | unique | list == ['PASSED']
+              - edge_active_reboot_peer_health_before.runtimeChecks | map(attribute='status') | unique | list == ['PASSED']
+              - edge_active_reboot_units_before.results | map(attribute='stdout') | map('trim') | unique | list == ['active']
+              - edge_active_reboot_recovery_enabled_before.results | map(attribute='stdout') | map('trim') | unique | list == ['enabled']
+              - not (edge_active_reboot_journals_before.results[0].stat.exists | default(false))
+              - not (edge_active_reboot_journals_before.results[1].stat.exists | default(false))
+              - edge_active_reboot_boot_ids_before.results[0].stdout | trim is match('^[0-9a-f-]{36}$')
+              - edge_active_reboot_boot_ids_before.results[1].stdout | trim is match('^[0-9a-f-]{36}$')
+            fail_msg: >-
+              The target or peer is not one exact committed, healthy,
+              transaction-free active candidate; no reboot was scheduled.
+
+        - name: Assemble exact current target and peer preflight snapshots
+          ansible.builtin.set_fact:
+            edge_active_reboot_current_target_snapshot:
+              agentState:
+                group: "{{ edge_active_reboot_agent_state_before.results[0].stat.gr_name }}"
+                mode: "{{ edge_active_reboot_agent_state_before.results[0].stat.mode }}"
+                nlink: "{{ edge_active_reboot_agent_state_before.results[0].stat.nlink | int }}"
+                owner: "{{ edge_active_reboot_agent_state_before.results[0].stat.pw_name }}"
+                sha256: "sha256:{{ edge_active_reboot_agent_state_before.results[0].stat.checksum }}"
+              agentStatus: "{{ edge_active_reboot_target_agent_before }}"
+              bootId: "{{ edge_active_reboot_boot_ids_before.results[0].stdout | trim }}"
+              health: "{{ edge_active_reboot_target_health_before }}"
+              recoveryUnitEnabled: "{{ edge_active_reboot_recovery_enabled_before.results[0].stdout | trim }}"
+              status: "{{ edge_active_reboot_target_status_before }}"
+              transactionJournalPresent: "{{ edge_active_reboot_journals_before.results[0].stat.exists | default(false) | bool }}"
+              unitStates:
+                nftables.service: "{{ edge_active_reboot_units_before.results[0].stdout | trim }}"
+                ntpsec.service: "{{ edge_active_reboot_units_before.results[1].stdout | trim }}"
+                opensips.service: "{{ edge_active_reboot_units_before.results[2].stdout | trim }}"
+                rtpengine-daemon.service: "{{ edge_active_reboot_units_before.results[3].stdout | trim }}"
+                ssh.service: "{{ edge_active_reboot_units_before.results[4].stdout | trim }}"
+                vivolution-edge-certificate.timer: "{{ edge_active_reboot_units_before.results[5].stdout | trim }}"
+            edge_active_reboot_current_peer_snapshot:
+              agentState:
+                group: "{{ edge_active_reboot_agent_state_before.results[3].stat.gr_name }}"
+                mode: "{{ edge_active_reboot_agent_state_before.results[3].stat.mode }}"
+                nlink: "{{ edge_active_reboot_agent_state_before.results[3].stat.nlink | int }}"
+                owner: "{{ edge_active_reboot_agent_state_before.results[3].stat.pw_name }}"
+                sha256: "sha256:{{ edge_active_reboot_agent_state_before.results[3].stat.checksum }}"
+              agentStatus: "{{ edge_active_reboot_peer_agent_before }}"
+              bootId: "{{ edge_active_reboot_boot_ids_before.results[1].stdout | trim }}"
+              health: "{{ edge_active_reboot_peer_health_before }}"
+              recoveryUnitEnabled: "{{ edge_active_reboot_recovery_enabled_before.results[1].stdout | trim }}"
+              status: "{{ edge_active_reboot_peer_status_before }}"
+              transactionJournalPresent: "{{ edge_active_reboot_journals_before.results[1].stat.exists | default(false) | bool }}"
+              unitStates:
+                nftables.service: "{{ edge_active_reboot_units_before.results[6].stdout | trim }}"
+                ntpsec.service: "{{ edge_active_reboot_units_before.results[7].stdout | trim }}"
+                opensips.service: "{{ edge_active_reboot_units_before.results[8].stdout | trim }}"
+                rtpengine-daemon.service: "{{ edge_active_reboot_units_before.results[9].stdout | trim }}"
+                ssh.service: "{{ edge_active_reboot_units_before.results[10].stdout | trim }}"
+                vivolution-edge-certificate.timer: "{{ edge_active_reboot_units_before.results[11].stdout | trim }}"
+            edge_active_reboot_current_target_identity:
+              nodeFactsAfterSha256: "sha256:{{ edge_active_reboot_identity_stats_before.results[0].stat.checksum }}"
+              nodeFactsBase64: "{{ edge_active_reboot_identity_raw_before.results[0].content }}"
+              nodeFactsMetadata:
+                group: "{{ edge_active_reboot_identity_stats_before.results[0].stat.gr_name }}"
+                mode: "{{ edge_active_reboot_identity_stats_before.results[0].stat.mode }}"
+                nlink: "{{ edge_active_reboot_identity_stats_before.results[0].stat.nlink | int }}"
+                owner: "{{ edge_active_reboot_identity_stats_before.results[0].stat.pw_name }}"
+              nodeFactsSha256: "sha256:{{ edge_active_reboot_identity_stats_before.results[0].stat.checksum }}"
+              runtimeAuthorityAfterSha256: "sha256:{{ edge_active_reboot_identity_stats_before.results[1].stat.checksum }}"
+              runtimeAuthorityBase64: "{{ edge_active_reboot_identity_raw_before.results[1].content }}"
+              runtimeAuthorityMetadata:
+                group: "{{ edge_active_reboot_identity_stats_before.results[1].stat.gr_name }}"
+                mode: "{{ edge_active_reboot_identity_stats_before.results[1].stat.mode }}"
+                nlink: "{{ edge_active_reboot_identity_stats_before.results[1].stat.nlink | int }}"
+                owner: "{{ edge_active_reboot_identity_stats_before.results[1].stat.pw_name }}"
+              runtimeAuthoritySha256: "sha256:{{ edge_active_reboot_identity_stats_before.results[1].stat.checksum }}"
+            edge_active_reboot_current_peer_identity:
+              nodeFactsAfterSha256: "sha256:{{ edge_active_reboot_identity_stats_before.results[2].stat.checksum }}"
+              nodeFactsBase64: "{{ edge_active_reboot_identity_raw_before.results[2].content }}"
+              nodeFactsMetadata:
+                group: "{{ edge_active_reboot_identity_stats_before.results[2].stat.gr_name }}"
+                mode: "{{ edge_active_reboot_identity_stats_before.results[2].stat.mode }}"
+                nlink: "{{ edge_active_reboot_identity_stats_before.results[2].stat.nlink | int }}"
+                owner: "{{ edge_active_reboot_identity_stats_before.results[2].stat.pw_name }}"
+              nodeFactsSha256: "sha256:{{ edge_active_reboot_identity_stats_before.results[2].stat.checksum }}"
+              runtimeAuthorityAfterSha256: "sha256:{{ edge_active_reboot_identity_stats_before.results[3].stat.checksum }}"
+              runtimeAuthorityBase64: "{{ edge_active_reboot_identity_raw_before.results[3].content }}"
+              runtimeAuthorityMetadata:
+                group: "{{ edge_active_reboot_identity_stats_before.results[3].stat.gr_name }}"
+                mode: "{{ edge_active_reboot_identity_stats_before.results[3].stat.mode }}"
+                nlink: "{{ edge_active_reboot_identity_stats_before.results[3].stat.nlink | int }}"
+                owner: "{{ edge_active_reboot_identity_stats_before.results[3].stat.pw_name }}"
+              runtimeAuthoritySha256: "sha256:{{ edge_active_reboot_identity_stats_before.results[3].stat.checksum }}"
+
+        - name: Assemble one canonical current preflight candidate
+          ansible.builtin.set_fact:
+            edge_active_reboot_preflight_candidate:
+              apiVersion: edge.vivolution.ae/active-edge-reboot-preflight/v0.1
+              nodeId: "{{ inventory_hostname }}"
+              peer: "{{ edge_active_reboot_current_peer_snapshot }}"
+              peerIdentitySources: "{{ edge_active_reboot_current_peer_identity }}"
+              peerNodeId: "{{ edge_active_reboot_peer }}"
+              target: "{{ edge_active_reboot_current_target_snapshot }}"
+              targetIdentitySources: "{{ edge_active_reboot_current_target_identity }}"
+
+        - name: Write one protected canonical preflight staging file
+          ansible.builtin.copy:
+            content: |
+              {{ edge_active_reboot_preflight_candidate | to_json(sort_keys=True, separators=(',', ':')) }}
+            dest: "{{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-preflight-staging.json"
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+          when: edge_active_reboot_journal_phase == 'PENDING'
+
+        - name: Durably arm the exact request before any reboot authority exists
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_journal }}"
+              - --evidence-root
+              - "{{ edge_active_reboot_evidence_root }}"
+              - arm
+              - --node
+              - "{{ inventory_hostname }}"
+              - --preflight-file
+              - "{{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-preflight-staging.json"
+          delegate_to: localhost
+          become: false
+          changed_when: true
+          register: edge_active_reboot_journal_armed_raw
+          when: edge_active_reboot_journal_phase == 'PENDING'
+
+        - name: Read the exact durable preflight after arm or resume
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_journal }}"
+              - --evidence-root
+              - "{{ edge_active_reboot_evidence_root }}"
+              - preflight
+              - --node
+              - "{{ inventory_hostname }}"
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_preflight_raw
+
+        - name: Refresh the durable journal after arm or resume
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_journal }}"
+              - --evidence-root
+              - "{{ edge_active_reboot_evidence_root }}"
+              - status
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_journal_armed_status_raw
+
+        - name: Bind immutable preflight and current durable phase
+          ansible.builtin.set_fact:
+            edge_active_reboot_preflight: "{{ edge_active_reboot_preflight_raw.stdout | from_json }}"
+            edge_active_reboot_journal_active: "{{ edge_active_reboot_journal_armed_status_raw.stdout | from_json }}"
+            edge_active_reboot_journal_active_phase: >-
+              {{ (edge_active_reboot_journal_armed_status_raw.stdout | from_json).nodes[inventory_hostname].phase }}
+
+        - name: Require exact durable preflight continuity before scheduling or recovery
+          ansible.builtin.assert:
+            that:
+              - edge_active_reboot_preflight.nodeId == inventory_hostname
+              - edge_active_reboot_preflight.peerNodeId == edge_active_reboot_peer
+              - >-
+                edge_active_reboot_preflight.target ==
+                edge_active_reboot_current_target_snapshot or
+                edge_active_reboot_preflight.target.bootId !=
+                edge_active_reboot_current_target_snapshot.bootId
+              - edge_active_reboot_preflight.peer == edge_active_reboot_current_peer_snapshot
+              - edge_active_reboot_preflight.peerIdentitySources == edge_active_reboot_current_peer_identity
+              - edge_active_reboot_preflight.targetIdentitySources == edge_active_reboot_current_target_identity
+              - edge_active_reboot_preflight.target.bootId == edge_active_reboot_journal_active.nodes[inventory_hostname].bootIdBefore
+              - edge_active_reboot_journal_active_phase in ['ARMED', 'SCHEDULED', 'SSH_LOST', 'RECONNECTED']
+            fail_msg: A resumed request no longer matches its durable preflight authority.
+
+        - name: Install the bounded complete fixture-result collector temporarily
+          ansible.builtin.copy:
+            src: "{{ hostvars['localhost'].edge_active_reboot_fixture_collector_path }}"
+            dest: "{{ edge_active_reboot_remote_collector }}"
+            owner: root
+            group: root
+            mode: '0700'
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+
+        - name: Inspect exact transient reboot authority before schedule or resume
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/systemctl
+              - show
+              - --property=LoadState
+              - --value
+              - "{{ item }}"
+          loop:
+            - "{{ edge_active_reboot_transient_unit }}.timer"
+            - "{{ edge_active_reboot_transient_unit }}.service"
+          changed_when: false
+          register: edge_active_reboot_transient_before
+
+        - name: Classify exact crash-resume state before any scheduling action
+          ansible.builtin.set_fact:
+            edge_active_reboot_boot_already_changed: >-
+              {{ edge_active_reboot_current_target_snapshot.bootId !=
+                 edge_active_reboot_preflight.target.bootId }}
+            edge_active_reboot_transient_load_states: >-
+              {{ edge_active_reboot_transient_before.results |
+                 map(attribute='stdout') | map('trim') | list }}
+
+        - name: Reconcile an armed but uncommitted transient authority
+          when:
+            - not (edge_active_reboot_boot_already_changed | bool)
+            - edge_active_reboot_journal_active_phase == 'ARMED'
+            - edge_active_reboot_transient_load_states | unique != ['not-found']
+          block:
+            - name: Observe bounded SSH loss from the uncommitted transient
+              ansible.builtin.wait_for:
+                host: "{{ ansible_host }}"
+                port: "{{ ansible_port | default(22) | int }}"
+                state: stopped
+                connect_timeout: 3
+                sleep: 1
+                timeout: 60
+              delegate_to: localhost
+              become: false
+              ignore_errors: true
+              register: edge_active_reboot_uncommitted_loss
+
+            - name: Stop only a failed uncommitted transient authority
+              ansible.builtin.command:
+                argv: "{{ item }}"
+              loop:
+                - [/usr/bin/systemctl, stop, vivolution-active-edge-reboot-qualifier.timer]
+                - [/usr/bin/systemctl, stop, vivolution-active-edge-reboot-qualifier.service]
+                - [/usr/bin/systemctl, reset-failed, vivolution-active-edge-reboot-qualifier.timer, vivolution-active-edge-reboot-qualifier.service]
+              changed_when: true
+              failed_when: false
+              when: edge_active_reboot_uncommitted_loss is failed
+
+            - name: Recover SSH after an uncommitted transient reboot
+              ansible.builtin.wait_for_connection:
+                connect_timeout: 5
+                delay: 2
+                sleep: 3
+                timeout: 300
+              when: edge_active_reboot_uncommitted_loss is succeeded
+
+            - name: Prove committed runtime recovery after uncommitted reboot
+              ansible.builtin.command:
+                argv: "{{ item }}"
+              loop:
+                - [/usr/bin/cat, /proc/sys/kernel/random/boot_id]
+                - [/usr/local/sbin/vivolution-edge-runtime, status]
+                - [/usr/local/sbin/vivolution-edge-runtime, health]
+              changed_when: false
+              register: edge_active_reboot_uncommitted_recovery
+              when: edge_active_reboot_uncommitted_loss is succeeded
+
+            - name: Require healthy exact recovery after uncommitted reboot
+              ansible.builtin.assert:
+                that:
+                  - edge_active_reboot_uncommitted_recovery.results[0].stdout | trim != edge_active_reboot_preflight.target.bootId
+                  - (edge_active_reboot_uncommitted_recovery.results[1].stdout | from_json) == edge_active_reboot_preflight.target.status
+                  - (edge_active_reboot_uncommitted_recovery.results[2].stdout | from_json) == edge_active_reboot_preflight.target.health
+              when: edge_active_reboot_uncommitted_loss is succeeded
+
+            - name: Select exact uncommitted-transient reconciliation reason
+              ansible.builtin.set_fact:
+                edge_active_reboot_uncommitted_reason: >-
+                  {{ 'REBOOT_OCCURRED_WITHOUT_OBSERVED_SSH_LOSS'
+                     if edge_active_reboot_uncommitted_loss is succeeded
+                     else 'FAILED_TRANSIENT_UNIT_RECONCILED' }}
+
+            - name: Persist uncommitted-transient reconciliation
+              ansible.builtin.command:
+                argv:
+                  - "{{ ansible_playbook_python }}"
+                  - "{{ edge_active_reboot_journal }}"
+                  - --evidence-root
+                  - "{{ edge_active_reboot_evidence_root }}"
+                  - abort
+                  - --node
+                  - "{{ inventory_hostname }}"
+                  - --reason
+                  - "{{ edge_active_reboot_uncommitted_reason }}"
+              delegate_to: localhost
+              become: false
+              changed_when: true
+
+            - name: Stop after reconciling uncommitted transient authority
+              ansible.builtin.fail:
+                msg: >-
+                  A prior runner stopped between systemd-run and durable
+                  schedule commit. Its exact transient outcome was reconciled;
+                  no additional reboot was scheduled.
+
+        - name: Reconcile an unobserved completed reboot without scheduling another
+          when:
+            - edge_active_reboot_boot_already_changed | bool
+            - edge_active_reboot_journal_active_phase in ['ARMED', 'SCHEDULED']
+          block:
+            - name: Persist fail-closed unobserved-reboot reconciliation
+              ansible.builtin.command:
+                argv:
+                  - "{{ ansible_playbook_python }}"
+                  - "{{ edge_active_reboot_journal }}"
+                  - --evidence-root
+                  - "{{ edge_active_reboot_evidence_root }}"
+                  - abort
+                  - --node
+                  - "{{ inventory_hostname }}"
+                  - --reason
+                  - REBOOT_OCCURRED_WITHOUT_OBSERVED_SSH_LOSS
+              delegate_to: localhost
+              become: false
+              changed_when: true
+
+            - name: Stop after safely reconciling the ambiguous prior reboot
+              ansible.builtin.fail:
+                msg: >-
+                  The reboot occurred during controller loss before SSH-loss
+                  evidence was durably committed. The node is healthy and the
+                  exact run is reconciled incomplete; no second reboot was scheduled.
+
+        - name: Reconcile a disappeared scheduled unit without scheduling another
+          when:
+            - not (edge_active_reboot_boot_already_changed | bool)
+            - edge_active_reboot_journal_active_phase == 'SCHEDULED'
+            - edge_active_reboot_transient_load_states | unique == ['not-found']
+          block:
+            - name: Persist fail-closed failed-transient reconciliation
+              ansible.builtin.command:
+                argv:
+                  - "{{ ansible_playbook_python }}"
+                  - "{{ edge_active_reboot_journal }}"
+                  - --evidence-root
+                  - "{{ edge_active_reboot_evidence_root }}"
+                  - abort
+                  - --node
+                  - "{{ inventory_hostname }}"
+                  - --reason
+                  - FAILED_TRANSIENT_UNIT_RECONCILED
+              delegate_to: localhost
+              become: false
+              changed_when: true
+
+            - name: Stop after safely reconciling the vanished transient authority
+              ansible.builtin.fail:
+                msg: >-
+                  The prior scheduled transient authority vanished without a
+                  reboot. The exact run is reconciled incomplete and no new
+                  reboot was scheduled.
+
+        - name: Schedule one bounded node-local reboot after SSH returns
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/systemd-run
+              - --quiet
+              - "--unit={{ edge_active_reboot_transient_unit }}"
+              - --on-active=3s
+              - --timer-property=AccuracySec=1s
+              - --property=Type=oneshot
+              - --property=TimeoutStartSec=30s
+              - /usr/bin/systemctl
+              - reboot
+              - --no-wall
+          changed_when: true
+          register: edge_active_reboot_schedule_command
+          when:
+            - not (edge_active_reboot_boot_already_changed | bool)
+            - edge_active_reboot_journal_active_phase == 'ARMED'
+            - edge_active_reboot_transient_load_states | unique == ['not-found']
+
+        - name: Record controller timing after successful transient scheduling
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - -I
+              - -B
+              - -c
+              - >-
+                import json,time;
+                print(json.dumps({'epochMs':time.time_ns()//1000000,
+                'monotonicNs':time.monotonic_ns()},sort_keys=True,separators=(',',':')))
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_scheduled_at
+          when: edge_active_reboot_schedule_command is not skipped
+
+        - name: Durably record successful transient scheduling
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_journal }}"
+              - --evidence-root
+              - "{{ edge_active_reboot_evidence_root }}"
+              - mark-scheduled
+              - --node
+              - "{{ inventory_hostname }}"
+              - --timing
+              - "{{ edge_active_reboot_scheduled_at.stdout }}"
+          delegate_to: localhost
+          become: false
+          changed_when: true
+          when: edge_active_reboot_schedule_command is not skipped
+
+        - name: Bind whether this invocation must observe target SSH loss
+          ansible.builtin.set_fact:
+            edge_active_reboot_need_loss_observation: >-
+              {{ not (edge_active_reboot_boot_already_changed | bool) and
+                 edge_active_reboot_journal_active_phase in ['ARMED', 'SCHEDULED'] }}
+
+        - name: Require bounded observable SSH loss from the target
+          ansible.builtin.wait_for:
+            host: "{{ ansible_host }}"
+            port: "{{ ansible_port | default(22) | int }}"
+            state: stopped
+            connect_timeout: 3
+            sleep: 1
+            timeout: 60
+          delegate_to: localhost
+          become: false
+          when: edge_active_reboot_need_loss_observation | bool
+          ignore_errors: true
+          register: edge_active_reboot_ssh_loss_wait
+
+        - name: Reconcile a transient reboot that failed before SSH loss
+          when:
+            - edge_active_reboot_need_loss_observation | bool
+            - edge_active_reboot_ssh_loss_wait is failed
+          block:
+            - name: Stop and reset only the exact failed transient units
+              ansible.builtin.command:
+                argv: "{{ item }}"
+              loop:
+                - [/usr/bin/systemctl, stop, vivolution-active-edge-reboot-qualifier.timer]
+                - [/usr/bin/systemctl, stop, vivolution-active-edge-reboot-qualifier.service]
+                - [/usr/bin/systemctl, reset-failed, vivolution-active-edge-reboot-qualifier.timer, vivolution-active-edge-reboot-qualifier.service]
+              changed_when: true
+              failed_when: false
+
+            - name: Persist failed-transient reconciliation after bounded timeout
+              ansible.builtin.command:
+                argv:
+                  - "{{ ansible_playbook_python }}"
+                  - "{{ edge_active_reboot_journal }}"
+                  - --evidence-root
+                  - "{{ edge_active_reboot_evidence_root }}"
+                  - abort
+                  - --node
+                  - "{{ inventory_hostname }}"
+                  - --reason
+                  - FAILED_TRANSIENT_UNIT_RECONCILED
+              delegate_to: localhost
+              become: false
+              changed_when: true
+
+            - name: Stop after reconciling the failed transient reboot
+              ansible.builtin.fail:
+                msg: >-
+                  Target SSH never closed inside 60 seconds. The exact
+                  transient authority was reconciled and this run is closed
+                  incomplete; no second reboot was scheduled.
+
+        - name: Record controller monotonic time after target SSH loss
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - -I
+              - -B
+              - -c
+              - >-
+                import json,time;
+                print(json.dumps({'epochMs':time.time_ns()//1000000,
+                'monotonicNs':time.monotonic_ns()},sort_keys=True,separators=(',',':')))
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_loss_at
+          when: edge_active_reboot_need_loss_observation | bool
+
+        - name: Re-read protected peer runtime status while target SSH is lost
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+          delegate_to: "{{ edge_active_reboot_peer }}"
+          changed_when: false
+          register: edge_active_reboot_peer_status_during_raw
+          when: edge_active_reboot_need_loss_observation | bool
+
+        - name: Re-prove protected peer runtime health while target SSH is lost
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+          delegate_to: "{{ edge_active_reboot_peer }}"
+          changed_when: false
+          register: edge_active_reboot_peer_health_during_raw
+          when: edge_active_reboot_need_loss_observation | bool
+
+        - name: Re-read validated peer Agent state while target SSH is lost
+          ansible.builtin.command:
+            argv: "{{ edge_active_reboot_peer_agent_argv }}"
+          delegate_to: "{{ edge_active_reboot_peer }}"
+          become_user: vivolution-edge-agent
+          changed_when: false
+          register: edge_active_reboot_peer_agent_during_raw
+          when: edge_active_reboot_need_loss_observation | bool
+
+        - name: Reinspect protected peer Agent state file while target SSH is lost
+          ansible.builtin.stat:
+            path: "{{ edge_active_reboot_agent_state_v3 }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          delegate_to: "{{ edge_active_reboot_peer }}"
+          register: edge_active_reboot_peer_agent_state_during
+          when: edge_active_reboot_need_loss_observation | bool
+
+        - name: Re-prove peer boot ID and units while target SSH is lost
+          ansible.builtin.command:
+            argv: "{{ item }}"
+          loop:
+            - [/usr/bin/cat, /proc/sys/kernel/random/boot_id]
+            - [/usr/bin/systemctl, is-enabled, vivolution-edge-runtime-recover.service]
+            - [/usr/bin/systemctl, is-active, nftables.service]
+            - [/usr/bin/systemctl, is-active, ntpsec.service]
+            - [/usr/bin/systemctl, is-active, opensips.service]
+            - [/usr/bin/systemctl, is-active, rtpengine-daemon.service]
+            - [/usr/bin/systemctl, is-active, ssh.service]
+            - [/usr/bin/systemctl, is-active, vivolution-edge-certificate.timer]
+          delegate_to: "{{ edge_active_reboot_peer }}"
+          changed_when: false
+          register: edge_active_reboot_peer_commands_during
+          when: edge_active_reboot_need_loss_observation | bool
+
+        - name: Reinspect peer journal while target SSH is lost
+          ansible.builtin.stat:
+            path: "{{ edge_active_reboot_transaction_path }}"
+            follow: false
+            get_attributes: false
+            get_checksum: false
+            get_mime: false
+          delegate_to: "{{ edge_active_reboot_peer }}"
+          register: edge_active_reboot_peer_journal_during
+          when: edge_active_reboot_need_loss_observation | bool
+
+        - name: Require exact peer continuity during target SSH loss
+          ansible.builtin.assert:
+            that:
+              - (edge_active_reboot_peer_status_during_raw.stdout | from_json) == edge_active_reboot_peer_status_before
+              - (edge_active_reboot_peer_health_during_raw.stdout | from_json) == edge_active_reboot_peer_health_before
+              - edge_active_reboot_peer_agent_during_raw.stderr | trim == ''
+              - (edge_active_reboot_peer_agent_during_raw.stdout | from_json) == edge_active_reboot_peer_agent_before
+              - edge_active_reboot_peer_agent_state_during.stat.exists
+              - edge_active_reboot_peer_agent_state_during.stat.isreg | default(false)
+              - not (edge_active_reboot_peer_agent_state_during.stat.islnk | default(false))
+              - edge_active_reboot_peer_agent_state_during.stat.nlink | int == 1
+              - edge_active_reboot_peer_agent_state_during.stat.pw_name == 'vivolution-edge-agent'
+              - edge_active_reboot_peer_agent_state_during.stat.gr_name == 'vivolution-edge-agent'
+              - edge_active_reboot_peer_agent_state_during.stat.mode == '0600'
+              - edge_active_reboot_peer_agent_state_during.stat.checksum == edge_active_reboot_agent_state_before.results[3].stat.checksum
+              - edge_active_reboot_peer_commands_during.results[0].stdout | trim == edge_active_reboot_boot_ids_before.results[1].stdout | trim
+              - edge_active_reboot_peer_commands_during.results[1].stdout | trim == 'enabled'
+              - edge_active_reboot_peer_commands_during.results[2:] | map(attribute='stdout') | map('trim') | unique | list == ['active']
+              - not (edge_active_reboot_peer_journal_during.stat.exists | default(false))
+            fail_msg: The peer changed or became unhealthy while target SSH was lost.
+          when: edge_active_reboot_need_loss_observation | bool
+
+        - name: Assemble the actually observed peer snapshot during target loss
+          ansible.builtin.set_fact:
+            edge_active_reboot_peer_during_observation:
+              agentState:
+                group: "{{ edge_active_reboot_peer_agent_state_during.stat.gr_name }}"
+                mode: "{{ edge_active_reboot_peer_agent_state_during.stat.mode }}"
+                nlink: "{{ edge_active_reboot_peer_agent_state_during.stat.nlink | int }}"
+                owner: "{{ edge_active_reboot_peer_agent_state_during.stat.pw_name }}"
+                sha256: "sha256:{{ edge_active_reboot_peer_agent_state_during.stat.checksum }}"
+              agentStatus: "{{ edge_active_reboot_peer_agent_during_raw.stdout | from_json }}"
+              bootId: "{{ edge_active_reboot_peer_commands_during.results[0].stdout | trim }}"
+              health: "{{ edge_active_reboot_peer_health_during_raw.stdout | from_json }}"
+              recoveryUnitEnabled: "{{ edge_active_reboot_peer_commands_during.results[1].stdout | trim }}"
+              status: "{{ edge_active_reboot_peer_status_during_raw.stdout | from_json }}"
+              transactionJournalPresent: "{{ edge_active_reboot_peer_journal_during.stat.exists | default(false) | bool }}"
+              unitStates:
+                nftables.service: "{{ edge_active_reboot_peer_commands_during.results[2].stdout | trim }}"
+                ntpsec.service: "{{ edge_active_reboot_peer_commands_during.results[3].stdout | trim }}"
+                opensips.service: "{{ edge_active_reboot_peer_commands_during.results[4].stdout | trim }}"
+                rtpengine-daemon.service: "{{ edge_active_reboot_peer_commands_during.results[5].stdout | trim }}"
+                ssh.service: "{{ edge_active_reboot_peer_commands_during.results[6].stdout | trim }}"
+                vivolution-edge-certificate.timer: "{{ edge_active_reboot_peer_commands_during.results[7].stdout | trim }}"
+          when: edge_active_reboot_need_loss_observation | bool
+
+        - name: Write the protected actual peer-during-loss observation staging file
+          ansible.builtin.copy:
+            content: |
+              {{ edge_active_reboot_peer_during_observation | to_json(sort_keys=True, separators=(',', ':')) }}
+            dest: "{{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-peer-during-loss-staging.json"
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+          when: edge_active_reboot_need_loss_observation | bool
+
+        - name: Durably commit observed SSH loss after peer continuity proof
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_journal }}"
+              - --evidence-root
+              - "{{ edge_active_reboot_evidence_root }}"
+              - mark-loss
+              - --node
+              - "{{ inventory_hostname }}"
+              - --timing
+              - "{{ edge_active_reboot_loss_at.stdout }}"
+              - --peer-observation-file
+              - "{{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-peer-during-loss-staging.json"
+          delegate_to: localhost
+          become: false
+          changed_when: true
+          when: edge_active_reboot_need_loss_observation | bool
+
+        - name: Refresh durable state after loss observation or resume
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_journal }}"
+              - --evidence-root
+              - "{{ edge_active_reboot_evidence_root }}"
+              - status
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_journal_after_loss_raw
+
+        - name: Bind durable post-loss phase
+          ansible.builtin.set_fact:
+            edge_active_reboot_journal_after_loss: >-
+              {{ edge_active_reboot_journal_after_loss_raw.stdout | from_json }}
+            edge_active_reboot_journal_after_loss_phase: >-
+              {{ (edge_active_reboot_journal_after_loss_raw.stdout | from_json).nodes[inventory_hostname].phase }}
+
+        - name: Read the durable actual peer observation made during SSH loss
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_journal }}"
+              - --evidence-root
+              - "{{ edge_active_reboot_evidence_root }}"
+              - peer-during-loss
+              - --node
+              - "{{ inventory_hostname }}"
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_peer_during_durable_raw
+
+        - name: Bind exact durable peer-during-loss evidence
+          ansible.builtin.set_fact:
+            edge_active_reboot_peer_during_durable: >-
+              {{ edge_active_reboot_peer_during_durable_raw.stdout | from_json }}
+
+        - name: Require durable peer-loss bytes to equal the live observation or preflight
+          ansible.builtin.assert:
+            that:
+              - edge_active_reboot_peer_during_durable == edge_active_reboot_preflight.peer
+              - >-
+                (not (edge_active_reboot_need_loss_observation | bool)) or
+                edge_active_reboot_peer_during_durable == edge_active_reboot_peer_during_observation
+            fail_msg: The actual peer observation during target loss was not durably bound.
+
+        - name: Require observed-loss or already-reconnected durable state
+          ansible.builtin.assert:
+            that:
+              - edge_active_reboot_journal_after_loss_phase in ['SSH_LOST', 'RECONNECTED']
+              - edge_active_reboot_journal_after_loss.nodes[inventory_hostname].lossTiming is not none
+            fail_msg: The durable request lacks an exact observed SSH-loss transition.
+
+        - name: Wait a bounded interval for target SSH and Python recovery
+          ansible.builtin.wait_for_connection:
+            connect_timeout: 5
+            delay: 2
+            sleep: 3
+            timeout: 300
+          when: edge_active_reboot_journal_after_loss_phase == 'SSH_LOST'
+
+        - name: Record controller monotonic time after target reconnect
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - -I
+              - -B
+              - -c
+              - >-
+                import json,time;
+                print(json.dumps({'epochMs':time.time_ns()//1000000,
+                'monotonicNs':time.monotonic_ns()},sort_keys=True,separators=(',',':')))
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_reconnected_at
+          when: edge_active_reboot_journal_after_loss_phase == 'SSH_LOST'
+
+        - name: Classify the reconnect against durable time and clock-origin bounds
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_journal }}"
+              - --evidence-root
+              - "{{ edge_active_reboot_evidence_root }}"
+              - assess-reconnect
+              - --node
+              - "{{ inventory_hostname }}"
+              - --timing
+              - "{{ edge_active_reboot_reconnected_at.stdout }}"
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_reconnect_assessment_raw
+          when: edge_active_reboot_journal_after_loss_phase == 'SSH_LOST'
+
+        - name: Bind the reconnect observation and its fail-closed classification
+          ansible.builtin.set_fact:
+            edge_active_reboot_schedule_timing: >-
+              {{ edge_active_reboot_journal_after_loss.nodes[inventory_hostname].scheduleTiming }}
+            edge_active_reboot_loss_timing: >-
+              {{ edge_active_reboot_journal_after_loss.nodes[inventory_hostname].lossTiming }}
+            edge_active_reboot_reconnect_timing: >-
+              {{ ((edge_active_reboot_reconnected_at.stdout | from_json)
+                  if edge_active_reboot_journal_after_loss_phase == 'SSH_LOST'
+                  else edge_active_reboot_journal_after_loss.nodes[inventory_hostname].reconnectTiming) }}
+            edge_active_reboot_reconnect_assessment: >-
+              {{ (((edge_active_reboot_reconnect_assessment_raw.stdout | from_json).assessment)
+                  if edge_active_reboot_journal_after_loss_phase == 'SSH_LOST'
+                  else 'IN_BOUND') }}
+
+        - name: Require one exact reconnect classification
+          ansible.builtin.assert:
+            that:
+              - edge_active_reboot_reconnect_assessment in ['IN_BOUND', 'EXPIRED_OR_CLOCK_ORIGIN_CHANGED']
+              - edge_active_reboot_schedule_timing is not none
+              - edge_active_reboot_loss_timing is not none
+              - edge_active_reboot_reconnect_timing is not none
+            fail_msg: The target reconnect could not be classified against its durable bounds.
+
+        - name: Require the target to finish the current systemd boot
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/timeout
+              - --signal=TERM
+              - --kill-after=5s
+              - 120s
+              - /usr/bin/systemctl
+              - is-system-running
+              - --wait
+          changed_when: false
+          register: edge_active_reboot_system_running
+
+        - name: Read target identity, boot ID, status, and health after reboot
+          block:
+            - name: Reinspect target immutable identity sources after reboot
+              ansible.builtin.stat:
+                path: "{{ item }}"
+                follow: false
+                get_checksum: true
+                checksum_algorithm: sha256
+              loop:
+                - "{{ edge_active_reboot_node_facts_path }}"
+                - "{{ edge_active_reboot_runtime_authority_path }}"
+              register: edge_active_reboot_target_identity_stats_after
+
+            - name: Re-read target immutable identity bytes after reboot
+              ansible.builtin.slurp:
+                src: "{{ item }}"
+              loop:
+                - "{{ edge_active_reboot_node_facts_path }}"
+                - "{{ edge_active_reboot_runtime_authority_path }}"
+              register: edge_active_reboot_target_identity_raw_after
+
+            - name: Read target kernel boot ID after reboot
+              ansible.builtin.command:
+                argv: [/usr/bin/cat, /proc/sys/kernel/random/boot_id]
+              changed_when: false
+              register: edge_active_reboot_target_boot_id_after
+
+            - name: Read target protected runtime status after reboot
+              ansible.builtin.command:
+                argv: [/usr/local/sbin/vivolution-edge-runtime, status]
+              changed_when: false
+              register: edge_active_reboot_target_status_after_raw
+
+            - name: Prove target protected runtime health after reboot
+              ansible.builtin.command:
+                argv: [/usr/local/sbin/vivolution-edge-runtime, health]
+              changed_when: false
+              retries: 20
+              delay: 3
+              until: edge_active_reboot_target_health_after_raw.rc == 0
+              register: edge_active_reboot_target_health_after_raw
+
+            - name: Re-read validated target Agent state after reboot
+              ansible.builtin.command:
+                argv: "{{ edge_active_reboot_target_agent_argv }}"
+              become_user: vivolution-edge-agent
+              changed_when: false
+              register: edge_active_reboot_target_agent_after_raw
+
+            - name: Reinspect protected target Agent state file after reboot
+              ansible.builtin.stat:
+                path: "{{ edge_active_reboot_agent_state_v3 }}"
+                follow: false
+                get_checksum: true
+                checksum_algorithm: sha256
+              register: edge_active_reboot_target_agent_state_after
+
+            - name: Prove target required units active after reboot
+              ansible.builtin.command:
+                argv: [/usr/bin/systemctl, is-active, "{{ item }}"]
+              loop: "{{ edge_active_reboot_required_units }}"
+              changed_when: false
+              retries: 20
+              delay: 3
+              until:
+                - edge_active_reboot_target_units_after.rc == 0
+                - edge_active_reboot_target_units_after.stdout | trim == 'active'
+              register: edge_active_reboot_target_units_after
+
+            - name: Prove target recovery authority enabled after reboot
+              ansible.builtin.command:
+                argv: [/usr/bin/systemctl, is-enabled, vivolution-edge-runtime-recover.service]
+              changed_when: false
+              register: edge_active_reboot_target_recovery_enabled_after
+
+            - name: Reinspect target runtime journal after reboot
+              ansible.builtin.stat:
+                path: "{{ edge_active_reboot_transaction_path }}"
+                follow: false
+                get_attributes: false
+                get_checksum: false
+                get_mime: false
+              register: edge_active_reboot_target_journal_after
+
+            - name: Require the transient reboot authority gone after kernel reboot
+              ansible.builtin.command:
+                argv:
+                  - /usr/bin/systemctl
+                  - show
+                  - --property=LoadState
+                  - --value
+                  - "{{ item }}"
+              loop:
+                - "{{ edge_active_reboot_transient_unit }}.timer"
+                - "{{ edge_active_reboot_transient_unit }}.service"
+              changed_when: false
+              register: edge_active_reboot_transient_after
+
+        - name: Record controller monotonic time after full runtime readiness proof
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - -I
+              - -B
+              - -c
+              - >-
+                import json,time;
+                print(json.dumps({'epochMs':time.time_ns()//1000000,
+                'monotonicNs':time.monotonic_ns()},sort_keys=True,separators=(',',':')))
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_ready_at
+
+        - name: Reconcile a reconnect that did not produce a new kernel boot
+          when: >-
+            edge_active_reboot_target_boot_id_after.stdout | trim ==
+            edge_active_reboot_preflight.target.bootId
+          block:
+            - name: Persist missing-reboot reconciliation
+              ansible.builtin.command:
+                argv:
+                  - "{{ ansible_playbook_python }}"
+                  - "{{ edge_active_reboot_journal }}"
+                  - --evidence-root
+                  - "{{ edge_active_reboot_evidence_root }}"
+                  - abort
+                  - --node
+                  - "{{ inventory_hostname }}"
+                  - --reason
+                  - REBOOT_DID_NOT_OCCUR_RECONCILED
+              delegate_to: localhost
+              become: false
+              changed_when: true
+
+            - name: Stop after reconciling an SSH outage without a reboot
+              ansible.builtin.fail:
+                msg: >-
+                  SSH returned without a changed kernel boot ID. The exact
+                  run is reconciled incomplete and no additional reboot was scheduled.
+
+        - name: Require exact healthy committed state before timing disposition
+          ansible.builtin.assert:
+            that:
+              - edge_active_reboot_system_running.stdout | trim == 'running'
+              - edge_active_reboot_target_identity_raw_after.results[0].content == edge_active_reboot_identity_raw_before.results[0].content
+              - edge_active_reboot_target_identity_raw_after.results[1].content == edge_active_reboot_identity_raw_before.results[1].content
+              - edge_active_reboot_target_identity_stats_after.results[0].stat.checksum == edge_active_reboot_identity_stats_before.results[0].stat.checksum
+              - edge_active_reboot_target_identity_stats_after.results[1].stat.checksum == edge_active_reboot_identity_stats_before.results[1].stat.checksum
+              - edge_active_reboot_target_identity_stats_after.results | map(attribute='stat.isreg') | unique | list == [true]
+              - edge_active_reboot_target_identity_stats_after.results | map(attribute='stat.islnk') | unique | list == [false]
+              - edge_active_reboot_target_identity_stats_after.results | map(attribute='stat.nlink') | map('int') | unique | list == [1]
+              - edge_active_reboot_target_identity_stats_after.results | map(attribute='stat.pw_name') | unique | list == ['root']
+              - edge_active_reboot_target_identity_stats_after.results | map(attribute='stat.gr_name') | unique | list == ['root']
+              - edge_active_reboot_target_identity_stats_after.results | map(attribute='stat.mode') | unique | list == ['0600']
+              - edge_active_reboot_target_boot_id_after.stdout | trim != edge_active_reboot_preflight.target.bootId
+              - edge_active_reboot_target_boot_id_after.stdout | trim is match('^[0-9a-f-]{36}$')
+              - (edge_active_reboot_target_status_after_raw.stdout | from_json) == edge_active_reboot_preflight.target.status
+              - (edge_active_reboot_target_health_after_raw.stdout | from_json) == edge_active_reboot_preflight.target.health
+              - edge_active_reboot_target_agent_after_raw.stderr | trim == ''
+              - (edge_active_reboot_target_agent_after_raw.stdout | from_json) == edge_active_reboot_preflight.target.agentStatus
+              - edge_active_reboot_target_agent_state_after.stat.exists
+              - edge_active_reboot_target_agent_state_after.stat.isreg | default(false)
+              - not (edge_active_reboot_target_agent_state_after.stat.islnk | default(false))
+              - edge_active_reboot_target_agent_state_after.stat.nlink | int == 1
+              - edge_active_reboot_target_agent_state_after.stat.pw_name == 'vivolution-edge-agent'
+              - edge_active_reboot_target_agent_state_after.stat.gr_name == 'vivolution-edge-agent'
+              - edge_active_reboot_target_agent_state_after.stat.mode == '0600'
+              - "'sha256:' ~ edge_active_reboot_target_agent_state_after.stat.checksum == edge_active_reboot_preflight.target.agentState.sha256"
+              - edge_active_reboot_preflight.target.agentStatus.pendingCandidate is none
+              - >-
+                edge_active_reboot_preflight.target.agentStatus.activeLastKnownGood ==
+                {'manifestDigest': edge_active_reboot_preflight.target.status.active.manifestDigest,
+                 'sequence': edge_active_reboot_preflight.target.status.active.sequence}
+              - edge_active_reboot_preflight.target.health.runtimeChecks | map(attribute='name') | list == edge_active_reboot_required_checks
+              - edge_active_reboot_preflight.target.health.runtimeChecks | map(attribute='status') | unique | list == ['PASSED']
+              - edge_active_reboot_target_units_after.results | map(attribute='stdout') | map('trim') | unique | list == ['active']
+              - edge_active_reboot_target_recovery_enabled_after.stdout | trim == 'enabled'
+              - not (edge_active_reboot_target_journal_after.stat.exists | default(false))
+              - >-
+                edge_active_reboot_transient_after.results |
+                map(attribute='stdout') | map('trim') | unique | list == ['not-found']
+            fail_msg: >-
+              The reconnected target did not preserve its exact immutable
+              identity, committed LKG, complete health, or journal-free state.
+
+        - name: Reconcile an expired or controller-origin-unknown reconnect
+          when: edge_active_reboot_reconnect_assessment == 'EXPIRED_OR_CLOCK_ORIGIN_CHANGED'
+          block:
+            - name: Persist late-or-unknown reconnect reconciliation
+              ansible.builtin.command:
+                argv:
+                  - "{{ ansible_playbook_python }}"
+                  - "{{ edge_active_reboot_journal }}"
+                  - --evidence-root
+                  - "{{ edge_active_reboot_evidence_root }}"
+                  - abort
+                  - --node
+                  - "{{ inventory_hostname }}"
+                  - --reason
+                  - SSH_RECONNECT_BOUND_OR_CLOCK_ORIGIN_EXPIRED_RECONCILED
+              delegate_to: localhost
+              become: false
+              changed_when: true
+
+            - name: Stop after fail-closed late reconnect reconciliation
+              ansible.builtin.fail:
+                msg: >-
+                  The target returned healthy with a changed boot, but the
+                  durable reconnect bound or controller clock origin could
+                  not be proven. The same request is reconciled incomplete
+                  and no second reboot was scheduled.
+
+        - name: Durably commit the independently classified bounded reconnect
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_journal }}"
+              - --evidence-root
+              - "{{ edge_active_reboot_evidence_root }}"
+              - mark-reconnected
+              - --node
+              - "{{ inventory_hostname }}"
+              - --timing
+              - "{{ edge_active_reboot_reconnect_timing | to_json }}"
+          delegate_to: localhost
+          become: false
+          changed_when: true
+          when: edge_active_reboot_journal_after_loss_phase == 'SSH_LOST'
+
+        - name: Read durable reconnected timing authority
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_journal }}"
+              - --evidence-root
+              - "{{ edge_active_reboot_evidence_root }}"
+              - status
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_journal_reconnected_raw
+
+        - name: Bind exact durable timing after reconnect
+          ansible.builtin.set_fact:
+            edge_active_reboot_journal_reconnected: >-
+              {{ edge_active_reboot_journal_reconnected_raw.stdout | from_json }}
+            edge_active_reboot_schedule_timing: >-
+              {{ (edge_active_reboot_journal_reconnected_raw.stdout | from_json).nodes[inventory_hostname].scheduleTiming }}
+            edge_active_reboot_loss_timing: >-
+              {{ (edge_active_reboot_journal_reconnected_raw.stdout | from_json).nodes[inventory_hostname].lossTiming }}
+            edge_active_reboot_reconnect_timing: >-
+              {{ (edge_active_reboot_journal_reconnected_raw.stdout | from_json).nodes[inventory_hostname].reconnectTiming }}
+
+        - name: Require exact durable reconnected phase
+          ansible.builtin.assert:
+            that:
+              - edge_active_reboot_journal_reconnected.nodes[inventory_hostname].phase == 'RECONNECTED'
+              - edge_active_reboot_journal_reconnected.nodes[inventory_hostname].scheduleTiming is not none
+              - edge_active_reboot_journal_reconnected.nodes[inventory_hostname].lossTiming is not none
+              - edge_active_reboot_journal_reconnected.nodes[inventory_hostname].reconnectTiming is not none
+            fail_msg: The bounded target reconnect was not durably serialized.
+
+        - name: Reconcile readiness outside the durable bound or clock origin
+          when: >-
+            ((edge_active_reboot_ready_at.stdout | from_json).monotonicNs | int <=
+             edge_active_reboot_schedule_timing.monotonicNs | int) or
+            ((edge_active_reboot_ready_at.stdout | from_json).monotonicNs | int -
+             edge_active_reboot_schedule_timing.monotonicNs | int > 480000000000) or
+            ((edge_active_reboot_ready_at.stdout | from_json).epochMs | int <=
+             edge_active_reboot_schedule_timing.epochMs | int) or
+            (((edge_active_reboot_ready_at.stdout | from_json).epochMs | int -
+              edge_active_reboot_schedule_timing.epochMs | int) > 480000) or
+            (((((edge_active_reboot_ready_at.stdout | from_json).epochMs | int -
+                edge_active_reboot_schedule_timing.epochMs | int) * 1000000) -
+              ((edge_active_reboot_ready_at.stdout | from_json).monotonicNs | int -
+               edge_active_reboot_schedule_timing.monotonicNs | int)) | abs > 2000000000)
+          block:
+            - name: Persist expired-readiness reconciliation
+              ansible.builtin.command:
+                argv:
+                  - "{{ ansible_playbook_python }}"
+                  - "{{ edge_active_reboot_journal }}"
+                  - --evidence-root
+                  - "{{ edge_active_reboot_evidence_root }}"
+                  - abort
+                  - --node
+                  - "{{ inventory_hostname }}"
+                  - --reason
+                  - READY_BOUND_EXPIRED_RECONCILED
+              delegate_to: localhost
+              become: false
+              changed_when: true
+
+            - name: Stop after reconciling expired readiness evidence
+              ansible.builtin.fail:
+                msg: >-
+                  Runtime readiness completed outside the durable 480-second
+                  bound or controller clock origin. The healthy node was
+                  reconciled without another reboot.
+
+        - name: Require exact post-reboot identity health and bounded timing
+          ansible.builtin.assert:
+            that:
+              - edge_active_reboot_system_running.stdout | trim == 'running'
+              - edge_active_reboot_target_identity_raw_after.results[0].content == edge_active_reboot_identity_raw_before.results[0].content
+              - edge_active_reboot_target_identity_raw_after.results[1].content == edge_active_reboot_identity_raw_before.results[1].content
+              - edge_active_reboot_target_identity_stats_after.results[0].stat.checksum == edge_active_reboot_identity_stats_before.results[0].stat.checksum
+              - edge_active_reboot_target_identity_stats_after.results[1].stat.checksum == edge_active_reboot_identity_stats_before.results[1].stat.checksum
+              - edge_active_reboot_target_identity_stats_after.results[0].stat.isreg | default(false)
+              - edge_active_reboot_target_identity_stats_after.results[1].stat.isreg | default(false)
+              - not (edge_active_reboot_target_identity_stats_after.results[0].stat.islnk | default(false))
+              - not (edge_active_reboot_target_identity_stats_after.results[1].stat.islnk | default(false))
+              - edge_active_reboot_target_identity_stats_after.results[0].stat.nlink | int == 1
+              - edge_active_reboot_target_identity_stats_after.results[1].stat.nlink | int == 1
+              - edge_active_reboot_target_identity_stats_after.results[0].stat.pw_name == 'root'
+              - edge_active_reboot_target_identity_stats_after.results[1].stat.pw_name == 'root'
+              - edge_active_reboot_target_identity_stats_after.results[0].stat.gr_name == 'root'
+              - edge_active_reboot_target_identity_stats_after.results[1].stat.gr_name == 'root'
+              - edge_active_reboot_target_identity_stats_after.results[0].stat.mode == '0600'
+              - edge_active_reboot_target_identity_stats_after.results[1].stat.mode == '0600'
+              - edge_active_reboot_target_boot_id_after.stdout | trim != edge_active_reboot_preflight.target.bootId
+              - edge_active_reboot_target_boot_id_after.stdout | trim is match('^[0-9a-f-]{36}$')
+              - (edge_active_reboot_target_status_after_raw.stdout | from_json) == edge_active_reboot_preflight.target.status
+              - (edge_active_reboot_target_health_after_raw.stdout | from_json) == edge_active_reboot_preflight.target.health
+              - edge_active_reboot_target_agent_after_raw.stderr | trim == ''
+              - (edge_active_reboot_target_agent_after_raw.stdout | from_json) == edge_active_reboot_preflight.target.agentStatus
+              - edge_active_reboot_target_agent_state_after.stat.exists
+              - edge_active_reboot_target_agent_state_after.stat.isreg | default(false)
+              - not (edge_active_reboot_target_agent_state_after.stat.islnk | default(false))
+              - edge_active_reboot_target_agent_state_after.stat.nlink | int == 1
+              - edge_active_reboot_target_agent_state_after.stat.pw_name == 'vivolution-edge-agent'
+              - edge_active_reboot_target_agent_state_after.stat.gr_name == 'vivolution-edge-agent'
+              - edge_active_reboot_target_agent_state_after.stat.mode == '0600'
+              - "'sha256:' ~ edge_active_reboot_target_agent_state_after.stat.checksum == edge_active_reboot_preflight.target.agentState.sha256"
+              - edge_active_reboot_preflight.target.health.runtimeChecks | map(attribute='name') | list == edge_active_reboot_required_checks
+              - edge_active_reboot_preflight.target.health.runtimeChecks | map(attribute='status') | unique | list == ['PASSED']
+              - edge_active_reboot_target_units_after.results | map(attribute='stdout') | map('trim') | unique | list == ['active']
+              - edge_active_reboot_target_recovery_enabled_after.stdout | trim == 'enabled'
+              - not (edge_active_reboot_target_journal_after.stat.exists | default(false))
+              - >-
+                edge_active_reboot_transient_after.results |
+                map(attribute='stdout') | map('trim') | unique | list == ['not-found']
+              - edge_active_reboot_schedule_timing.keys() | sort == ['epochMs', 'monotonicNs']
+              - edge_active_reboot_loss_timing.keys() | sort == ['epochMs', 'monotonicNs']
+              - edge_active_reboot_reconnect_timing.keys() | sort == ['epochMs', 'monotonicNs']
+              - (edge_active_reboot_ready_at.stdout | from_json).keys() | sort == ['epochMs', 'monotonicNs']
+              - edge_active_reboot_loss_timing.monotonicNs | int > edge_active_reboot_schedule_timing.monotonicNs | int
+              - edge_active_reboot_reconnect_timing.monotonicNs | int > edge_active_reboot_loss_timing.monotonicNs | int
+              - (edge_active_reboot_ready_at.stdout | from_json).monotonicNs | int >= edge_active_reboot_reconnect_timing.monotonicNs | int
+              - edge_active_reboot_loss_timing.epochMs | int > edge_active_reboot_schedule_timing.epochMs | int
+              - edge_active_reboot_reconnect_timing.epochMs | int > edge_active_reboot_loss_timing.epochMs | int
+              - (edge_active_reboot_ready_at.stdout | from_json).epochMs | int >= edge_active_reboot_reconnect_timing.epochMs | int
+              - edge_active_reboot_loss_timing.monotonicNs | int - edge_active_reboot_schedule_timing.monotonicNs | int <= 60000000000
+              - edge_active_reboot_reconnect_timing.monotonicNs | int - edge_active_reboot_loss_timing.monotonicNs | int <= 300000000000
+              - edge_active_reboot_reconnect_timing.monotonicNs | int - edge_active_reboot_schedule_timing.monotonicNs | int <= 360000000000
+              - (edge_active_reboot_ready_at.stdout | from_json).monotonicNs | int - edge_active_reboot_schedule_timing.monotonicNs | int <= 480000000000
+              - edge_active_reboot_loss_timing.epochMs | int - edge_active_reboot_schedule_timing.epochMs | int <= 60000
+              - edge_active_reboot_reconnect_timing.epochMs | int - edge_active_reboot_loss_timing.epochMs | int <= 300000
+              - edge_active_reboot_reconnect_timing.epochMs | int - edge_active_reboot_schedule_timing.epochMs | int <= 360000
+              - (edge_active_reboot_ready_at.stdout | from_json).epochMs | int - edge_active_reboot_schedule_timing.epochMs | int <= 480000
+              - >-
+                (((edge_active_reboot_loss_timing.epochMs | int -
+                   edge_active_reboot_schedule_timing.epochMs | int) * 1000000) -
+                 (edge_active_reboot_loss_timing.monotonicNs | int -
+                  edge_active_reboot_schedule_timing.monotonicNs | int)) | abs <= 2000000000
+              - >-
+                (((edge_active_reboot_reconnect_timing.epochMs | int -
+                   edge_active_reboot_loss_timing.epochMs | int) * 1000000) -
+                 (edge_active_reboot_reconnect_timing.monotonicNs | int -
+                  edge_active_reboot_loss_timing.monotonicNs | int)) | abs <= 2000000000
+              - >-
+                ((((edge_active_reboot_ready_at.stdout | from_json).epochMs | int -
+                   edge_active_reboot_reconnect_timing.epochMs | int) * 1000000) -
+                 ((edge_active_reboot_ready_at.stdout | from_json).monotonicNs | int -
+                  edge_active_reboot_reconnect_timing.monotonicNs | int)) | abs <= 2000000000
+            fail_msg: >-
+              The target did not return inside the fixed bound with a changed
+              boot ID and byte-identical candidate identity/status/health.
+
+        - name: Prove the private fixture ready after target reboot
+          ansible.builtin.command:
+            argv: [/usr/local/libexec/vivolution-voice-fixture-readiness]
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+          changed_when: false
+
+        - name: Record controller monotonic time before the fresh fixture call
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - -I
+              - -B
+              - -c
+              - >-
+                import json,time;
+                print(json.dumps({'epochMs':time.time_ns()//1000000,
+                'monotonicNs':time.monotonic_ns()},sort_keys=True,separators=(',',':')))
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_fixture_started_at
+
+        - name: Complete a fresh bounded full fixture call through the rebooted node
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/timeout
+              - --signal=TERM
+              - --kill-after=10s
+              - 180s
+              - /usr/local/sbin/vivolution-voice-fixture-test
+              - "{{ inventory_hostname }}"
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+          changed_when: true
+          register: edge_active_reboot_fixture_call
+
+        - name: Bind the fresh call to one exact passing fixture result
+          ansible.builtin.assert:
+            that:
+              - >-
+                edge_active_reboot_fixture_call.stdout is
+                match('^fixture test [0-9]{8}T[0-9]{6}Z-' ~ inventory_hostname ~ '-[0-9]+: PASS$')
+            fail_msg: The rebooted node did not produce one passing full fixture result.
+
+        - name: Select the fresh reboot fixture test identity
+          ansible.builtin.set_fact:
+            edge_active_reboot_fixture_test_id: >-
+              {{ edge_active_reboot_fixture_call.stdout |
+                 regex_replace('^fixture test ([0-9]{8}T[0-9]{6}Z-' ~ inventory_hostname ~ '-[0-9]+): PASS$', '\1') }}
+
+        - name: Collect the complete protected fixture result bundle
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - "{{ edge_active_reboot_remote_collector }}"
+              - --collect-result-dir
+              - "/var/lib/vivolution/voice-fixture/results/{{ edge_active_reboot_fixture_test_id }}"
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+          changed_when: false
+          register: edge_active_reboot_fixture_bundle_raw
+
+        - name: Preserve complete manifested fixture result locally
+          ansible.builtin.copy:
+            content: "{{ edge_active_reboot_fixture_bundle_raw.stdout }}\n"
+            dest: "{{ edge_active_reboot_evidence_dir }}/{{ inventory_hostname }}-fixture-bundle.json"
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+        - name: Hash the complete local fixture result bundle
+          ansible.builtin.stat:
+            path: "{{ edge_active_reboot_evidence_dir }}/{{ inventory_hostname }}-fixture-bundle.json"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          delegate_to: localhost
+          become: false
+          register: edge_active_reboot_fixture_bundle_stat
+
+        - name: Export exact Edge-side CDR evidence for the fresh reboot call
+          ansible.builtin.command:
+            argv:
+              - /usr/local/sbin/vivolution-edge-synthetic-cdr-export
+              - --test-id
+              - "{{ edge_active_reboot_fixture_test_id }}"
+          changed_when: true
+          register: edge_active_reboot_edge_cdr_raw
+
+        - name: Require exact Edge CDR call and immutable node identity
+          ansible.builtin.assert:
+            that:
+              - (edge_active_reboot_edge_cdr_raw.stdout | from_json).testId == edge_active_reboot_fixture_test_id
+              - (edge_active_reboot_edge_cdr_raw.stdout | from_json).nodeIdentity.nodeId == inventory_hostname
+              - (edge_active_reboot_edge_cdr_raw.stdout | from_json).nodeIdentity.generation | int == edge_generation | int
+              - (edge_active_reboot_edge_cdr_raw.stdout | from_json).nodeIdentity.nodeFactsDigest == 'sha256:' ~ edge_active_reboot_identity_stats_before.results[0].stat.checksum
+              - (edge_active_reboot_edge_cdr_raw.stdout | from_json).nodeIdentity.runtimeAuthorityDigest == 'sha256:' ~ edge_active_reboot_identity_stats_before.results[1].stat.checksum
+              - (edge_active_reboot_edge_cdr_raw.stdout | from_json).status == 'TWO_LOGICAL_SYNTHETIC_CALLS_ACCOUNTED'
+              - (edge_active_reboot_edge_cdr_raw.stdout | from_json).liveM365Interoperability == 'NOT_ASSERTED'
+            fail_msg: The fresh call lacks exact Edge-side two-direction CDR evidence.
+
+        - name: Remove an abandoned bounded CDR reconciliation workspace
+          ansible.builtin.file:
+            path: "{{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-cdr"
+            state: absent
+          delegate_to: localhost
+          become: false
+
+        - name: Create the protected bounded CDR reconciliation workspace
+          ansible.builtin.file:
+            path: "{{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-cdr"
+            state: directory
+            mode: '0700'
+          delegate_to: localhost
+          become: false
+
+        - name: Preserve exact Edge CDR input for offline reconciliation
+          ansible.builtin.copy:
+            content: "{{ edge_active_reboot_edge_cdr_raw.stdout }}\n"
+            dest: >-
+              {{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-cdr/edge-cdr.json
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+        - name: Preserve normalized fixture CDR input for offline reconciliation
+          ansible.builtin.copy:
+            content: >-
+              {{ (edge_active_reboot_fixture_bundle_raw.stdout | from_json).artifacts['fixture-cdr.json'] | b64decode }}
+            dest: >-
+              {{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-cdr/fixture-cdr.json
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+        - name: Preserve raw fixture CDR input for offline reconciliation
+          ansible.builtin.copy:
+            content: >-
+              {{ (edge_active_reboot_fixture_bundle_raw.stdout | from_json).artifacts['asterisk-cdr-delta.csv'] | b64decode }}
+            dest: >-
+              {{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-cdr/fixture-asterisk-cdr-delta.csv
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+        - name: Preserve fixture result input for offline reconciliation
+          ansible.builtin.copy:
+            content: >-
+              {{ (edge_active_reboot_fixture_bundle_raw.stdout | from_json).artifacts['RESULT'] | b64decode }}
+            dest: >-
+              {{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-cdr/fixture-RESULT
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+        - name: Preserve fixture manifest input for offline reconciliation
+          ansible.builtin.copy:
+            content: >-
+              {{ (edge_active_reboot_fixture_bundle_raw.stdout | from_json).manifestBase64 | b64decode }}
+            dest: >-
+              {{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-cdr/fixture-MANIFEST.sha256
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+        - name: Reconcile exact Edge and fixture CDRs offline
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_cdr_reconciler }}"
+              - reconcile
+              - --evidence-dir
+              - "{{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-cdr"
+          delegate_to: localhost
+          become: false
+          changed_when: true
+          register: edge_active_reboot_cdr_reconciliation_raw
+
+        - name: Read exact fresh-call CDR reconciliation
+          ansible.builtin.slurp:
+            src: >-
+              {{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-cdr/reconciliation.json
+          delegate_to: localhost
+          become: false
+          register: edge_active_reboot_cdr_reconciliation_file
+
+        - name: Require exact two-direction Edge-to-fixture CDR reconciliation
+          ansible.builtin.assert:
+            that:
+              - >-
+                edge_active_reboot_cdr_reconciliation_raw.stdout is
+                match('^SYNTHETIC_CDR_RECONCILIATION_WRITTEN sha256:[0-9a-f]{64}$')
+              - >-
+                (edge_active_reboot_cdr_reconciliation_file.content | b64decode | from_json).status ==
+                'SYNTHETIC_EDGE_FIXTURE_CDR_RECONCILED'
+              - >-
+                (edge_active_reboot_cdr_reconciliation_file.content | b64decode | from_json).testId ==
+                edge_active_reboot_fixture_test_id
+              - >-
+                (edge_active_reboot_cdr_reconciliation_file.content | b64decode | from_json).nodeIdentity.nodeId ==
+                inventory_hostname
+              - >-
+                (edge_active_reboot_cdr_reconciliation_file.content | b64decode | from_json).matchedCalls | length == 2
+              - >-
+                (edge_active_reboot_cdr_reconciliation_file.content | b64decode | from_json).liveM365Interoperability ==
+                'NOT_ASSERTED'
+            fail_msg: The fresh call lacks exact raw CDR reconciliation.
+
+        - name: Bind exact raw Edge CDR into reboot evidence
+          ansible.builtin.copy:
+            content: "{{ edge_active_reboot_edge_cdr_raw.stdout }}\n"
+            dest: "{{ edge_active_reboot_evidence_dir }}/{{ inventory_hostname }}-edge-cdr.json"
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+        - name: Bind exact CDR reconciliation into reboot evidence
+          ansible.builtin.copy:
+            content: "{{ edge_active_reboot_cdr_reconciliation_file.content | b64decode }}"
+            dest: >-
+              {{ edge_active_reboot_evidence_dir }}/{{ inventory_hostname }}-cdr-reconciliation.json
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+        - name: Hash bound fresh-call CDR evidence files
+          ansible.builtin.stat:
+            path: "{{ edge_active_reboot_evidence_dir }}/{{ inventory_hostname }}-{{ item }}.json"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          loop:
+            - edge-cdr
+            - cdr-reconciliation
+          delegate_to: localhost
+          become: false
+          register: edge_active_reboot_cdr_evidence_stats
+
+        - name: Remove transient CDR reconciliation workspace
+          ansible.builtin.file:
+            path: "{{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-cdr"
+            state: absent
+          delegate_to: localhost
+          become: false
+
+        - name: Re-read target and peer status and health after the call
+          ansible.builtin.command:
+            argv: "{{ item.command }}"
+          loop:
+            - { node: "{{ inventory_hostname }}", label: target-status, command: [/usr/local/sbin/vivolution-edge-runtime, status] }
+            - { node: "{{ inventory_hostname }}", label: target-health, command: [/usr/local/sbin/vivolution-edge-runtime, health] }
+            - { node: "{{ edge_active_reboot_peer }}", label: peer-status, command: [/usr/local/sbin/vivolution-edge-runtime, status] }
+            - { node: "{{ edge_active_reboot_peer }}", label: peer-health, command: [/usr/local/sbin/vivolution-edge-runtime, health] }
+            - { node: "{{ inventory_hostname }}", label: target-boot, command: [/usr/bin/cat, /proc/sys/kernel/random/boot_id] }
+            - { node: "{{ edge_active_reboot_peer }}", label: peer-boot, command: [/usr/bin/cat, /proc/sys/kernel/random/boot_id] }
+          delegate_to: "{{ item.node }}"
+          changed_when: false
+          register: edge_active_reboot_post_call_commands
+
+        - name: Re-read validated target and peer Agent state after the call
+          ansible.builtin.command:
+            argv: "{{ item.argv }}"
+          loop:
+            - { node: "{{ inventory_hostname }}", argv: "{{ edge_active_reboot_target_agent_argv }}" }
+            - { node: "{{ edge_active_reboot_peer }}", argv: "{{ edge_active_reboot_peer_agent_argv }}" }
+          delegate_to: "{{ item.node }}"
+          become_user: vivolution-edge-agent
+          changed_when: false
+          register: edge_active_reboot_agent_post_call_raw
+
+        - name: Reinspect protected target and peer Agent state files after the call
+          ansible.builtin.stat:
+            path: "{{ edge_active_reboot_agent_state_v3 }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          loop:
+            - "{{ inventory_hostname }}"
+            - "{{ edge_active_reboot_peer }}"
+          delegate_to: "{{ item }}"
+          register: edge_active_reboot_agent_states_post_call
+
+        - name: Re-prove target and peer units after the fresh call
+          ansible.builtin.command:
+            argv: [/usr/bin/systemctl, is-active, "{{ item.1 }}"]
+          loop: "{{ [inventory_hostname, edge_active_reboot_peer] | product(edge_active_reboot_required_units) | list }}"
+          delegate_to: "{{ item.0 }}"
+          changed_when: false
+          register: edge_active_reboot_units_post_call
+
+        - name: Re-prove target and peer recovery authority after the fresh call
+          ansible.builtin.command:
+            argv: [/usr/bin/systemctl, is-enabled, vivolution-edge-runtime-recover.service]
+          loop:
+            - "{{ inventory_hostname }}"
+            - "{{ edge_active_reboot_peer }}"
+          delegate_to: "{{ item }}"
+          changed_when: false
+          register: edge_active_reboot_recovery_post_call
+
+        - name: Reinspect target and peer journals after the fresh call
+          ansible.builtin.stat:
+            path: "{{ edge_active_reboot_transaction_path }}"
+            follow: false
+            get_attributes: false
+            get_checksum: false
+            get_mime: false
+          loop:
+            - "{{ inventory_hostname }}"
+            - "{{ edge_active_reboot_peer }}"
+          delegate_to: "{{ item }}"
+          register: edge_active_reboot_journals_post_call
+
+        - name: Reinspect target and peer identity sources after the fresh call
+          ansible.builtin.stat:
+            path: "{{ item.path }}"
+            follow: false
+            get_checksum: true
+            checksum_algorithm: sha256
+          loop:
+            - { node: "{{ inventory_hostname }}", path: /etc/vivolution-edge/node-facts.json }
+            - { node: "{{ inventory_hostname }}", path: /var/lib/vivolution-edge/runtime/runtime-authority.json }
+            - { node: "{{ edge_active_reboot_peer }}", path: /etc/vivolution-edge/node-facts.json }
+            - { node: "{{ edge_active_reboot_peer }}", path: /var/lib/vivolution-edge/runtime/runtime-authority.json }
+          delegate_to: "{{ item.node }}"
+          register: edge_active_reboot_identity_stats_post_call
+
+        - name: Require unchanged target candidate and peer after the fresh call
+          ansible.builtin.assert:
+            that:
+              - (edge_active_reboot_post_call_commands.results[0].stdout | from_json) == edge_active_reboot_preflight.target.status
+              - (edge_active_reboot_post_call_commands.results[1].stdout | from_json) == edge_active_reboot_preflight.target.health
+              - (edge_active_reboot_post_call_commands.results[2].stdout | from_json) == edge_active_reboot_preflight.peer.status
+              - (edge_active_reboot_post_call_commands.results[3].stdout | from_json) == edge_active_reboot_preflight.peer.health
+              - edge_active_reboot_agent_post_call_raw.results[0].stderr | trim == ''
+              - edge_active_reboot_agent_post_call_raw.results[1].stderr | trim == ''
+              - (edge_active_reboot_agent_post_call_raw.results[0].stdout | from_json) == edge_active_reboot_preflight.target.agentStatus
+              - (edge_active_reboot_agent_post_call_raw.results[1].stdout | from_json) == edge_active_reboot_preflight.peer.agentStatus
+              - edge_active_reboot_agent_states_post_call.results[0].stat.exists
+              - edge_active_reboot_agent_states_post_call.results[1].stat.exists
+              - edge_active_reboot_agent_states_post_call.results[0].stat.isreg | default(false)
+              - edge_active_reboot_agent_states_post_call.results[1].stat.isreg | default(false)
+              - not (edge_active_reboot_agent_states_post_call.results[0].stat.islnk | default(false))
+              - not (edge_active_reboot_agent_states_post_call.results[1].stat.islnk | default(false))
+              - edge_active_reboot_agent_states_post_call.results[0].stat.nlink | int == 1
+              - edge_active_reboot_agent_states_post_call.results[1].stat.nlink | int == 1
+              - edge_active_reboot_agent_states_post_call.results[0].stat.pw_name == 'vivolution-edge-agent'
+              - edge_active_reboot_agent_states_post_call.results[1].stat.pw_name == 'vivolution-edge-agent'
+              - edge_active_reboot_agent_states_post_call.results[0].stat.gr_name == 'vivolution-edge-agent'
+              - edge_active_reboot_agent_states_post_call.results[1].stat.gr_name == 'vivolution-edge-agent'
+              - edge_active_reboot_agent_states_post_call.results[0].stat.mode == '0600'
+              - edge_active_reboot_agent_states_post_call.results[1].stat.mode == '0600'
+              - "'sha256:' ~ edge_active_reboot_agent_states_post_call.results[0].stat.checksum == edge_active_reboot_preflight.target.agentState.sha256"
+              - "'sha256:' ~ edge_active_reboot_agent_states_post_call.results[1].stat.checksum == edge_active_reboot_preflight.peer.agentState.sha256"
+              - edge_active_reboot_post_call_commands.results[4].stdout | trim == edge_active_reboot_target_boot_id_after.stdout | trim
+              - edge_active_reboot_post_call_commands.results[5].stdout | trim == edge_active_reboot_preflight.peer.bootId
+              - edge_active_reboot_units_post_call.results | map(attribute='stdout') | map('trim') | unique | list == ['active']
+              - edge_active_reboot_recovery_post_call.results | map(attribute='stdout') | map('trim') | unique | list == ['enabled']
+              - not (edge_active_reboot_journals_post_call.results[0].stat.exists | default(false))
+              - not (edge_active_reboot_journals_post_call.results[1].stat.exists | default(false))
+              - edge_active_reboot_identity_stats_post_call.results[0].stat.checksum == edge_active_reboot_identity_stats_before.results[0].stat.checksum
+              - edge_active_reboot_identity_stats_post_call.results[1].stat.checksum == edge_active_reboot_identity_stats_before.results[1].stat.checksum
+              - edge_active_reboot_identity_stats_post_call.results[2].stat.checksum == edge_active_reboot_identity_stats_before.results[2].stat.checksum
+              - edge_active_reboot_identity_stats_post_call.results[3].stat.checksum == edge_active_reboot_identity_stats_before.results[3].stat.checksum
+              - edge_active_reboot_identity_stats_post_call.results | selectattr('stat.isreg', 'defined') | selectattr('stat.isreg') | list | length == 4
+              - edge_active_reboot_identity_stats_post_call.results | selectattr('stat.islnk', 'defined') | selectattr('stat.islnk') | list | length == 0
+              - edge_active_reboot_identity_stats_post_call.results | map(attribute='stat.nlink') | map('int') | unique | list == [1]
+              - edge_active_reboot_identity_stats_post_call.results | map(attribute='stat.pw_name') | unique | list == ['root']
+              - edge_active_reboot_identity_stats_post_call.results | map(attribute='stat.gr_name') | unique | list == ['root']
+              - edge_active_reboot_identity_stats_post_call.results | map(attribute='stat.mode') | unique | list == ['0600']
+              - edge_active_reboot_fixture_bundle_stat.stat.exists
+              - edge_active_reboot_fixture_bundle_stat.stat.isreg | default(false)
+              - not (edge_active_reboot_fixture_bundle_stat.stat.islnk | default(false))
+              - edge_active_reboot_fixture_bundle_stat.stat.nlink | int == 1
+              - edge_active_reboot_fixture_bundle_stat.stat.mode == '0600'
+              - edge_active_reboot_fixture_bundle_stat.stat.checksum is match('^[0-9a-f]{64}$')
+              - edge_active_reboot_cdr_evidence_stats.results | length == 2
+              - edge_active_reboot_cdr_evidence_stats.results | selectattr('stat.exists') | list | length == 2
+              - edge_active_reboot_cdr_evidence_stats.results | selectattr('stat.isreg') | list | length == 2
+              - edge_active_reboot_cdr_evidence_stats.results | selectattr('stat.islnk') | list | length == 0
+              - edge_active_reboot_cdr_evidence_stats.results | map(attribute='stat.nlink') | map('int') | unique | list == [1]
+              - edge_active_reboot_cdr_evidence_stats.results | map(attribute='stat.mode') | unique | list == ['0600']
+              - edge_active_reboot_cdr_evidence_stats.results | map(attribute='stat.checksum') | select('match', '^[0-9a-f]{64}$') | list | length == 2
+            fail_msg: >-
+              The rebooted target or preserved peer drifted during the fresh
+              manifested two-direction fixture call.
+
+        - name: Record controller monotonic completion after all post-call proofs
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - -I
+              - -B
+              - -c
+              - >-
+                import json,time;
+                print(json.dumps({'epochMs':time.time_ns()//1000000,
+                'monotonicNs':time.monotonic_ns()},sort_keys=True,separators=(',',':')))
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          register: edge_active_reboot_observation_completed_at
+
+        - name: Build the complete canonical per-node reboot observation
+          ansible.builtin.set_fact:
+            edge_active_reboot_observation:
+              apiVersion: edge.vivolution.ae/active-edge-reboot-observation/v0.1
+              completedAtEpochMs: "{{ (edge_active_reboot_observation_completed_at.stdout | from_json).epochMs | int }}"
+              completedAtMonotonicNs: "{{ (edge_active_reboot_observation_completed_at.stdout | from_json).monotonicNs | int }}"
+              fixture:
+                bundleFile: "{{ inventory_hostname }}-fixture-bundle.json"
+                bundleSha256: "sha256:{{ edge_active_reboot_fixture_bundle_stat.stat.checksum }}"
+                cdrReconciliationFile: "{{ inventory_hostname }}-cdr-reconciliation.json"
+                cdrReconciliationSha256: "sha256:{{ edge_active_reboot_cdr_evidence_stats.results[1].stat.checksum }}"
+                edgeCdrFile: "{{ inventory_hostname }}-edge-cdr.json"
+                edgeCdrSha256: "sha256:{{ edge_active_reboot_cdr_evidence_stats.results[0].stat.checksum }}"
+                startedAtEpochMs: "{{ (edge_active_reboot_fixture_started_at.stdout | from_json).epochMs | int }}"
+                startedAtMonotonicNs: "{{ (edge_active_reboot_fixture_started_at.stdout | from_json).monotonicNs | int }}"
+                testId: "{{ edge_active_reboot_fixture_test_id }}"
+              nodeId: "{{ inventory_hostname }}"
+              peer:
+                afterTargetCall:
+                  agentState:
+                    group: "{{ edge_active_reboot_agent_states_post_call.results[1].stat.gr_name }}"
+                    mode: "{{ edge_active_reboot_agent_states_post_call.results[1].stat.mode }}"
+                    nlink: "{{ edge_active_reboot_agent_states_post_call.results[1].stat.nlink | int }}"
+                    owner: "{{ edge_active_reboot_agent_states_post_call.results[1].stat.pw_name }}"
+                    sha256: "sha256:{{ edge_active_reboot_agent_states_post_call.results[1].stat.checksum }}"
+                  agentStatus: "{{ edge_active_reboot_agent_post_call_raw.results[1].stdout | from_json }}"
+                  bootId: "{{ edge_active_reboot_post_call_commands.results[5].stdout | trim }}"
+                  health: "{{ edge_active_reboot_post_call_commands.results[3].stdout | from_json }}"
+                  recoveryUnitEnabled: "{{ edge_active_reboot_recovery_post_call.results[1].stdout | trim }}"
+                  status: "{{ edge_active_reboot_post_call_commands.results[2].stdout | from_json }}"
+                  transactionJournalPresent: "{{ edge_active_reboot_journals_post_call.results[1].stat.exists | default(false) | bool }}"
+                  unitStates:
+                    nftables.service: "{{ edge_active_reboot_units_post_call.results[6].stdout | trim }}"
+                    ntpsec.service: "{{ edge_active_reboot_units_post_call.results[7].stdout | trim }}"
+                    opensips.service: "{{ edge_active_reboot_units_post_call.results[8].stdout | trim }}"
+                    rtpengine-daemon.service: "{{ edge_active_reboot_units_post_call.results[9].stdout | trim }}"
+                    ssh.service: "{{ edge_active_reboot_units_post_call.results[10].stdout | trim }}"
+                    vivolution-edge-certificate.timer: "{{ edge_active_reboot_units_post_call.results[11].stdout | trim }}"
+                before: "{{ edge_active_reboot_preflight.peer }}"
+                duringTargetSshLoss: "{{ edge_active_reboot_peer_during_durable }}"
+                identitySources: "{{ edge_active_reboot_preflight.peerIdentitySources }}"
+              peerNodeId: "{{ edge_active_reboot_peer }}"
+              reboot:
+                readyObservedAtEpochMs: "{{ (edge_active_reboot_ready_at.stdout | from_json).epochMs | int }}"
+                readyObservedAtMonotonicNs: "{{ (edge_active_reboot_ready_at.stdout | from_json).monotonicNs | int }}"
+                rebootScheduledAtEpochMs: "{{ edge_active_reboot_schedule_timing.epochMs | int }}"
+                rebootScheduledAtMonotonicNs: "{{ edge_active_reboot_schedule_timing.monotonicNs | int }}"
+                scheduledUnit: vivolution-active-edge-reboot-qualifier
+                sshLossObservedAtEpochMs: "{{ edge_active_reboot_loss_timing.epochMs | int }}"
+                sshLossObservedAtMonotonicNs: "{{ edge_active_reboot_loss_timing.monotonicNs | int }}"
+                sshLossTimeoutSeconds: 60
+                sshReconnectObservedAtEpochMs: "{{ edge_active_reboot_reconnect_timing.epochMs | int }}"
+                sshReconnectObservedAtMonotonicNs: "{{ edge_active_reboot_reconnect_timing.monotonicNs | int }}"
+                sshReconnectTimeoutSeconds: 300
+                totalReconnectBoundSeconds: 360
+                totalReadyBoundSeconds: 480
+              target:
+                postCall:
+                  agentState:
+                    group: "{{ edge_active_reboot_agent_states_post_call.results[0].stat.gr_name }}"
+                    mode: "{{ edge_active_reboot_agent_states_post_call.results[0].stat.mode }}"
+                    nlink: "{{ edge_active_reboot_agent_states_post_call.results[0].stat.nlink | int }}"
+                    owner: "{{ edge_active_reboot_agent_states_post_call.results[0].stat.pw_name }}"
+                    sha256: "sha256:{{ edge_active_reboot_agent_states_post_call.results[0].stat.checksum }}"
+                  agentStatus: "{{ edge_active_reboot_agent_post_call_raw.results[0].stdout | from_json }}"
+                  bootId: "{{ edge_active_reboot_post_call_commands.results[4].stdout | trim }}"
+                  health: "{{ edge_active_reboot_post_call_commands.results[1].stdout | from_json }}"
+                  recoveryUnitEnabled: "{{ edge_active_reboot_recovery_post_call.results[0].stdout | trim }}"
+                  status: "{{ edge_active_reboot_post_call_commands.results[0].stdout | from_json }}"
+                  transactionJournalPresent: "{{ edge_active_reboot_journals_post_call.results[0].stat.exists | default(false) | bool }}"
+                  unitStates:
+                    nftables.service: "{{ edge_active_reboot_units_post_call.results[0].stdout | trim }}"
+                    ntpsec.service: "{{ edge_active_reboot_units_post_call.results[1].stdout | trim }}"
+                    opensips.service: "{{ edge_active_reboot_units_post_call.results[2].stdout | trim }}"
+                    rtpengine-daemon.service: "{{ edge_active_reboot_units_post_call.results[3].stdout | trim }}"
+                    ssh.service: "{{ edge_active_reboot_units_post_call.results[4].stdout | trim }}"
+                    vivolution-edge-certificate.timer: "{{ edge_active_reboot_units_post_call.results[5].stdout | trim }}"
+                postReboot:
+                  agentState:
+                    group: "{{ edge_active_reboot_target_agent_state_after.stat.gr_name }}"
+                    mode: "{{ edge_active_reboot_target_agent_state_after.stat.mode }}"
+                    nlink: "{{ edge_active_reboot_target_agent_state_after.stat.nlink | int }}"
+                    owner: "{{ edge_active_reboot_target_agent_state_after.stat.pw_name }}"
+                    sha256: "sha256:{{ edge_active_reboot_target_agent_state_after.stat.checksum }}"
+                  agentStatus: "{{ edge_active_reboot_target_agent_after_raw.stdout | from_json }}"
+                  bootId: "{{ edge_active_reboot_target_boot_id_after.stdout | trim }}"
+                  health: "{{ edge_active_reboot_target_health_after_raw.stdout | from_json }}"
+                  recoveryUnitEnabled: "{{ edge_active_reboot_target_recovery_enabled_after.stdout | trim }}"
+                  status: "{{ edge_active_reboot_target_status_after_raw.stdout | from_json }}"
+                  transactionJournalPresent: "{{ edge_active_reboot_target_journal_after.stat.exists | default(false) | bool }}"
+                  unitStates:
+                    nftables.service: "{{ edge_active_reboot_target_units_after.results[0].stdout | trim }}"
+                    ntpsec.service: "{{ edge_active_reboot_target_units_after.results[1].stdout | trim }}"
+                    opensips.service: "{{ edge_active_reboot_target_units_after.results[2].stdout | trim }}"
+                    rtpengine-daemon.service: "{{ edge_active_reboot_target_units_after.results[3].stdout | trim }}"
+                    ssh.service: "{{ edge_active_reboot_target_units_after.results[4].stdout | trim }}"
+                    vivolution-edge-certificate.timer: "{{ edge_active_reboot_target_units_after.results[5].stdout | trim }}"
+                pre: "{{ edge_active_reboot_preflight.target }}"
+              targetIdentitySources: "{{ edge_active_reboot_preflight.targetIdentitySources }}"
+
+        - name: Write one canonical protected node reboot observation
+          ansible.builtin.copy:
+            content: |
+              {{ edge_active_reboot_observation | to_json(sort_keys=True, separators=(',', ':')) }}
+            dest: "{{ edge_active_reboot_evidence_dir }}/{{ inventory_hostname }}-observation.json"
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+        - name: Durably commit this exact qualified observation
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ edge_active_reboot_journal }}"
+              - --evidence-root
+              - "{{ edge_active_reboot_evidence_root }}"
+              - mark-qualified
+              - --node
+              - "{{ inventory_hostname }}"
+              - --observation-file
+              - "{{ edge_active_reboot_evidence_dir }}/{{ inventory_hostname }}-observation.json"
+          delegate_to: localhost
+          become: false
+          changed_when: true
+
+      always:
+        - name: Remove any transient CDR reconciliation workspace
+          ansible.builtin.file:
+            path: "{{ edge_active_reboot_evidence_dir }}/.{{ inventory_hostname }}-cdr"
+            state: absent
+          delegate_to: localhost
+          become: false
+
+        - name: Remove the transient fixture-result collector
+          ansible.builtin.file:
+            path: "{{ edge_active_reboot_remote_collector }}"
+            state: absent
+          delegate_to: "{{ groups['fixture_controller'][0] }}"
+          become: true
+
+      when:
+        - edge_active_reboot_journal_before.status == 'IN_PROGRESS'
+        - edge_active_reboot_journal_phase != 'QUALIFIED'
+
+
+- name: Compile canonical active Edge reboot qualification evidence
+  hosts: localhost
+  gather_facts: false
+  any_errors_fatal: true
+
+  vars:
+    edge_active_reboot_evidence_dir: "{{ hostvars['localhost'].edge_active_reboot_evidence_dir }}"
+    edge_active_reboot_compiler: "{{ hostvars['localhost'].edge_active_reboot_compiler_path }}"
+    edge_active_reboot_evidence_root: "{{ hostvars['localhost'].edge_active_reboot_evidence_root }}"
+    edge_active_reboot_journal: "{{ hostvars['localhost'].edge_active_reboot_journal_path }}"
+
+  tasks:
+    - name: Inspect exact per-node reboot observation inputs
+      ansible.builtin.stat:
+        path: "{{ edge_active_reboot_evidence_dir }}/{{ item }}-observation.json"
+        follow: false
+        get_checksum: true
+        checksum_algorithm: sha256
+      loop:
+        - sbc1
+        - sbc2
+      register: edge_active_reboot_observation_stats
+
+    - name: Require protected canonical input candidates before compilation
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg | default(false)
+          - not (item.stat.islnk | default(false))
+          - item.stat.nlink | int == 1
+          - item.stat.mode == '0600'
+          - item.stat.checksum is match('^[0-9a-f]{64}$')
+        fail_msg: A serialized reboot observation is missing, linked, or unprotected.
+      loop: "{{ edge_active_reboot_observation_stats.results }}"
+
+    - name: Build the exact ordered active reboot evidence request
+      ansible.builtin.set_fact:
+        edge_active_reboot_request:
+          acknowledgement: REBOOT_ACTIVE_SYNTHETIC_EDGES_SBC1_THEN_SBC2_ONCE
+          apiVersion: edge.vivolution.ae/active-edge-reboot-request/v0.1
+          liveM365Interoperability: NOT_ASSERTED
+          observations:
+            - fileName: sbc1-observation.json
+              nodeId: sbc1
+              sha256: "sha256:{{ edge_active_reboot_observation_stats.results[0].stat.checksum }}"
+            - fileName: sbc2-observation.json
+              nodeId: sbc2
+              sha256: "sha256:{{ edge_active_reboot_observation_stats.results[1].stat.checksum }}"
+          rebootOrder:
+            - sbc1
+            - sbc2
+          scope: BOUNDED_PRIVATE_SYNTHETIC_POC
+
+    - name: Write canonical active reboot evidence request
+      ansible.builtin.copy:
+        content: |
+          {{ edge_active_reboot_request | to_json(sort_keys=True, separators=(',', ':')) }}
+        dest: "{{ edge_active_reboot_evidence_dir }}/request.json"
+        mode: '0600'
+
+    - name: Compile strict non-secret reboot evidence offline
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ edge_active_reboot_compiler }}"
+          - --evidence-dir
+          - "{{ edge_active_reboot_evidence_dir }}"
+      changed_when: true
+      register: edge_active_reboot_compilation
+
+    - name: Read canonical active reboot acceptance evidence
+      ansible.builtin.slurp:
+        src: "{{ edge_active_reboot_evidence_dir }}/acceptance.json"
+      register: edge_active_reboot_acceptance_raw
+
+    - name: Require exact bounded private synthetic reboot conclusion
+      ansible.builtin.assert:
+        that:
+          - >-
+            edge_active_reboot_compilation.stdout is
+            match('^ACTIVE_EDGE_REBOOT_EVIDENCE_WRITTEN sha256:[0-9a-f]{64}$')
+          - >-
+            (edge_active_reboot_acceptance_raw.content | b64decode | from_json).status ==
+            'ACTIVE_SYNTHETIC_EDGE_REBOOTS_QUALIFIED'
+          - >-
+            (edge_active_reboot_acceptance_raw.content | b64decode | from_json).scope ==
+            'BOUNDED_PRIVATE_SYNTHETIC_POC'
+          - >-
+            (edge_active_reboot_acceptance_raw.content | b64decode | from_json).liveM365Interoperability ==
+            'NOT_ASSERTED'
+          - >-
+            (edge_active_reboot_acceptance_raw.content | b64decode | from_json).rebootOrder ==
+            ['sbc1', 'sbc2']
+          - >-
+            (edge_active_reboot_acceptance_raw.content | b64decode | from_json).runtimeNodes |
+            map(attribute='status') | unique | list == ['ACTIVE_EDGE_REBOOT_QUALIFIED']
+          - >-
+            (edge_active_reboot_acceptance_raw.content | b64decode | from_json).runtimeNodes |
+            map(attribute='fixtureCall') | map(attribute='result') | unique | list == ['PASS']
+        fail_msg: The compiler did not produce the exact bounded private reboot conclusion.
+
+    - name: Durably close the exact one-run request with acceptance digest
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ edge_active_reboot_journal }}"
+          - --evidence-root
+          - "{{ edge_active_reboot_evidence_root }}"
+          - complete
+          - --acceptance-file
+          - "{{ edge_active_reboot_evidence_dir }}/acceptance.json"
+      changed_when: true
+      register: edge_active_reboot_journal_complete_raw
+
+    - name: Require exact durable completion
+      ansible.builtin.assert:
+        that:
+          - (edge_active_reboot_journal_complete_raw.stdout | from_json).status == 'COMPLETE'
+          - (edge_active_reboot_journal_complete_raw.stdout | from_json).currentNode is none
+          - (edge_active_reboot_journal_complete_raw.stdout | from_json).acceptanceDigest is match('^sha256:[0-9a-f]{64}$')
+          - (edge_active_reboot_journal_complete_raw.stdout | from_json).nodes.sbc1.phase == 'QUALIFIED'
+          - (edge_active_reboot_journal_complete_raw.stdout | from_json).nodes.sbc2.phase == 'QUALIFIED'
+        fail_msg: Canonical acceptance was not durably bound to the one-run request.
+
+    - name: Report protected active Edge reboot evidence location
+      ansible.builtin.debug:
+        msg: >-
+          ACTIVE_SYNTHETIC_EDGE_REBOOTS_QUALIFIED
+          evidence={{ edge_active_reboot_evidence_dir }}/acceptance.json
+          liveM365Interoperability=NOT_ASSERTED

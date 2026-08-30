@@ -134,6 +134,30 @@
       - (edge_fixture_rotation_runtime_status.stdout | from_json).active.sequence | int >= 1
     fail_msg: Fixture rotation left an incomplete or non-candidate runtime.
 
+- name: Reprove every active runtime health contract after re-pin
+  ansible.builtin.command:
+    argv:
+      - /usr/local/sbin/vivolution-edge-runtime
+      - health
+  register: edge_fixture_rotation_runtime_health
+  changed_when: false
+
+- name: Require exact post-rotation runtime readiness
+  ansible.builtin.assert:
+    that:
+      - (edge_fixture_rotation_runtime_health.stdout | from_json).kind == 'EdgeRuntimeHealth'
+      - >-
+        (edge_fixture_rotation_runtime_health.stdout | from_json).active ==
+        (edge_fixture_rotation_runtime_status.stdout | from_json).active
+      - >-
+        (edge_fixture_rotation_runtime_health.stdout | from_json).runtimeChecks |
+        map(attribute='name') | list ==
+        edge_fixture_rotation_required_runtime_checks
+      - >-
+        (edge_fixture_rotation_runtime_health.stdout | from_json).runtimeChecks |
+        map(attribute='status') | unique | list == ['PASSED']
+    fail_msg: Fixture rotation did not restore the exact active runtime health contract.
+
 - name: Require OpenSIPS to remain active after serialized rotation
   ansible.builtin.command:
     argv: [systemctl, is-active, --quiet, opensips.service]
@@ -149,8 +173,9 @@
 
 - name: Retain canonical non-secret per-node rotation evidence locally
   ansible.builtin.copy:
-    content: >-
-      {{ (edge_fixture_rotation_result.stdout | from_json) | to_nice_json }}
+    content: >
+      {{ (edge_fixture_rotation_result.stdout | from_json) |
+         to_json(sort_keys=True, separators=(',', ':')) }}
     dest: "{{ edge_fixture_rotation_local_evidence_root }}/{{ inventory_hostname }}.json"
     mode: '0600'
   delegate_to: localhost

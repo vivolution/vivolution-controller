@@ -59,6 +59,10 @@ class EdgeFixtureRotationStaticTests(unittest.TestCase):
         self.assertIn('authority.profile != "SYNTHETIC_PRIVATE"', source)
         self.assertIn("validate_secret_material", source)
         self.assertIn("runtime activation transaction is pending", source)
+        self.assertGreaterEqual(source.count('"fixtureCaDigest"'), 2)
+        self.assertGreaterEqual(
+            source.count('"fixtureClientCertificateDigest"'), 2
+        )
         self.assertNotIn("shell=True", source)
 
     def test_role_requires_exact_inputs_digests_and_complete_fleet_ack(self) -> None:

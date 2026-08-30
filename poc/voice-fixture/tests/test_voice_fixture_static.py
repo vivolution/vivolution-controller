@@ -386,9 +386,20 @@ wait_for_sipp_uas_recovery
         self.assertIn("Atomically select the complete PKI generation", tasks)
         self.assertIn("--no-target-directory", tasks)
         self.assertIn("ca.srl", tasks)
-        self.assertIn("-CAserial", tasks)
+        self.assertNotIn("-CAserial", tasks)
         self.assertIn("Prove renewed serials are unique", tasks)
-        self.assertNotIn("-set_serial", tasks)
+        self.assertIn("-set_serial", tasks)
+        self.assertIn("Durably reserve every leaf serial before signing", tasks)
+        self.assertIn("vivolution-reserve-fixture-ca-serials", tasks)
+        self.assertIn("pki-issuer-state", defaults)
+        self.assertIn("generation-request.json", tasks)
+        self.assertIn("voice_fixture_force_leaf_rotation_request_id", defaults)
+        self.assertIn("voice_fixture_force_leaf_rotation_expected_generation", defaults)
+        self.assertIn("Bind this generation to its exact rotation authority", tasks)
+        self.assertLess(
+            tasks.index("Durably reserve every leaf serial before signing"),
+            tasks.index("Sign renewed fixture leaves from the persistent unique CA counter"),
+        )
         for reused in ("0x1001", "0x1002", "0x2001", "0x2002"):
             self.assertNotIn(reused, tasks)
         self.assertNotRegex(
