@@ -1,6 +1,6 @@
 Set-StrictMode -Version Latest
 
-$script:ExpectedTenantId = 'efc3bcaa-8879-4366-a452-2b8efa76b16a'
+$script:ExpectedTenantId = '151cd01a-1e81-40a9-b898-d8646e1a8760'
 $script:VerifiedDomain = 'voice.vivolution.ae'
 $script:Gateways = @(
     'sbc1.voice.vivolution.ae'
@@ -13,9 +13,9 @@ $script:VoiceRoutingPolicy = 'Vivolution-POC-UAE'
 $script:NumberPattern = '^\+971[1-9][0-9]{7,8}$'
 $script:GatewayDescription = 'Vivolution OpenSIPS non-certified POC; no Microsoft support claim'
 $script:ApplyAcknowledgement =
-    'APPLY VIVOLUTION DIRECT ROUTING POC TO efc3bcaa-8879-4366-a452-2b8efa76b16a'
+    'APPLY VIVOLUTION DIRECT ROUTING POC TO 151cd01a-1e81-40a9-b898-d8646e1a8760'
 $script:RollbackAcknowledgement =
-    'ROLL BACK VIVOLUTION DIRECT ROUTING POC FROM efc3bcaa-8879-4366-a452-2b8efa76b16a'
+    'ROLL BACK VIVOLUTION DIRECT ROUTING POC FROM 151cd01a-1e81-40a9-b898-d8646e1a8760'
 
 function Get-PropertyValue {
     param(

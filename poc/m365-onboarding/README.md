@@ -5,7 +5,7 @@ configuration. It pairs these two gateways with the one expected Entra tenant:
 
 - `sbc1.voice.vivolution.ae:5061`
 - `sbc2.voice.vivolution.ae:5061`
-- tenant `efc3bcaa-8879-4366-a452-2b8efa76b16a`
+- tenant `151cd01a-1e81-40a9-b898-d8646e1a8760`
 
 The only outbound voice route matches `^\+971[1-9][0-9]{7,8}$`. It therefore
 does not match short emergency/service codes or non-UAE E.164 numbers. It uses a
@@ -21,12 +21,13 @@ Routing support is limited to certified SBCs and may reject cases involving a
 noncertified device. This package is suitable only for the accepted engineering
 POC; it is not evidence of Microsoft certification or production support.
 
-As checked read-only on 2026-08-30, the signed-in tenant does not yet have
-`voice.vivolution.ae` registered and returned no subscribed Microsoft 365 SKUs.
-The live preflight must therefore fail today. Do not weaken it. Jay must first
-approve and arrange the verified subdomain plus two real users with both Teams
-and Teams Phone (`PhoneSystem`) entitlements. The users must be Teams-only,
-online-homed, enabled, and use UPNs in `voice.vivolution.ae`.
+The earlier 2026-08-30 read-only result came from the Azure subscription's
+guest directory and is not evidence about Vivolution's Microsoft 365 tenant.
+Public Microsoft tenant discovery binds `vivolution.ae` to the tenant above,
+but registered-domain, SKU, user-license, Teams-homing, and number state remain
+unverified until the isolated live preflight authenticates as
+`jay@vivolution.ae`. Do not weaken that preflight or infer readiness from the
+Azure subscription login.
 
 ## Managed objects
 
@@ -95,7 +96,7 @@ required so copied commands cannot silently target another workflow:
 ```powershell
 ./Invoke-Apply.ps1 `
   -ConfigPath ./config.psd1 `
-  -Acknowledge 'APPLY VIVOLUTION DIRECT ROUTING POC TO efc3bcaa-8879-4366-a452-2b8efa76b16a' `
+  -Acknowledge 'APPLY VIVOLUTION DIRECT ROUTING POC TO 151cd01a-1e81-40a9-b898-d8646e1a8760' `
   -WhatIf
 ```
 
@@ -130,7 +131,7 @@ Review the rollback plan first:
 ./Invoke-Rollback.ps1 `
   -ConfigPath ./config.psd1 `
   -StatePath ./.state/apply-state.json `
-  -Acknowledge 'ROLL BACK VIVOLUTION DIRECT ROUTING POC FROM efc3bcaa-8879-4366-a452-2b8efa76b16a' `
+  -Acknowledge 'ROLL BACK VIVOLUTION DIRECT ROUTING POC FROM 151cd01a-1e81-40a9-b898-d8646e1a8760' `
   -WhatIf
 ```
 

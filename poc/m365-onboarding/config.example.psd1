@@ -1,6 +1,6 @@
 @{
     SchemaVersion    = 1
-    ExpectedTenantId = 'efc3bcaa-8879-4366-a452-2b8efa76b16a'
+    ExpectedTenantId = '151cd01a-1e81-40a9-b898-d8646e1a8760'
     VerifiedDomain   = 'voice.vivolution.ae'
 
     Gateways = @(

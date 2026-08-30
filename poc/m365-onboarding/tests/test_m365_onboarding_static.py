@@ -12,7 +12,7 @@ CONFIG = (ROOT / "config.example.psd1").read_text(encoding="utf-8")
 class Microsoft365OnboardingStaticTests(unittest.TestCase):
     def test_contract_is_locked_to_expected_tenant_fqdns_and_uae_route(self):
         for value in (
-            "efc3bcaa-8879-4366-a452-2b8efa76b16a",
+            "151cd01a-1e81-40a9-b898-d8646e1a8760",
             "voice.vivolution.ae",
             "sbc1.voice.vivolution.ae",
             "sbc2.voice.vivolution.ae",
@@ -41,11 +41,11 @@ class Microsoft365OnboardingStaticTests(unittest.TestCase):
     def test_mutations_require_exact_acknowledgements(self):
         apply_ack = (
             "APPLY VIVOLUTION DIRECT ROUTING POC TO "
-            "efc3bcaa-8879-4366-a452-2b8efa76b16a"
+            "151cd01a-1e81-40a9-b898-d8646e1a8760"
         )
         rollback_ack = (
             "ROLL BACK VIVOLUTION DIRECT ROUTING POC FROM "
-            "efc3bcaa-8879-4366-a452-2b8efa76b16a"
+            "151cd01a-1e81-40a9-b898-d8646e1a8760"
         )
         self.assertIn(apply_ack, MODULE)
         self.assertIn(rollback_ack, MODULE)
@@ -105,8 +105,9 @@ class Microsoft365OnboardingStaticTests(unittest.TestCase):
 
     def test_documentation_records_support_and_live_blocks(self):
         for value in (
-            "does not yet have",
-            "returned no subscribed Microsoft 365 SKUs",
+            "guest directory",
+            "registered-domain, SKU, user-license, Teams-homing, and number state remain",
+            "jay@vivolution.ae",
             "Checked against Microsoft Learn on 2026-08-30",
             "-WhatIf",
         ):
