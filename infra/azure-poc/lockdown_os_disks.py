@@ -7,6 +7,10 @@ OS disks are therefore locked immediately after VM creation and before host
 configuration or qualification. Azure reimage can replace an OS disk with a
 derived name, so the exact current disk identities are resolved from the three
 expected VM attachments before any disk is changed.
+
+The default mode applies the lockdown. ``--mode audit`` performs the same
+stable attachment, inventory, ownership-tag, and network-policy proof without
+issuing any mutating Azure command.
 """
 
 from __future__ import annotations
@@ -21,13 +25,9 @@ from typing import Any, Callable, Mapping, Sequence
 import azure_lifecycle_contract as lifecycle
 
 
-RESOURCE_GROUP = "rg-vivolution-sbc-poc-uaenorth"
-LOCATION = "uaenorth"
-VM_TO_DISK_BASE = {
-    "viv-sbc-poc-cp1": "viv-sbc-poc-cp1-osdisk",
-    "viv-sbc-poc-sbc1": "viv-sbc-poc-sbc1-osdisk",
-    "viv-sbc-poc-sbc2": "viv-sbc-poc-sbc2-osdisk",
-}
+RESOURCE_GROUP = lifecycle.POC_RESOURCE_GROUP
+LOCATION = lifecycle.LOCATION
+VM_TO_DISK_BASE = lifecycle.VM_TO_OS_DISK_BASE
 DISK_TO_VM = {disk: vm for vm, disk in VM_TO_DISK_BASE.items()}
 DISK_TAGS = {
     spec.name: dict(spec.tags)
@@ -37,7 +37,6 @@ DISK_TAGS = {
 SUBSCRIPTION_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
-REIMAGE_DISK_NAME_RE = re.compile(r"^[0-9a-f]{32}(?:_[0-9a-f]{32})*$")
 
 
 class DiskLockdownError(RuntimeError):
@@ -63,169 +62,30 @@ def _json(raw: str, label: str) -> Any:
         raise DiskLockdownError(f"Azure CLI returned malformed {label} JSON") from exc
 
 
-def _vm_id(subscription_id: str, vm_name: str) -> str:
-    return (
-        f"/subscriptions/{subscription_id}/resourceGroups/{RESOURCE_GROUP}"
-        f"/providers/Microsoft.Compute/virtualMachines/{vm_name}"
-    )
-
-
-def _disk_id(subscription_id: str, disk_name: str) -> str:
-    return (
-        f"/subscriptions/{subscription_id}/resourceGroups/{RESOURCE_GROUP}"
-        f"/providers/Microsoft.Compute/disks/{disk_name}"
-    )
-
-
-def _attached_disk_name_from_id(
-    disk_id: Any, subscription_id: str, vm_name: str
-) -> str:
-    prefix = _disk_id(subscription_id, "")
-    if (
-        not isinstance(disk_id, str)
-        or not disk_id.lower().startswith(prefix.lower())
-        or len(disk_id) <= len(prefix)
-    ):
-        raise DiskLockdownError(f"VM {vm_name} OS-disk resource ID drifted")
-    disk_name = disk_id[len(prefix) :]
-    if "/" in disk_name or disk_id.lower() != _disk_id(
-        subscription_id, disk_name
-    ).lower():
-        raise DiskLockdownError(f"VM {vm_name} OS-disk resource ID drifted")
-    return disk_name
-
-
-def _allowed_attached_disk_name(disk_name: str, base_name: str) -> bool:
-    if disk_name == base_name:
-        return True
-    prefix = f"{base_name}_"
-    return disk_name.startswith(prefix) and REIMAGE_DISK_NAME_RE.fullmatch(
-        disk_name[len(prefix) :]
-    ) is not None
-
-
 def _resolve_vm_os_disks(
     subscription_id: str, *, runner: Runner
 ) -> dict[str, dict[str, str]]:
-    attachments: dict[str, dict[str, str]] = {}
-    for vm_name, base_name in sorted(VM_TO_DISK_BASE.items()):
-        record = _json(
-            runner(
-                [
-                    "az",
-                    "vm",
-                    "show",
-                    "--subscription",
-                    subscription_id,
-                    "--resource-group",
-                    RESOURCE_GROUP,
-                    "--name",
-                    vm_name,
-                    "--query",
-                    (
-                        "{id:id,name:name,provisioningState:provisioningState,"
-                        "osDiskId:storageProfile.osDisk.managedDisk.id,"
-                        "osDiskName:storageProfile.osDisk.name}"
-                    ),
-                    "--output",
-                    "json",
-                    "--only-show-errors",
-                ]
-            ),
-            f"VM OS-disk attachment {vm_name}",
-        )
-        if not isinstance(record, dict):
-            raise DiskLockdownError(f"VM attachment {vm_name} is not an object")
-        disk_id = record.get("osDiskId")
-        if record.get("name") != vm_name or not isinstance(record.get("id"), str):
-            raise DiskLockdownError(f"VM identity drifted for {vm_name}")
-        if record["id"].lower() != _vm_id(subscription_id, vm_name).lower():
-            raise DiskLockdownError(f"VM resource ID drifted for {vm_name}")
-        if record.get("provisioningState") != "Succeeded":
-            raise DiskLockdownError(f"VM {vm_name} provisioning did not succeed")
-        if record.get("osDiskName") != base_name:
-            raise DiskLockdownError(f"VM {vm_name} logical OS-disk name drifted")
-        disk_name = _attached_disk_name_from_id(disk_id, subscription_id, vm_name)
-        if not _allowed_attached_disk_name(disk_name, base_name):
-            raise DiskLockdownError(
-                f"VM {vm_name} OS disk is not its original or bounded reimage-derived identity"
-            )
-        attachments[vm_name] = {
-            "baseName": base_name,
-            "diskId": _disk_id(subscription_id, disk_name),
-            "diskName": disk_name,
-            "vmId": _vm_id(subscription_id, vm_name),
-            "vmName": vm_name,
-        }
-
-    names = [attachment["diskName"] for attachment in attachments.values()]
-    ids = [attachment["diskId"].lower() for attachment in attachments.values()]
-    if len(set(names)) != 3 or len(set(ids)) != 3:
-        raise DiskLockdownError("POC VMs do not have three distinct OS-disk attachments")
-    return attachments
+    try:
+        return lifecycle.resolve_vm_os_disks(subscription_id, runner=runner)
+    except lifecycle.LifecycleError as exc:
+        raise DiskLockdownError(str(exc)) from exc
 
 
 def _validate_disk_inventory(
     inventory: Any,
     attachments: Mapping[str, Mapping[str, str]],
 ) -> None:
-    if not isinstance(inventory, list) or len(inventory) != 3:
-        raise DiskLockdownError(
-            "resource group must contain exactly the three attached POC OS disks"
-        )
-
-    expected_by_name = {
-        attachment["diskName"]: attachment for attachment in attachments.values()
-    }
-    actual_names: set[str] = set()
-    for record in inventory:
-        if not isinstance(record, dict):
-            raise DiskLockdownError("disk inventory contains a non-object record")
-        name = record.get("name")
-        disk_id = record.get("id")
-        managed_by = record.get("managedBy")
-        if not isinstance(name, str) or name in actual_names:
-            raise DiskLockdownError("disk inventory contains a duplicate or invalid identity")
-        actual_names.add(name)
-        attachment = expected_by_name.get(name)
-        if attachment is None:
-            raise DiskLockdownError(
-                "resource group contains an extra or unattached managed disk"
-            )
-        if not isinstance(disk_id, str) or disk_id.lower() != attachment["diskId"].lower():
-            raise DiskLockdownError(f"disk inventory resource ID drifted for {name}")
-        if (
-            not isinstance(managed_by, str)
-            or managed_by.lower() != attachment["vmId"].lower()
-        ):
-            raise DiskLockdownError(f"disk {name} is not attached to its exact POC VM")
-
-    if actual_names != set(expected_by_name):
-        raise DiskLockdownError(
-            "resource group must contain exactly the three attached POC OS disks"
-        )
+    try:
+        lifecycle.validate_os_disk_inventory(inventory, attachments)
+    except lifecycle.LifecycleError as exc:
+        raise DiskLockdownError(str(exc)) from exc
 
 
 def _read_disk_inventory(subscription_id: str, *, runner: Runner) -> Any:
-    return _json(
-        runner(
-            [
-                "az",
-                "disk",
-                "list",
-                "--subscription",
-                subscription_id,
-                "--resource-group",
-                RESOURCE_GROUP,
-                "--query",
-                "[].{id:id,name:name,managedBy:managedBy}",
-                "--output",
-                "json",
-                "--only-show-errors",
-            ]
-        ),
-        "disk inventory",
-    )
+    try:
+        return lifecycle.read_os_disk_inventory(subscription_id, runner=runner)
+    except lifecycle.LifecycleError as exc:
+        raise DiskLockdownError(str(exc)) from exc
 
 
 def _validate_disk(
@@ -261,7 +121,12 @@ def _validate_disk(
         raise DiskLockdownError(f"disk {name} provisioning did not succeed")
     if actual["tags"] != DISK_TAGS[attachment["baseName"]]:
         raise DiskLockdownError(f"disk {name} ownership tags drifted")
-    return actual
+    return {
+        **actual,
+        "baseName": attachment["baseName"],
+        "vmId": attachment["vmId"],
+        "vmName": attachment["vmName"],
+    }
 
 
 def _read_validated_disk(
@@ -302,7 +167,7 @@ def _read_validated_disk(
     return _validate_disk(record, attachment)
 
 
-def lock_down(subscription_id: str, *, runner: Runner = _run) -> dict[str, Any]:
+def _validate_scope(subscription_id: str, *, runner: Runner) -> None:
     if SUBSCRIPTION_RE.fullmatch(subscription_id) is None:
         raise DiskLockdownError("expected subscription ID is not a canonical lowercase UUID")
 
@@ -335,6 +200,43 @@ def lock_down(subscription_id: str, *, runner: Runner = _run) -> dict[str, Any]:
     )
     if group != {"location": LOCATION, "name": RESOURCE_GROUP}:
         raise DiskLockdownError("resource-group identity or location drifted")
+
+
+def audit(subscription_id: str, *, runner: Runner = _run) -> dict[str, Any]:
+    """Read-only, race-detecting proof of the exact locked disk attachments."""
+
+    _validate_scope(subscription_id, runner=runner)
+    attachments = _resolve_vm_os_disks(subscription_id, runner=runner)
+    _validate_disk_inventory(
+        _read_disk_inventory(subscription_id, runner=runner), attachments
+    )
+    first = [
+        _read_validated_disk(subscription_id, attachments[vm_name], runner=runner)
+        for vm_name in sorted(attachments)
+    ]
+
+    final_attachments = _resolve_vm_os_disks(subscription_id, runner=runner)
+    if final_attachments != attachments:
+        raise DiskLockdownError("VM OS-disk attachments changed during audit")
+    _validate_disk_inventory(
+        _read_disk_inventory(subscription_id, runner=runner), final_attachments
+    )
+    final = [
+        _read_validated_disk(subscription_id, final_attachments[vm_name], runner=runner)
+        for vm_name in sorted(final_attachments)
+    ]
+    if final != first:
+        raise DiskLockdownError("OS-disk state changed during audit")
+    return {
+        "disks": final,
+        "resourceGroup": RESOURCE_GROUP,
+        "status": "POC_OS_DISKS_AUDIT_PASSED",
+        "subscriptionId": subscription_id,
+    }
+
+
+def lock_down(subscription_id: str, *, runner: Runner = _run) -> dict[str, Any]:
+    _validate_scope(subscription_id, runner=runner)
 
     attachments = _resolve_vm_os_disks(subscription_id, runner=runner)
     inventory = _read_disk_inventory(subscription_id, runner=runner)
@@ -413,6 +315,7 @@ def lock_down(subscription_id: str, *, runner: Runner = _run) -> dict[str, Any]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("audit", "lockdown"), default="lockdown")
     parser.add_argument("--expected-subscription-id", required=True)
     return parser
 
@@ -420,9 +323,18 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        evidence = lock_down(args.expected_subscription_id)
+        evidence = (
+            audit(args.expected_subscription_id)
+            if args.mode == "audit"
+            else lock_down(args.expected_subscription_id)
+        )
     except DiskLockdownError as exc:
-        print(f"POC_OS_DISKS_NETWORK_LOCKDOWN_REJECTED: {exc}", file=sys.stderr)
+        rejection = (
+            "POC_OS_DISKS_AUDIT_REJECTED"
+            if args.mode == "audit"
+            else "POC_OS_DISKS_NETWORK_LOCKDOWN_REJECTED"
+        )
+        print(f"{rejection}: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(evidence, sort_keys=True, separators=(",", ":")))
     return 0

@@ -141,6 +141,38 @@ class FakeAzure:
 
 
 class DiskLockdownTests(unittest.TestCase):
+    def test_read_only_audit_resolves_reimage_disks_and_never_mutates(self):
+        azure = FakeAzure()
+        sbc1_vm = "viv-sbc-poc-sbc1"
+        azure.attachments[sbc1_vm] = (
+            f"{lockdown.VM_TO_DISK_BASE[sbc1_vm]}_{REIMAGE_SUFFIX}"
+        )
+
+        evidence = lockdown.audit(SUBSCRIPTION, runner=azure)
+
+        self.assertEqual(evidence["status"], "POC_OS_DISKS_AUDIT_PASSED")
+        self.assertEqual(
+            [record["vmName"] for record in evidence["disks"]],
+            sorted(lockdown.VM_TO_DISK_BASE),
+        )
+        self.assertFalse(
+            any(
+                command[1:3] in (["disk", "update"], ["tag", "create"])
+                for command in azure.commands
+            )
+        )
+
+    def test_read_only_audit_rejects_attachment_race(self):
+        azure = FakeAzure()
+        sbc1_vm = "viv-sbc-poc-sbc1"
+        azure.final_attachment_override = {
+            sbc1_vm: f"{lockdown.VM_TO_DISK_BASE[sbc1_vm]}_{REIMAGE_SUFFIX}"
+        }
+        with self.assertRaisesRegex(
+            lockdown.DiskLockdownError, "changed during audit"
+        ):
+            lockdown.audit(SUBSCRIPTION, runner=azure)
+
     def test_exact_three_original_disks_are_updated_idempotently(self):
         azure = FakeAzure()
         for _ in range(2):
@@ -249,6 +281,8 @@ class DiskLockdownTests(unittest.TestCase):
     def test_unbounded_or_cross_resource_attachment_identity_is_rejected(self):
         cases = (
             "viv-sbc-poc-sbc1-osdisk_not-a-reimage-suffix",
+            "viv-sbc-poc-sbc1-osdisk_" + REIMAGE_SUFFIX.upper(),
+            "viv-sbc-poc-sbc1-osdisk_" + REIMAGE_SUFFIX[:-1],
             "viv-sbc-poc-sbc2-osdisk_" + REIMAGE_SUFFIX,
             "unexpected-osdisk_" + REIMAGE_SUFFIX,
         )

@@ -8,12 +8,16 @@ import unittest
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PLAYBOOK = PROJECT_ROOT / "deploy" / "playbooks" / "qualify-azure-infrastructure.yml"
 DISK_LOCKDOWN = PROJECT_ROOT / "infra" / "azure-poc" / "lockdown_os_disks.py"
+LIFECYCLE_CONTRACT = (
+    PROJECT_ROOT / "infra" / "azure-poc" / "azure_lifecycle_contract.py"
+)
 
 
 class AzureInfrastructureQualificationStaticTests(unittest.TestCase):
     def setUp(self) -> None:
         self.text = PLAYBOOK.read_text(encoding="utf-8")
         self.disk_lockdown_text = DISK_LOCKDOWN.read_text(encoding="utf-8")
+        self.lifecycle_text = LIFECYCLE_CONTRACT.read_text(encoding="utf-8")
 
     def test_legacy_contract_remains_default_and_poc_is_explicit(self) -> None:
         self.assertIn("default('legacy-single-node', true)", self.text)
@@ -29,6 +33,10 @@ class AzureInfrastructureQualificationStaticTests(unittest.TestCase):
         self.assertIn("cp_azure_resources | length == 17", self.text)
         self.assertIn("cp_azure_poc_expected_declared_resources", self.text)
         self.assertIn("cp_azure_poc_expected_disk_resources", self.text)
+        self.assertIn(
+            'name: "{{ cp_azure_poc_os_disk_audit.disks[1].name }}"',
+            self.text,
+        )
         self.assertEqual(
             self.text.count("type: Microsoft.Compute/virtualMachines"), 4
         )
@@ -198,8 +206,8 @@ class AzureInfrastructureQualificationStaticTests(unittest.TestCase):
             "viv-sbc-poc-sbc2-osdisk": "viv-sbc-poc-sbc2",
         }
         for disk, vm in expected_disks.items():
-            self.assertIn(disk, self.disk_lockdown_text)
-            self.assertIn(vm, self.disk_lockdown_text)
+            self.assertIn(disk, self.lifecycle_text)
+            self.assertIn(vm, self.lifecycle_text)
 
         self.assertIn("cp_azure_os_disk_name == 'viv-sbc-poc-cp1-osdisk'", self.text)
         self.assertIn("['sbc1', 'sbc2']", self.text)
@@ -211,11 +219,16 @@ class AzureInfrastructureQualificationStaticTests(unittest.TestCase):
             "cp_azure_disk.networkAccessPolicy == 'DenyAll'",
             "cp_azure_poc_os_disk_lockdown_evidence",
             "cp_azure_poc_os_disk_lockdown_evidence | length == 3",
+            "POC_OS_DISKS_AUDIT_PASSED",
+            "--mode\n              - audit",
+            "osDiskId:storageProfile.osDisk.managedDisk.id",
+            "vm.osDiskId | lower == resolved_disk.id | lower",
+            "cp_azure_poc_os_disk_final_audit_raw.stdout | from_json ==",
             "map(attribute='publicNetworkAccess') | unique | list ==",
             "['Disabled']",
             "map(attribute='networkAccessPolicy') | unique | list ==",
             "['DenyAll']",
-            "map(attribute='os_disk_name') | list",
+            "map(attribute='name') | list | sort",
             "cp1-sbc1-sbc2-disabled-deny-all",
         ):
             self.assertIn(value, self.text)
@@ -223,8 +236,30 @@ class AzureInfrastructureQualificationStaticTests(unittest.TestCase):
         for value in (
             'actual["publicNetworkAccess"] != "Disabled"',
             'actual["networkAccessPolicy"] != "DenyAll"',
+            "lifecycle.resolve_vm_os_disks",
+            "lifecycle.validate_os_disk_inventory",
         ):
             self.assertIn(value, self.disk_lockdown_text)
+
+        self.assertEqual(
+            self.text.count("              - --mode\n              - audit\n"), 2
+        )
+        final_audit = self.text.index(
+            "        - name: Reaudit the exact POC OS-disk attachments after all "
+            "qualification reads\n"
+        )
+        final_race_assertion = self.text.index(
+            "        - name: Prove the POC OS-disk identity did not race qualification\n"
+        )
+        last_prior_read = self.text.index(
+            "        - name: Require public DNS to resolve solely to the static public IP\n"
+        )
+        report = self.text.index(
+            "        - name: Report sanitized Azure infrastructure qualification evidence\n"
+        )
+        self.assertLess(last_prior_read, final_audit)
+        self.assertLess(final_audit, final_race_assertion)
+        self.assertLess(final_race_assertion, report)
 
     def test_poc_acme_authority_is_qualified_read_only_and_fail_closed(self) -> None:
         for value in (

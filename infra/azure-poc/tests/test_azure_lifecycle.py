@@ -39,6 +39,17 @@ class FakeAzure:
                 tags={"lifecycle": "qualified-controller"},
             ),
         }
+        self.attachments = dict(contract.VM_TO_OS_DISK_BASE)
+        self.logical_disk_names = dict(contract.VM_TO_OS_DISK_BASE)
+        self.vm_id_overrides: dict[str, str] = {}
+        self.os_disk_id_overrides: dict[str, str] = {}
+        self.final_attachments: dict[str, str] | None = None
+        self.vm_show_count = 0
+        self.resource_list_count = 0
+        self.final_resources: list[dict[str, object]] | None = None
+        self.disk_show_overrides: dict[str, dict[str, object]] = {}
+        self.final_disk_show_overrides: dict[str, dict[str, object]] = {}
+        self.disk_show_counts: dict[str, int] = {}
         self.resources = self._core_resources() if core_deployed else []
         self.budget = self._budget()
         self.poc_locks: list[dict[str, object]] = []
@@ -111,19 +122,21 @@ class FakeAzure:
             "notes": contract.PRESERVATION_LOCK_NOTES,
         }
 
-    @staticmethod
-    def _core_resources() -> list[dict[str, object]]:
+    def _core_resources(self) -> list[dict[str, object]]:
         resources = []
         for spec in contract.expected_resource_specs():
+            resource_name = spec.name
+            if spec.managed_by_vm is not None:
+                resource_name = self.attachments[spec.managed_by_vm]
             record: dict[str, object] = {
                 "id": contract.resource_id(
                     contract.EXPECTED_SUBSCRIPTION_ID,
                     spec.resource_type,
-                    spec.name,
+                    resource_name,
                 ),
                 "location": contract.LOCATION,
                 "managedBy": None,
-                "name": spec.name,
+                "name": resource_name,
                 "tags": dict(spec.tags),
                 "type": spec.resource_type,
             }
@@ -135,6 +148,22 @@ class FakeAzure:
                 )
             resources.append(record)
         return resources
+
+    def replace_attachment(self, vm_name: str, disk_name: str) -> None:
+        old_name = self.attachments[vm_name]
+        self.attachments[vm_name] = disk_name
+        disk = next(
+            resource
+            for resource in self.resources
+            if resource["type"] == "Microsoft.Compute/disks"
+            and resource["name"] == old_name
+        )
+        disk["name"] = disk_name
+        disk["id"] = contract.resource_id(
+            contract.EXPECTED_SUBSCRIPTION_ID,
+            "Microsoft.Compute/disks",
+            disk_name,
+        )
 
     def __call__(self, raw_argv):
         argv = list(raw_argv)
@@ -152,7 +181,13 @@ class FakeAzure:
         if command[:2] == ["resource", "list"]:
             group = self._value(argv, "--resource-group")
             if group == contract.POC_RESOURCE_GROUP:
-                return json.dumps(self.resources)
+                self.resource_list_count += 1
+                records = (
+                    self.final_resources
+                    if self.final_resources is not None and self.resource_list_count > 1
+                    else self.resources
+                )
+                return json.dumps(records)
             name = self._value(argv, "--name")
             if name in self.child_zones:
                 return json.dumps(
@@ -188,6 +223,75 @@ class FakeAzure:
             return json.dumps(self.parent_records)
         if command[:2] == ["vm", "get-instance-view"]:
             return json.dumps(self.vm_states[self._value(argv, "--name")])
+        if command[:2] == ["vm", "show"]:
+            vm_name = self._value(argv, "--name")
+            self.vm_show_count += 1
+            attachments = (
+                self.final_attachments
+                if self.final_attachments is not None and self.vm_show_count > 3
+                else self.attachments
+            )
+            disk_name = attachments[vm_name]
+            return json.dumps(
+                {
+                    "id": self.vm_id_overrides.get(
+                        vm_name,
+                        contract.resource_id(
+                            contract.EXPECTED_SUBSCRIPTION_ID,
+                            "Microsoft.Compute/virtualMachines",
+                            vm_name,
+                        ),
+                    ),
+                    "name": vm_name,
+                    "osDiskId": self.os_disk_id_overrides.get(
+                        vm_name,
+                        contract.resource_id(
+                            contract.EXPECTED_SUBSCRIPTION_ID,
+                            "Microsoft.Compute/disks",
+                            disk_name,
+                        ),
+                    ),
+                    "osDiskName": self.logical_disk_names[vm_name],
+                    "provisioningState": "Succeeded",
+                }
+            )
+        if command[:2] == ["disk", "list"]:
+            return json.dumps(
+                [
+                    {
+                        "id": resource["id"],
+                        "managedBy": resource["managedBy"],
+                        "name": resource["name"],
+                    }
+                    for resource in self.resources
+                    if resource["type"] == "Microsoft.Compute/disks"
+                ]
+            )
+        if command[:2] == ["disk", "show"]:
+            disk_name = self._value(argv, "--name")
+            self.disk_show_counts[disk_name] = self.disk_show_counts.get(disk_name, 0) + 1
+            resource = next(
+                resource
+                for resource in self.resources
+                if resource["type"] == "Microsoft.Compute/disks"
+                and resource["name"] == disk_name
+            )
+            record = {
+                "encryptionType": "EncryptionAtRestWithPlatformKey",
+                "id": resource["id"],
+                "location": resource["location"],
+                "managedBy": resource["managedBy"],
+                "name": resource["name"],
+                "networkAccessPolicy": "DenyAll",
+                "provisioningState": "Succeeded",
+                "publicNetworkAccess": "Disabled",
+                "securityType": "TrustedLaunch",
+                "tags": resource["tags"],
+            }
+            record.update(self.disk_show_overrides.get(disk_name, {}))
+            if self.disk_show_counts[disk_name] > 1:
+                record.update(self.final_disk_show_overrides.get(disk_name, {}))
+            return json.dumps(record)
         if command[:2] == ["group", "delete"]:
             name = self._value(argv, "--name")
             if name != contract.POC_RESOURCE_GROUP:
@@ -394,13 +498,137 @@ class CoreTeardownTests(unittest.TestCase):
             contract.PRESERVED_CP1_RESOURCE_GROUP,
             {action["name"] for action in plan["actions"]},
         )
+        disk_contracts = [
+            record["osDiskContract"]
+            for record in plan["validated"]["inventory"]
+            if "osDiskContract" in record
+        ]
+        self.assertEqual(len(disk_contracts), 3)
+        self.assertEqual(
+            {record["publicNetworkAccess"] for record in disk_contracts},
+            {"Disabled"},
+        )
+        self.assertEqual(
+            {record["networkAccessPolicy"] for record in disk_contracts},
+            {"DenyAll"},
+        )
         self.assertFalse(azure.mutations)
+
+    def test_reimaged_os_disk_resource_identity_is_resolved_from_each_vm(self) -> None:
+        azure = FakeAzure(core_deployed=True)
+        suffix = "f7c4802c379144a5ad2c32424f19f79a"
+        for vm_name in ("viv-sbc-poc-sbc1", "viv-sbc-poc-sbc2"):
+            azure.replace_attachment(
+                vm_name,
+                f"{contract.VM_TO_OS_DISK_BASE[vm_name]}_{suffix}",
+            )
+
+        plan = teardown_core_poc.plan_teardown(
+            contract.EXPECTED_SUBSCRIPTION_ID,
+            contract.EXPECTED_TENANT_ID,
+            runner=azure,
+            today=TODAY,
+        )
+
+        disk_ids = {
+            record["id"]
+            for record in plan["validated"]["inventory"]
+            if "/Microsoft.Compute/disks/" in record["id"]
+        }
+        self.assertEqual(
+            disk_ids,
+            {
+                contract.resource_id(
+                    contract.EXPECTED_SUBSCRIPTION_ID,
+                    "Microsoft.Compute/disks",
+                    disk_name,
+                )
+                for disk_name in azure.attachments.values()
+            },
+        )
+        self.assertFalse(azure.mutations)
+
+    def test_malformed_or_cross_scope_reimage_attachment_fails_closed(self) -> None:
+        cases = []
+        vm_name = "viv-sbc-poc-sbc1"
+
+        azure = FakeAzure(core_deployed=True)
+        azure.attachments[vm_name] = f"{contract.VM_TO_OS_DISK_BASE[vm_name]}_ABCDEF"
+        cases.append((azure, "bounded reimage-derived"))
+
+        azure = FakeAzure(core_deployed=True)
+        azure.logical_disk_names[vm_name] = azure.attachments[vm_name] + "_changed"
+        cases.append((azure, "logical OS-disk name drifted"))
+
+        azure = FakeAzure(core_deployed=True)
+        azure.os_disk_id_overrides[vm_name] = (
+            f"/subscriptions/{contract.EXPECTED_SUBSCRIPTION_ID}/resourceGroups/unrelated/"
+            "providers/Microsoft.Compute/disks/unrelated"
+        )
+        cases.append((azure, "resource ID drifted"))
+
+        azure = FakeAzure(core_deployed=True)
+        azure.vm_id_overrides[vm_name] = "unrelated"
+        cases.append((azure, "VM identity drifted"))
+
+        for azure, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(contract.LifecycleError, message):
+                    teardown_core_poc.plan_teardown(
+                        contract.EXPECTED_SUBSCRIPTION_ID,
+                        contract.EXPECTED_TENANT_ID,
+                        runner=azure,
+                        today=TODAY,
+                    )
+                self.assertFalse(azure.mutations)
+
+    def test_disk_network_tag_and_mid_validation_races_fail_closed(self) -> None:
+        cases = []
+        cp1_disk = contract.VM_TO_OS_DISK_BASE["viv-sbc-poc-cp1"]
+
+        azure = FakeAzure(core_deployed=True)
+        azure.disk_show_overrides[cp1_disk] = {"publicNetworkAccess": "Enabled"}
+        cases.append((azure, "publicNetworkAccess"))
+
+        azure = FakeAzure(core_deployed=True)
+        azure.disk_show_overrides[cp1_disk] = {"tags": {"purpose": "unrelated"}}
+        cases.append((azure, "tags"))
+
+        azure = FakeAzure(core_deployed=True)
+        azure.final_disk_show_overrides[cp1_disk] = {
+            "networkAccessPolicy": "AllowAll"
+        }
+        cases.append((azure, "networkAccessPolicy"))
+
+        azure = FakeAzure(core_deployed=True)
+        azure.final_attachments = dict(azure.attachments)
+        azure.final_attachments["viv-sbc-poc-sbc1"] = (
+            f"{contract.VM_TO_OS_DISK_BASE['viv-sbc-poc-sbc1']}_"
+            "f7c4802c379144a5ad2c32424f19f79a"
+        )
+        cases.append((azure, "changed during lifecycle validation"))
+
+        azure = FakeAzure(core_deployed=True)
+        azure.final_resources = copy.deepcopy(azure.resources)
+        azure.final_resources[0]["tags"] = {"purpose": "raced"}
+        cases.append((azure, "identity/location/tags drifted"))
+
+        for azure, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(contract.LifecycleError, message):
+                    teardown_core_poc.plan_teardown(
+                        contract.EXPECTED_SUBSCRIPTION_ID,
+                        contract.EXPECTED_TENANT_ID,
+                        runner=azure,
+                        today=TODAY,
+                    )
+                self.assertFalse(azure.mutations)
 
     def test_inventory_extra_missing_tag_and_disk_attachment_drift_fail(self) -> None:
         cases = []
         azure = FakeAzure(core_deployed=True)
         azure.resources.pop()
-        cases.append((azure, "missing, extra, or renamed"))
+        cases.append((azure, "exactly the three attached"))
 
         azure = FakeAzure(core_deployed=True)
         azure.resources.append(
@@ -426,7 +654,7 @@ class CoreTeardownTests(unittest.TestCase):
             if resource["type"] == "Microsoft.Compute/disks"
         )
         disk["managedBy"] = "unrelated"
-        cases.append((azure, "not attached to its exact VM"))
+        cases.append((azure, "not attached to its exact POC VM"))
 
         for azure, message in cases:
             with self.subTest(message=message):

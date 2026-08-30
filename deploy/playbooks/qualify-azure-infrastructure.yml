@@ -378,6 +378,109 @@
               - cp_azure_resource_group_state.provisioningState == 'Succeeded'
             fail_msg: The approved Azure resource group is missing or not healthy in UAE North.
 
+        - name: Audit the exact current POC OS-disk attachments without mutation
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ playbook_dir }}/../../infra/azure-poc/lockdown_os_disks.py"
+              - --mode
+              - audit
+              - --expected-subscription-id
+              - "{{ cp_azure_subscription_id }}"
+          environment: *azure_cli_environment
+          register: cp_azure_poc_os_disk_audit_raw
+          changed_when: false
+          check_mode: false
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Parse the resolved POC OS-disk attachment evidence
+          ansible.builtin.set_fact:
+            cp_azure_poc_os_disk_audit: >-
+              {{ cp_azure_poc_os_disk_audit_raw.stdout | from_json }}
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require exactly three bounded and locked POC OS-disk attachments
+          ansible.builtin.assert:
+            that:
+              - >-
+                cp_azure_poc_os_disk_audit.keys() | list | sort ==
+                ['disks', 'resourceGroup', 'status', 'subscriptionId'] | sort
+              - >-
+                cp_azure_poc_os_disk_audit.status ==
+                'POC_OS_DISKS_AUDIT_PASSED'
+              - >-
+                cp_azure_poc_os_disk_audit.subscriptionId ==
+                cp_azure_subscription_id
+              - >-
+                cp_azure_poc_os_disk_audit.resourceGroup ==
+                cp_azure_resource_group
+              - cp_azure_poc_os_disk_audit.disks | length == 3
+              - >-
+                cp_azure_poc_os_disk_audit.disks |
+                map(attribute='vmName') | list ==
+                ['viv-sbc-poc-cp1', 'viv-sbc-poc-sbc1',
+                 'viv-sbc-poc-sbc2']
+              - >-
+                cp_azure_poc_os_disk_audit.disks |
+                map(attribute='baseName') | list ==
+                ['viv-sbc-poc-cp1-osdisk', 'viv-sbc-poc-sbc1-osdisk',
+                 'viv-sbc-poc-sbc2-osdisk']
+              - >-
+                cp_azure_poc_os_disk_audit.disks |
+                map(attribute='name') | unique | list | length == 3
+              - >-
+                cp_azure_poc_os_disk_audit.disks |
+                map(attribute='id') | map('lower') | unique | list | length == 3
+              - >-
+                cp_azure_poc_os_disk_audit.disks |
+                map(attribute='publicNetworkAccess') | unique | list ==
+                ['Disabled']
+              - >-
+                cp_azure_poc_os_disk_audit.disks |
+                map(attribute='networkAccessPolicy') | unique | list ==
+                ['DenyAll']
+              - >-
+                cp_azure_poc_os_disk_audit.disks |
+                map(attribute='provisioningState') | unique | list ==
+                ['Succeeded']
+            fail_msg: >-
+              The read-only POC OS-disk audit did not prove exactly one
+              original or bounded reimage-derived locked disk attached to
+              each exact CP1/SBC1/SBC2 VM.
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require each resolved OS-disk identity and ownership boundary
+          ansible.builtin.assert:
+            that:
+              - >-
+                item.keys() | list | sort ==
+                ['baseName', 'id', 'managedBy', 'name',
+                 'networkAccessPolicy', 'provisioningState',
+                 'publicNetworkAccess', 'tags', 'vmId', 'vmName'] | sort
+              - >-
+                item.name == item.baseName or
+                item.name is match('^' ~ item.baseName ~
+                '_(?:[0-9a-f]{32})(?:_[0-9a-f]{32})*$')
+              - item.managedBy | lower == item.vmId | lower
+              - >-
+                item.id | lower ==
+                ('/subscriptions/' ~ cp_azure_subscription_id ~
+                 '/resourceGroups/' ~ cp_azure_resource_group ~
+                 '/providers/Microsoft.Compute/disks/' ~ item.name) | lower
+              - >-
+                item.vmId | lower ==
+                ('/subscriptions/' ~ cp_azure_subscription_id ~
+                 '/resourceGroups/' ~ cp_azure_resource_group ~
+                 '/providers/Microsoft.Compute/virtualMachines/' ~
+                 item.vmName) | lower
+            fail_msg: >-
+              A resolved POC OS disk has a malformed derived name, resource
+              ID, or cross-owned VM attachment.
+          loop: "{{ cp_azure_poc_os_disk_audit.disks | default([]) }}"
+          loop_control:
+            label: "{{ item.vmName | default('invalid-os-disk') }}"
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
         - name: Read the complete top-level resource set
           ansible.builtin.command:
             argv:
@@ -479,13 +582,13 @@
                 type: Microsoft.Compute/availabilitySets
                 location: "{{ cp_azure_location }}"
             cp_azure_poc_expected_disk_resources:
-              - name: "{{ cp_azure_os_disk_name }}"
+              - name: "{{ cp_azure_poc_os_disk_audit.disks[0].name }}"
                 type: Microsoft.Compute/disks
                 location: "{{ cp_azure_location }}"
-              - name: "{{ cp_azure_poc_edge_nodes[0].os_disk_name }}"
+              - name: "{{ cp_azure_poc_os_disk_audit.disks[1].name }}"
                 type: Microsoft.Compute/disks
                 location: "{{ cp_azure_location }}"
-              - name: "{{ cp_azure_poc_edge_nodes[1].os_disk_name }}"
+              - name: "{{ cp_azure_poc_os_disk_audit.disks[2].name }}"
                 type: Microsoft.Compute/disks
                 location: "{{ cp_azure_location }}"
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
@@ -550,6 +653,7 @@
                 imageVersion:storageProfile.imageReference.version,
                 imageExactVersion:storageProfile.imageReference.exactVersion,
                 osDiskName:storageProfile.osDisk.name,
+                osDiskId:storageProfile.osDisk.managedDisk.id,
                 osDiskType:storageProfile.osDisk.osType,
                 osDiskSizeGiB:storageProfile.osDisk.diskSizeGB,
                 osDiskSku:storageProfile.osDisk.managedDisk.storageAccountType,
@@ -598,6 +702,10 @@
               - cp_azure_vm.imageVersion == cp_azure_vm_image_version
               - cp_azure_vm.imageExactVersion == cp_azure_vm_image_version
               - cp_azure_vm.osDiskName == cp_azure_os_disk_name
+              - >-
+                cp_azure_infrastructure_topology_selected == 'legacy-single-node' or
+                cp_azure_vm.osDiskId | lower ==
+                cp_azure_poc_os_disk_audit.disks[0].id | lower
               - cp_azure_vm.osDiskType == 'Linux'
               - cp_azure_vm.osDiskSizeGiB | int == cp_azure_os_disk_size_gb | int
               - cp_azure_vm.osDiskSku == cp_azure_os_disk_sku
@@ -666,10 +774,13 @@
               - --resource-group
               - "{{ cp_azure_resource_group }}"
               - --name
-              - "{{ cp_azure_os_disk_name }}"
+              - >-
+                {{ cp_azure_poc_os_disk_audit.disks[0].name
+                   if cp_azure_infrastructure_topology_selected == 'poc-three-node'
+                   else cp_azure_os_disk_name }}
               - --query
               - >-
-                {name:name,location:location,diskSizeGiB:diskSizeGB,sku:sku.name,
+                {id:id,name:name,location:location,diskSizeGiB:diskSizeGB,sku:sku.name,
                 managedBy:managedBy,securityType:securityProfile.securityType,
                 encryptionType:encryption.type,publicNetworkAccess:publicNetworkAccess,
                 networkAccessPolicy:networkAccessPolicy,provisioningState:provisioningState}
@@ -687,7 +798,15 @@
         - name: Require the exact private encrypted controller OS disk
           ansible.builtin.assert:
             that:
-              - cp_azure_disk.name == cp_azure_os_disk_name
+              - >-
+                cp_azure_disk.name ==
+                (cp_azure_poc_os_disk_audit.disks[0].name
+                 if cp_azure_infrastructure_topology_selected == 'poc-three-node'
+                 else cp_azure_os_disk_name)
+              - >-
+                cp_azure_infrastructure_topology_selected == 'legacy-single-node' or
+                cp_azure_disk.id | lower ==
+                cp_azure_poc_os_disk_audit.disks[0].id | lower
               - cp_azure_disk.location | lower == 'uaenorth'
               - cp_azure_disk.diskSizeGiB | int == cp_azure_os_disk_size_gb | int
               - cp_azure_disk.sku == cp_azure_os_disk_sku
@@ -1336,6 +1455,7 @@
                 imageVersion:storageProfile.imageReference.version,
                 imageExactVersion:storageProfile.imageReference.exactVersion,
                 osDiskName:storageProfile.osDisk.name,
+                osDiskId:storageProfile.osDisk.managedDisk.id,
                 osDiskType:storageProfile.osDisk.osType,
                 osDiskSizeGiB:storageProfile.osDisk.diskSizeGB,
                 osDiskSku:storageProfile.osDisk.managedDisk.storageAccountType,
@@ -1377,6 +1497,7 @@
               - vm.imageVersion == cp_azure_vm_image_version
               - vm.imageExactVersion == cp_azure_vm_image_version
               - vm.osDiskName == node.os_disk_name
+              - vm.osDiskId | lower == resolved_disk.id | lower
               - vm.osDiskType == 'Linux'
               - vm.osDiskSizeGiB | int == node.os_disk_size_gb | int
               - vm.osDiskSku == 'StandardSSD_LRS'
@@ -1405,6 +1526,10 @@
             expected_nic_id: >-
               /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
               }}/providers/Microsoft.Network/networkInterfaces/{{ item.item.nic_name }}
+            resolved_disk: >-
+              {{ cp_azure_poc_os_disk_audit.disks |
+                 selectattr('vmName', 'equalto', item.item.vm_name) |
+                 list | first }}
 
         - name: Read the exact reconciled POC ACME DNS authority contract
           ansible.builtin.command:
@@ -1525,10 +1650,13 @@
               - --resource-group
               - "{{ cp_azure_resource_group }}"
               - --name
-              - "{{ item.os_disk_name }}"
+              - >-
+                {{ (cp_azure_poc_os_disk_audit.disks |
+                    selectattr('vmName', 'equalto', item.vm_name) |
+                    map(attribute='name') | list | first) }}
               - --query
               - >-
-                {name:name,location:location,diskSizeGiB:diskSizeGB,sku:sku.name,
+                {id:id,name:name,location:location,diskSizeGiB:diskSizeGB,sku:sku.name,
                 managedBy:managedBy,securityType:securityProfile.securityType,
                 encryptionType:encryption.type,publicNetworkAccess:publicNetworkAccess,
                 networkAccessPolicy:networkAccessPolicy,
@@ -1547,7 +1675,8 @@
         - name: Require each exact private encrypted POC Edge OS disk
           ansible.builtin.assert:
             that:
-              - disk.name == node.os_disk_name
+              - disk.name == resolved_disk.name
+              - disk.id | lower == resolved_disk.id | lower
               - disk.location | lower == 'uaenorth'
               - disk.diskSizeGiB | int == node.os_disk_size_gb | int
               - disk.sku == 'StandardSSD_LRS'
@@ -1570,6 +1699,10 @@
             expected_vm_id: >-
               /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
               }}/providers/Microsoft.Compute/virtualMachines/{{ item.item.vm_name }}
+            resolved_disk: >-
+              {{ cp_azure_poc_os_disk_audit.disks |
+                 selectattr('vmName', 'equalto', item.item.vm_name) |
+                 list | first }}
 
         - name: Assemble the three implicit POC OS-disk lockdown records
           ansible.builtin.set_fact:
@@ -1586,9 +1719,8 @@
               - >-
                 cp_azure_poc_os_disk_lockdown_evidence |
                 map(attribute='name') | list | sort ==
-                ([cp_azure_os_disk_name] +
-                 (cp_azure_poc_edge_nodes |
-                  map(attribute='os_disk_name') | list)) | sort
+                (cp_azure_poc_os_disk_audit.disks |
+                 map(attribute='name') | list | sort)
               - >-
                 cp_azure_poc_os_disk_lockdown_evidence |
                 map(attribute='publicNetworkAccess') | unique | list ==
@@ -2269,6 +2401,32 @@
             fail_msg: >-
               Public DNS resolution from the runner differs from the exact
               static Azure public IP contract.
+
+        - name: Reaudit the exact POC OS-disk attachments after all qualification reads
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ playbook_dir }}/../../infra/azure-poc/lockdown_os_disks.py"
+              - --mode
+              - audit
+              - --expected-subscription-id
+              - "{{ cp_azure_subscription_id }}"
+          environment: *azure_cli_environment
+          register: cp_azure_poc_os_disk_final_audit_raw
+          changed_when: false
+          check_mode: false
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Prove the POC OS-disk identity did not race qualification
+          ansible.builtin.assert:
+            that:
+              - >-
+                cp_azure_poc_os_disk_final_audit_raw.stdout | from_json ==
+                cp_azure_poc_os_disk_audit
+            fail_msg: >-
+              A VM attachment, disk identity, ownership tag, or network lock
+              changed during infrastructure qualification.
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
         - name: Report sanitized Azure infrastructure qualification evidence
           ansible.builtin.debug:

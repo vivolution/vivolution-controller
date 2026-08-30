@@ -3,6 +3,9 @@
 
 Plan mode is the default and cannot mutate Azure. Apply mode requires the
 SHA-256 emitted by a fresh plan and an exact destructive confirmation phrase.
+The plan resolves each current OS-disk resource from its exact VM attachment,
+including bounded Azure reimage suffixes, and binds the stable locked inventory
+into that digest before the resource-group deletion can be authorized.
 """
 
 from __future__ import annotations

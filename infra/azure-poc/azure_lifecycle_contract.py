@@ -62,6 +62,12 @@ ACME_CHILD_ZONES = (
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
+VM_TO_OS_DISK_BASE = {
+    "viv-sbc-poc-cp1": "viv-sbc-poc-cp1-osdisk",
+    "viv-sbc-poc-sbc1": "viv-sbc-poc-sbc1-osdisk",
+    "viv-sbc-poc-sbc2": "viv-sbc-poc-sbc2-osdisk",
+}
+OS_DISK_REIMAGE_SUFFIX_RE = re.compile(r"^[0-9a-f]{32}(?:_[0-9a-f]{32})*$")
 
 
 class LifecycleError(RuntimeError):
@@ -115,6 +121,153 @@ def resource_id(subscription_id: str, resource_type: str, name: str) -> str:
         f"{resource_group_id(subscription_id, POC_RESOURCE_GROUP)}"
         f"/providers/{resource_type}/{name}"
     )
+
+
+def attached_os_disk_name_from_id(
+    disk_id: Any, subscription_id: str, vm_name: str
+) -> str:
+    prefix = resource_id(subscription_id, "Microsoft.Compute/disks", "")
+    if (
+        not isinstance(disk_id, str)
+        or not disk_id.lower().startswith(prefix.lower())
+        or len(disk_id) <= len(prefix)
+    ):
+        raise LifecycleError(f"VM {vm_name} OS-disk resource ID drifted")
+    disk_name = disk_id[len(prefix) :]
+    if "/" in disk_name or disk_id.lower() != resource_id(
+        subscription_id, "Microsoft.Compute/disks", disk_name
+    ).lower():
+        raise LifecycleError(f"VM {vm_name} OS-disk resource ID drifted")
+    return disk_name
+
+
+def allowed_attached_os_disk_name(disk_name: str, base_name: str) -> bool:
+    if disk_name == base_name:
+        return True
+    prefix = f"{base_name}_"
+    return disk_name.startswith(prefix) and OS_DISK_REIMAGE_SUFFIX_RE.fullmatch(
+        disk_name[len(prefix) :]
+    ) is not None
+
+
+def resolve_vm_os_disks(
+    subscription_id: str, *, runner: Runner
+) -> dict[str, dict[str, str]]:
+    """Resolve and validate the exact three current VM-to-OS-disk attachments."""
+
+    attachments: dict[str, dict[str, str]] = {}
+    for vm_name, base_name in sorted(VM_TO_OS_DISK_BASE.items()):
+        record = parse_json(
+            runner(
+                base_command(
+                    subscription_id,
+                    "vm",
+                    "show",
+                    "--resource-group",
+                    POC_RESOURCE_GROUP,
+                    "--name",
+                    vm_name,
+                    "--query",
+                    (
+                        "{id:id,name:name,provisioningState:provisioningState,"
+                        "osDiskId:storageProfile.osDisk.managedDisk.id,"
+                        "osDiskName:storageProfile.osDisk.name}"
+                    ),
+                )
+            ),
+            f"VM OS-disk attachment {vm_name}",
+        )
+        if not isinstance(record, dict):
+            raise LifecycleError(f"VM attachment {vm_name} is not an object")
+        expected_vm_id = resource_id(
+            subscription_id, "Microsoft.Compute/virtualMachines", vm_name
+        )
+        if record.get("name") != vm_name or not same_id(
+            record.get("id"), expected_vm_id
+        ):
+            raise LifecycleError(f"VM identity drifted for {vm_name}")
+        if record.get("provisioningState") != "Succeeded":
+            raise LifecycleError(f"VM {vm_name} provisioning did not succeed")
+        if record.get("osDiskName") != base_name:
+            raise LifecycleError(f"VM {vm_name} logical OS-disk name drifted")
+        disk_name = attached_os_disk_name_from_id(
+            record.get("osDiskId"), subscription_id, vm_name
+        )
+        if not allowed_attached_os_disk_name(disk_name, base_name):
+            raise LifecycleError(
+                f"VM {vm_name} OS disk is not its original or bounded "
+                "reimage-derived identity"
+            )
+        attachments[vm_name] = {
+            "baseName": base_name,
+            "diskId": resource_id(
+                subscription_id, "Microsoft.Compute/disks", disk_name
+            ),
+            "diskName": disk_name,
+            "vmId": expected_vm_id,
+            "vmName": vm_name,
+        }
+
+    names = [attachment["diskName"] for attachment in attachments.values()]
+    ids = [attachment["diskId"].lower() for attachment in attachments.values()]
+    if len(set(names)) != 3 or len(set(ids)) != 3:
+        raise LifecycleError("POC VMs do not have three distinct OS-disk attachments")
+    return attachments
+
+
+def read_os_disk_inventory(subscription_id: str, *, runner: Runner) -> Any:
+    return parse_json(
+        runner(
+            base_command(
+                subscription_id,
+                "disk",
+                "list",
+                "--resource-group",
+                POC_RESOURCE_GROUP,
+                "--query",
+                "[].{id:id,name:name,managedBy:managedBy}",
+            )
+        ),
+        "disk inventory",
+    )
+
+
+def validate_os_disk_inventory(
+    inventory: Any,
+    attachments: Mapping[str, Mapping[str, str]],
+) -> None:
+    if not isinstance(inventory, list) or len(inventory) != 3:
+        raise LifecycleError(
+            "resource group must contain exactly the three attached POC OS disks"
+        )
+
+    expected_by_name = {
+        attachment["diskName"]: attachment for attachment in attachments.values()
+    }
+    actual_names: set[str] = set()
+    for record in inventory:
+        if not isinstance(record, dict):
+            raise LifecycleError("disk inventory contains a non-object record")
+        name = record.get("name")
+        if not isinstance(name, str) or name in actual_names:
+            raise LifecycleError(
+                "disk inventory contains a duplicate or invalid identity"
+            )
+        actual_names.add(name)
+        attachment = expected_by_name.get(name)
+        if attachment is None:
+            raise LifecycleError(
+                "resource group contains an extra or unattached managed disk"
+            )
+        if not same_id(record.get("id"), attachment["diskId"]):
+            raise LifecycleError(f"disk inventory resource ID drifted for {name}")
+        if not same_id(record.get("managedBy"), attachment["vmId"]):
+            raise LifecycleError(f"disk {name} is not attached to its exact POC VM")
+
+    if actual_names != set(expected_by_name):
+        raise LifecycleError(
+            "resource group must contain exactly the three attached POC OS disks"
+        )
 
 
 def zone_id(subscription_id: str, name: str) -> str:
@@ -523,15 +676,117 @@ def expected_resource_specs() -> tuple[ResourceSpec, ...]:
     return tuple(specs)
 
 
-def validate_core_inventory(
+def _resolved_resource_specs(
+    attachments: Mapping[str, Mapping[str, str]],
+) -> tuple[ResourceSpec, ...]:
+    base_specs = expected_resource_specs()
+    disk_specs_by_base = {
+        spec.name: spec
+        for spec in base_specs
+        if spec.resource_type == "Microsoft.Compute/disks"
+    }
+    resolved = [
+        spec for spec in base_specs if spec.resource_type != "Microsoft.Compute/disks"
+    ]
+    for vm_name in sorted(attachments):
+        attachment = attachments[vm_name]
+        base_spec = disk_specs_by_base.get(attachment["baseName"])
+        if base_spec is None or base_spec.managed_by_vm != vm_name:
+            raise LifecycleError("resolved OS-disk ownership contract is inconsistent")
+        resolved.append(
+            ResourceSpec(
+                attachment["diskName"],
+                "Microsoft.Compute/disks",
+                base_spec.tags,
+                managed_by_vm=vm_name,
+            )
+        )
+    return tuple(resolved)
+
+
+def _validate_resolved_os_disk(
     subscription_id: str,
+    spec: ResourceSpec,
+    attachment: Mapping[str, str],
+    *,
+    runner: Runner,
+) -> dict[str, Any]:
+    record = parse_json(
+        runner(
+            base_command(
+                subscription_id,
+                "disk",
+                "show",
+                "--resource-group",
+                POC_RESOURCE_GROUP,
+                "--name",
+                spec.name,
+                "--query",
+                (
+                    "{id:id,name:name,location:location,managedBy:managedBy,tags:tags,"
+                    "securityType:securityProfile.securityType,"
+                    "encryptionType:encryption.type,"
+                    "publicNetworkAccess:publicNetworkAccess,"
+                    "networkAccessPolicy:networkAccessPolicy,"
+                    "provisioningState:provisioningState}"
+                ),
+            )
+        ),
+        f"managed OS disk {spec.name}",
+    )
+    if not isinstance(record, dict):
+        raise LifecycleError(f"managed OS disk {spec.name} is not an object")
+    expected = {
+        "encryptionType": "EncryptionAtRestWithPlatformKey",
+        "id": attachment["diskId"],
+        "location": LOCATION,
+        "managedBy": attachment["vmId"],
+        "name": spec.name,
+        "networkAccessPolicy": "DenyAll",
+        "provisioningState": "Succeeded",
+        "publicNetworkAccess": "Disabled",
+        "securityType": "TrustedLaunch",
+        "tags": dict(spec.tags),
+    }
+    for key in ("id", "managedBy"):
+        if not same_id(record.get(key), expected[key]):
+            raise LifecycleError(
+                f"managed OS disk {spec.name} {key} drifted from its exact VM attachment"
+            )
+    if str(record.get("location", "")).lower() != LOCATION:
+        raise LifecycleError(f"managed OS disk {spec.name} location drifted")
+    for key in (
+        "encryptionType",
+        "name",
+        "networkAccessPolicy",
+        "provisioningState",
+        "publicNetworkAccess",
+        "securityType",
+        "tags",
+    ):
+        if record.get(key) != expected[key]:
+            raise LifecycleError(
+                f"managed OS disk {spec.name} {key} drifted from its locked contract"
+            )
+    return {
+        "attachedResourceId": attachment["diskId"],
+        "encryptionType": expected["encryptionType"],
+        "logicalBaseName": attachment["baseName"],
+        "networkAccessPolicy": expected["networkAccessPolicy"],
+        "publicNetworkAccess": expected["publicNetworkAccess"],
+        "securityType": expected["securityType"],
+    }
+
+
+def _validate_core_inventory_snapshot(
+    subscription_id: str,
+    attachments: Mapping[str, Mapping[str, str]],
     *,
     runner: Runner,
 ) -> list[dict[str, Any]]:
     records = list_group_resources(subscription_id, runner=runner)
-    expected = {
-        (spec.resource_type.lower(), spec.name): spec for spec in expected_resource_specs()
-    }
+    specs = _resolved_resource_specs(attachments)
+    expected = {(spec.resource_type.lower(), spec.name): spec for spec in specs}
     actual: dict[tuple[str, str], dict[str, Any]] = {}
     allowed_budget_id = budget_id(subscription_id)
     budget_records = 0
@@ -551,9 +806,13 @@ def validate_core_inventory(
         raise LifecycleError("POC resource inventory is missing, extra, or renamed")
 
     evidence = []
+    attachments_by_disk = {
+        attachment["diskName"]: attachment for attachment in attachments.values()
+    }
     for key in sorted(expected):
         spec = expected[key]
         record = actual[key]
+        disk_contract = None
         expected_id = resource_id(subscription_id, spec.resource_type, spec.name)
         if (
             not same_id(record.get("id"), expected_id)
@@ -562,19 +821,50 @@ def validate_core_inventory(
         ):
             raise LifecycleError(f"identity/location/tags drifted for POC resource {spec.name}")
         if spec.managed_by_vm is not None:
-            expected_vm_id = resource_id(
-                subscription_id, "Microsoft.Compute/virtualMachines", spec.managed_by_vm
-            )
-            if not same_id(record.get("managedBy"), expected_vm_id):
+            attachment = attachments_by_disk.get(spec.name)
+            if attachment is None or attachment["vmName"] != spec.managed_by_vm:
+                raise LifecycleError(f"OS disk {spec.name} ownership could not be resolved")
+            if not same_id(record.get("managedBy"), attachment["vmId"]):
                 raise LifecycleError(f"OS disk {spec.name} is not attached to its exact VM")
-        evidence.append(
-            {
-                "id": expected_id,
-                "managedByVm": spec.managed_by_vm,
-                "tags": dict(spec.tags),
-            }
-        )
+            disk_contract = _validate_resolved_os_disk(
+                subscription_id, spec, attachment, runner=runner
+            )
+        evidence_record = {
+            "id": expected_id,
+            "managedByVm": spec.managed_by_vm,
+            "tags": dict(spec.tags),
+        }
+        if disk_contract is not None:
+            evidence_record["osDiskContract"] = disk_contract
+        evidence.append(evidence_record)
     return evidence
+
+
+def validate_core_inventory(
+    subscription_id: str,
+    *,
+    runner: Runner,
+) -> list[dict[str, Any]]:
+    attachments = resolve_vm_os_disks(subscription_id, runner=runner)
+    validate_os_disk_inventory(
+        read_os_disk_inventory(subscription_id, runner=runner), attachments
+    )
+    first = _validate_core_inventory_snapshot(
+        subscription_id, attachments, runner=runner
+    )
+
+    final_attachments = resolve_vm_os_disks(subscription_id, runner=runner)
+    if final_attachments != attachments:
+        raise LifecycleError("VM OS-disk attachments changed during lifecycle validation")
+    validate_os_disk_inventory(
+        read_os_disk_inventory(subscription_id, runner=runner), final_attachments
+    )
+    final = _validate_core_inventory_snapshot(
+        subscription_id, final_attachments, runner=runner
+    )
+    if final != first:
+        raise LifecycleError("POC resource inventory changed during lifecycle validation")
+    return final
 
 
 def validate_vms_deallocated(subscription_id: str, *, runner: Runner) -> list[str]:

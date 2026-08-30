@@ -28,8 +28,8 @@ post-compute template. Outbound access uses each VM's public IP.
 
 - `main.bicep` composes the network, Edge availability set, node-specific NSG policies, and three VMs.
 - `azure_lifecycle_contract.py` holds the exact subscription, tenant, resource,
-  tag, budget, DNS, and preservation-lock contract shared by the offline-tested
-  lifecycle guards.
+  tag, budget, DNS, preservation-lock, and VM-attached OS-disk identity contract
+  shared by the offline-tested lifecycle guards.
 - `predeploy_guard.py` is a strictly read-only admission gate for the empty,
   tagged, budgeted POC resource group and preserved existing CP1.
 - `lockdown_os_disks.py` is the fail-closed, idempotent post-create step that
@@ -181,6 +181,25 @@ snapshot. The helper then requires
 `provisioningState=Succeeded` plus the exact common/node ownership tags on all
 three. Do not treat the infrastructure as qualified between VM creation and
 this bounded remediation.
+
+The same helper has a strictly read-only audit mode used by infrastructure
+qualification. It resolves all three attachments twice, requires a stable
+three-disk resource-group inventory, reads every locked/tagged disk twice, and
+emits only sanitized identity and policy evidence:
+
+```bash
+python3 lockdown_os_disks.py \
+  --mode audit \
+  --expected-subscription-id '<approved-subscription-uuid>'
+```
+
+The qualification playbook binds the complete 17-resource inventory, each VM's
+`storageProfile.osDisk.managedDisk.id`, and each subsequent disk read to that
+audit, then repeats the audit after its disk checks. A reimage-derived resource
+name is therefore accepted only when the exact VM remains logically bound to
+its original disk base and the current attached ID has the bounded lowercase
+32-hex suffix shape. Extra, unattached, cross-owned, malformed, unlocked,
+retagged, or changing disks fail closed.
 
 This is a resource-group-scoped template. Resource-group creation, budget alerts, and deletion remain explicit subscription-level operator actions.
 
@@ -371,10 +390,14 @@ python3 teardown_core_poc.py \
 Plan mode is the default and is read-only. It requires the USD 100 budget,
 preserved-CP1 lock, complete DNS cleanup, no lock on the POC group, exactly 17
 tagged resources (VNet, Edge availability set, and five resources for each of
-CP1/SBC1/SBC2), exact OS-disk-to-VM attachment, and
+CP1/SBC1/SBC2), exact current OS-disk-to-VM attachment, disk network lockdown,
+Trusted Launch/platform encryption, and
 `PowerState/deallocated` for all three VMs. Review the single action and retain
-its `planSha256`; any missing, extra, renamed, retagged, reattached, or powered
-resource rejects the plan.
+its `planSha256`. Original disk resource names and the same bounded reimage
+suffix form are both supported. Attachment, full inventory, tags, and lock
+state are read twice; any missing, extra, arbitrary rename, cross-ownership,
+retag, unlock, mid-validation replacement, or powered resource rejects the
+plan.
 
 Apply only the immediately preceding plan:
 
