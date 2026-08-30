@@ -18,6 +18,7 @@ exec 9>"$acme_root/renew.lock"
 
 if [ -f "$certificate_source" ] && [ -f "$key_source" ]; then
     /usr/local/sbin/lego \
+        run \
         --accept-tos \
         --email '{{ edge_acme_email }}' \
         --dns azuredns \
@@ -25,17 +26,18 @@ if [ -f "$certificate_source" ] && [ -f "$key_source" ]; then
         --domains '{{ edge_acme_wildcard_fqdn }}' \
         --key-type '{{ edge_acme_certificate_key_type }}' \
         --path "$acme_root" \
-        renew --days 30
+        --renew-days 30 \
+        --no-random-sleep
 else
     /usr/local/sbin/lego \
+        run \
         --accept-tos \
         --email '{{ edge_acme_email }}' \
         --dns azuredns \
         --domains '{{ edge_acme_node_fqdn }}' \
         --domains '{{ edge_acme_wildcard_fqdn }}' \
         --key-type '{{ edge_acme_certificate_key_type }}' \
-        --path "$acme_root" \
-        run
+        --path "$acme_root"
 fi
 
 test -s "$certificate_source"

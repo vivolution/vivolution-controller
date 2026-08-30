@@ -197,6 +197,11 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
         self.assertIn("--dns azuredns", helper)
         self.assertIn("--domains '{{ edge_acme_wildcard_fqdn }}'", helper)
         self.assertIn("--key-type '{{ edge_acme_certificate_key_type }}'", helper)
+        self.assertEqual(helper.count("/usr/local/sbin/lego \\\n        run \\"), 2)
+        self.assertNotIn("/usr/local/sbin/lego \\\n        --accept-tos", helper)
+        self.assertNotIn("renew --days", helper)
+        self.assertIn("--renew-days 30", helper)
+        self.assertIn("--no-random-sleep", helper)
         self.assertIn("edge_acme_certificate_key_type: rsa2048", playbook)
         self.assertIn(
             "ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256",
