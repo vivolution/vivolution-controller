@@ -175,6 +175,16 @@ status. The build check accepts exactly `99`, requires empty standard error,
 and requires the first non-empty output line and sole version banner to be
 `SIPp v3.7.3-TLS-SCTP-PCAP-SHA256.`.
 
+Asterisk's writable library, run, and spool paths are exact bind mounts from
+root-provisioned `0700`, UID/GID `10001` directories below
+`/run/vivolution-voice-fixture/`. Debian mounts `/run` as ephemeral tmpfs with
+`nosuid,nodev,noexec`; readiness verifies those flags, ownership, modes, and
+non-symlink paths. A tmpfiles policy recreates them before services after a
+reboot. This preserves an ephemeral writable surface without relying on
+Podman-version-specific tmpfs ownership options or widening those private
+paths to mode `0777`. The container root remains read-only, non-root, and
+capability-free; only its conventional sticky `/tmp` remains mode `1777`.
+
 ## Readiness and calls
 
 On CP1:

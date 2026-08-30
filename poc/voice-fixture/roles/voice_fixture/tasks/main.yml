@@ -44,6 +44,7 @@
       - voice_fixture_sipp_rtp_end | int == 22063
       - voice_fixture_sipp_uas_rtp_port | int == 22000
       - voice_fixture_sipp_uac_rtp_port | int == 22032
+      - voice_fixture_runtime_root == '/run/vivolution-voice-fixture'
       - voice_fixture_asterisk_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061]
       - voice_fixture_asterisk_uac_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061, 16061]
       - voice_fixture_sipp_uas_tls_port | int not in [80, 443, 5432, 6432, 8000, 5061, 15061, 16061, 16062]
@@ -187,6 +188,26 @@
       owner: '10002'
       group: '10002'
       mode: '0750'
+    - path: "{{ voice_fixture_runtime_root }}"
+      owner: root
+      group: root
+      mode: '0750'
+    - path: "{{ voice_fixture_runtime_root }}/asterisk"
+      owner: '10001'
+      group: '10001'
+      mode: '0700'
+    - path: "{{ voice_fixture_runtime_root }}/asterisk/lib"
+      owner: '10001'
+      group: '10001'
+      mode: '0700'
+    - path: "{{ voice_fixture_runtime_root }}/asterisk/run"
+      owner: '10001'
+      group: '10001'
+      mode: '0700'
+    - path: "{{ voice_fixture_runtime_root }}/asterisk/spool"
+      owner: '10001'
+      group: '10001'
+      mode: '0700'
     - path: "{{ voice_fixture_results_root }}"
       owner: root
       group: root
@@ -195,6 +216,22 @@
       owner: root
       group: root
       mode: '0700'
+
+- name: Install reboot-safe protected fixture runtime directory policy
+  ansible.builtin.template:
+    src: vivolution-voice-fixture-tmpfiles.conf.j2
+    dest: /etc/tmpfiles.d/vivolution-voice-fixture.conf
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Reconcile protected fixture runtime directories through tmpfiles
+  ansible.builtin.command:
+    argv:
+      - systemd-tmpfiles
+      - --create
+      - /etc/tmpfiles.d/vivolution-voice-fixture.conf
+  changed_when: false
 
 - name: Install the pinned Asterisk build context
   ansible.builtin.copy:

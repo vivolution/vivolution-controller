@@ -14,11 +14,11 @@ User=10001:10001
 Volume={{ voice_fixture_config_root }}/asterisk:/etc/asterisk:ro
 Volume={{ voice_fixture_pki_root }}:/run/fixture-pki:ro
 Volume={{ voice_fixture_state_root }}/asterisk-log:/var/log/asterisk:rw
+Volume={{ voice_fixture_runtime_root }}/asterisk/lib:/var/lib/asterisk:rw
+Volume={{ voice_fixture_runtime_root }}/asterisk/run:/var/run/asterisk:rw
+Volume={{ voice_fixture_runtime_root }}/asterisk/spool:/var/spool/asterisk:rw
 ReadOnly=true
 Tmpfs=/tmp:rw,size=16m,mode=1777
-Tmpfs=/var/lib/asterisk:rw,size=16m,mode=0750,uid=10001,gid=10001
-Tmpfs=/var/run/asterisk:rw,size=4m,mode=0750,uid=10001,gid=10001
-Tmpfs=/var/spool/asterisk:rw,size=8m,mode=0750,uid=10001,gid=10001
 DropCapability=all
 NoNewPrivileges=true
 Exec=-f -C /etc/asterisk/asterisk.conf

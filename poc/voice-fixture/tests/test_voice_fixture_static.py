@@ -29,6 +29,7 @@ class VoiceFixtureStaticTests(unittest.TestCase):
             "roles/voice_fixture/files/sipp/scenarios/teams-uas.xml",
             "roles/voice_fixture/templates/vivolution-voice-fixture-asterisk.container.j2",
             "roles/voice_fixture/templates/vivolution-voice-fixture-sipp.container.j2",
+            "roles/voice_fixture/templates/vivolution-voice-fixture-tmpfiles.conf.j2",
             "roles/voice_fixture/templates/vivolution-voice-fixture-readiness.j2",
             "roles/voice_fixture/templates/vivolution-voice-fixture-test.j2",
             "roles/voice_fixture_teardown/tasks/main.yml",
@@ -76,6 +77,48 @@ class VoiceFixtureStaticTests(unittest.TestCase):
             self.assertIn("SocketBindDeny=any", quadlet)
             self.assertIn("Pull=never", quadlet)
             self.assertRegex(quadlet, r"Image=\{\{ voice_fixture_\w+_image_id \}\}")
+
+        asterisk = self.read(
+            "roles/voice_fixture/templates/vivolution-voice-fixture-asterisk.container.j2"
+        )
+        for directory in ("lib", "run", "spool"):
+            self.assertIn(
+                "Volume={{ voice_fixture_runtime_root }}/asterisk/"
+                f"{directory}:/var/{directory if directory != 'run' else 'run'}/asterisk:rw",
+                asterisk,
+            )
+        self.assertNotRegex(asterisk, r"Tmpfs=/var/(?:lib|run|spool)/asterisk")
+        self.assertNotIn("uid=10001", asterisk)
+        self.assertNotIn("gid=10001", asterisk)
+
+    def test_asterisk_writable_paths_use_protected_ephemeral_bind_sources(self) -> None:
+        defaults = self.read("roles/voice_fixture/defaults/main.yml")
+        tasks = self.read("roles/voice_fixture/tasks/main.yml")
+        tmpfiles = self.read(
+            "roles/voice_fixture/templates/vivolution-voice-fixture-tmpfiles.conf.j2"
+        )
+        readiness = self.read(
+            "roles/voice_fixture/templates/vivolution-voice-fixture-readiness.j2"
+        )
+        teardown = self.read("roles/voice_fixture_teardown/tasks/main.yml")
+        self.assertIn("voice_fixture_runtime_root: /run/vivolution-voice-fixture", defaults)
+        self.assertEqual(tasks.count("owner: '10001'"), 5)
+        self.assertIn(
+            "voice_fixture_runtime_root == '/run/vivolution-voice-fixture'",
+            tasks,
+        )
+        for directory in ("asterisk", "asterisk/lib", "asterisk/run", "asterisk/spool"):
+            self.assertIn(f"{{{{ voice_fixture_runtime_root }}}}/{directory}", tasks)
+            self.assertIn(f"{{{{ voice_fixture_runtime_root }}}}/{directory}", tmpfiles)
+        self.assertIn("mode: '0700'", tasks)
+        self.assertIn("systemd-tmpfiles", tasks)
+        self.assertIn("10001 10001", tmpfiles)
+        self.assertIn("stat --format='%u:%g:%a'", readiness)
+        self.assertIn("'10001:10001:700'", readiness)
+        for option in ("nosuid", "nodev", "noexec"):
+            self.assertIn(option, readiness)
+        self.assertIn("/etc/tmpfiles.d/vivolution-voice-fixture.conf", teardown)
+        self.assertIn('"{{ voice_fixture_runtime_root }}"', teardown)
 
     def test_asterisk_has_no_carrier_registration_or_command_execution(self) -> None:
         configs = "\n".join(

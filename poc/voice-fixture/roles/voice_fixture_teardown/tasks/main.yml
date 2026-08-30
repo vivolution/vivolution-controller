@@ -62,6 +62,8 @@
     - "{{ voice_fixture_config_root }}/asterisk-image-id"
     - "{{ voice_fixture_config_root }}/sipp-image-id"
     - "{{ voice_fixture_config_root }}/firewall-contract"
+    - /etc/tmpfiles.d/vivolution-voice-fixture.conf
+    - "{{ voice_fixture_runtime_root }}"
 
 - name: Remove immutable fixture image tags when explicitly requested
   ansible.builtin.command:

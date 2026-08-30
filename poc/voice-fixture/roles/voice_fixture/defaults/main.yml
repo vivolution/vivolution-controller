@@ -30,6 +30,7 @@ voice_fixture_root: /opt/vivolution/voice-fixture
 voice_fixture_config_root: /etc/vivolution/voice-fixture
 voice_fixture_state_root: /var/lib/vivolution/voice-fixture
 voice_fixture_results_root: /var/lib/vivolution/voice-fixture/results
+voice_fixture_runtime_root: /run/vivolution-voice-fixture
 voice_fixture_pki_root: /etc/vivolution/voice-fixture/pki-current
 voice_fixture_pki_generations_root: /etc/vivolution/voice-fixture/pki-generations
 voice_fixture_pki_staging_root: /etc/vivolution/voice-fixture/pki-staging

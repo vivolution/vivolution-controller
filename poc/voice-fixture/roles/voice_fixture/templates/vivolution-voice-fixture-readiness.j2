@@ -10,8 +10,33 @@ fi
 controller_ip={{ voice_fixture_controller_ipv4 | quote }}
 edge_subnet={{ voice_fixture_edge_subnet_ipv4 | quote }}
 pki_root={{ voice_fixture_pki_root | quote }}
+runtime_root={{ voice_fixture_runtime_root | quote }}
 asterisk_image_file={{ (voice_fixture_config_root + '/asterisk-image-id') | quote }}
 sipp_image_file={{ (voice_fixture_config_root + '/sipp-image-id') | quote }}
+
+[[ -d $runtime_root && ! -L $runtime_root ]]
+[[ $(stat --format='%u:%g:%a' -- "$runtime_root") == '0:0:750' ]]
+for runtime_directory in \
+    "$runtime_root/asterisk" \
+    "$runtime_root/asterisk/lib" \
+    "$runtime_root/asterisk/run" \
+    "$runtime_root/asterisk/spool"; do
+    [[ -d $runtime_directory && ! -L $runtime_directory ]]
+    [[ $(stat --format='%u:%g:%a' -- "$runtime_directory") == '10001:10001:700' ]]
+done
+read -r runtime_fstype runtime_options < <(
+    findmnt --noheadings --target "$runtime_root" --output FSTYPE,OPTIONS
+)
+[[ $runtime_fstype == tmpfs ]]
+for required_mount_option in nosuid nodev noexec; do
+    case ",$runtime_options," in
+        *",$required_mount_option,"*) ;;
+        *)
+            printf 'fixture runtime filesystem lacks %s\n' "$required_mount_option" >&2
+            exit 3
+            ;;
+    esac
+done
 
 units=(vivolution-voice-fixture-asterisk.service vivolution-voice-fixture-sipp.service)
 for unit in "${units[@]}"; do
