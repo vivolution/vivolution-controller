@@ -169,7 +169,11 @@ namespace; it is not used by either runtime container. Podman 5 reports a
 locally built image's `.Id` as 64 lowercase hexadecimal characters, while
 some supported versions include the `sha256:` prefix. The installer rejects
 every other representation and records the accepted value canonically as
-`sha256:<64-hex>` before using it in Quadlet or evidence.
+`sha256:<64-hex>` before using it in Quadlet or evidence. SIPp documents exit
+status `99` as a normal exit without calls, and its `-v` handler uses that
+status. The build check accepts exactly `99`, requires empty standard error,
+and requires the first non-empty output line and sole version banner to be
+`SIPp v3.7.3-TLS-SCTP-PCAP-SHA256.`.
 
 ## Readiness and calls
 

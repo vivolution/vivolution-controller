@@ -256,6 +256,20 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertIn("sha256:{{ voice_fixture_asterisk_image_id_raw", tasks)
         self.assertIn("sha256:{{ voice_fixture_sipp_image_id_raw", tasks)
 
+    def test_sipp_version_probe_accepts_only_its_documented_no_call_exit(self) -> None:
+        tasks = self.read("roles/voice_fixture/tasks/main.yml")
+        expected = "SIPp v3.7.3-TLS-SCTP-PCAP-SHA256."
+        self.assertIn("failed_when: voice_fixture_sipp_version_output.rc != 99", tasks)
+        self.assertIn("voice_fixture_sipp_version_output.rc == 99", tasks)
+        self.assertIn("voice_fixture_sipp_version_output.stderr | trim == ''", tasks)
+        self.assertIn("map('trim') | reject('equalto', '') | list", tasks)
+        self.assertEqual(tasks.count(expected), 2)
+        self.assertIn("select('match', '^SIPp v') | list", tasks)
+        self.assertNotIn(
+            "'v3.7.3' in (voice_fixture_sipp_version_output.stdout",
+            tasks,
+        )
+
     def test_install_is_fail_closed_and_does_not_use_shell_module(self) -> None:
         tasks = self.read("roles/voice_fixture/tasks/main.yml")
         self.assertIn("NO_PSTN_SYNTHETIC_ONLY", tasks)

@@ -1032,12 +1032,29 @@
       - -v
   register: voice_fixture_sipp_version_output
   changed_when: false
+  # SIPp documents 99 as its normal exit without calls and its -v handler
+  # deliberately uses that path. Any other status is semantic drift.
+  failed_when: voice_fixture_sipp_version_output.rc != 99
+
+- name: Select significant SIPp version output lines
+  ansible.builtin.set_fact:
+    voice_fixture_sipp_version_lines: >-
+      {{ voice_fixture_sipp_version_output.stdout_lines |
+         map('trim') | reject('equalto', '') | list }}
 
 - name: Require the declared runtime component versions
   ansible.builtin.assert:
     that:
       - voice_fixture_asterisk_version in (voice_fixture_asterisk_version_output.stdout + voice_fixture_asterisk_version_output.stderr)
-      - "'v3.7.3' in (voice_fixture_sipp_version_output.stdout + voice_fixture_sipp_version_output.stderr)"
+      - voice_fixture_sipp_version_output.rc == 99
+      - voice_fixture_sipp_version_output.stderr | trim == ''
+      - >-
+        voice_fixture_sipp_version_lines | first | default('') ==
+        'SIPp v3.7.3-TLS-SCTP-PCAP-SHA256.'
+      - >-
+        voice_fixture_sipp_version_lines |
+        select('match', '^SIPp v') | list ==
+        ['SIPp v3.7.3-TLS-SCTP-PCAP-SHA256.']
     fail_msg: A built fixture component does not report its pinned version.
 
 - name: Record immutable fixture image IDs
