@@ -984,17 +984,24 @@
   register: voice_fixture_image_ids
   changed_when: false
 
-- name: Remember immutable fixture image IDs
+- name: Remember raw immutable fixture image IDs
   ansible.builtin.set_fact:
-    voice_fixture_asterisk_image_id: "{{ voice_fixture_image_ids.results[0].stdout | trim }}"
-    voice_fixture_sipp_image_id: "{{ voice_fixture_image_ids.results[1].stdout | trim }}"
+    voice_fixture_asterisk_image_id_raw: "{{ voice_fixture_image_ids.results[0].stdout | trim }}"
+    voice_fixture_sipp_image_id_raw: "{{ voice_fixture_image_ids.results[1].stdout | trim }}"
 
-- name: Require content-addressed fixture images
+- name: Require exact Podman SHA-256 image ID representations
   ansible.builtin.assert:
     that:
-      - voice_fixture_asterisk_image_id is regex('^sha256:[0-9a-f]{64}$')
-      - voice_fixture_sipp_image_id is regex('^sha256:[0-9a-f]{64}$')
+      - voice_fixture_asterisk_image_id_raw is match('^(sha256:)?[0-9a-f]{64}$')
+      - voice_fixture_sipp_image_id_raw is match('^(sha256:)?[0-9a-f]{64}$')
     fail_msg: A fixture image did not resolve to an immutable local content ID.
+
+- name: Remember canonical immutable fixture image IDs
+  ansible.builtin.set_fact:
+    voice_fixture_asterisk_image_id: >-
+      sha256:{{ voice_fixture_asterisk_image_id_raw | regex_replace('^sha256:', '') }}
+    voice_fixture_sipp_image_id: >-
+      sha256:{{ voice_fixture_sipp_image_id_raw | regex_replace('^sha256:', '') }}
 
 - name: Verify the built Asterisk version
   ansible.builtin.command:

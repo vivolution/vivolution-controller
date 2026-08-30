@@ -165,7 +165,11 @@ Internet. The two one-time build commands use an IPv4-only `slirp4netns`
 userspace network with host-loopback access disabled. This gives their pinned
 package/source fetches DNS and HTTPS without weakening the controller's
 default-drop forwarding chain or giving build steps the host network
-namespace; it is not used by either runtime container.
+namespace; it is not used by either runtime container. Podman 5 reports a
+locally built image's `.Id` as 64 lowercase hexadecimal characters, while
+some supported versions include the `sha256:` prefix. The installer rejects
+every other representation and records the accepted value canonically as
+`sha256:<64-hex>` before using it in Quadlet or evidence.
 
 ## Readiness and calls
 

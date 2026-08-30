@@ -245,6 +245,17 @@ class VoiceFixtureStaticTests(unittest.TestCase):
             self.assertNotIn("--network=host", block)
         self.assertIn("--network=none", tasks)
 
+    def test_podman_image_ids_are_strictly_normalized(self) -> None:
+        tasks = self.read("roles/voice_fixture/tasks/main.yml")
+        self.assertIn("Remember raw immutable fixture image IDs", tasks)
+        self.assertEqual(tasks.count("is match('^(sha256:)?[0-9a-f]{64}$')"), 2)
+        self.assertIn("voice_fixture_asterisk_image_id_raw | regex_replace", tasks)
+        self.assertIn("voice_fixture_sipp_image_id_raw | regex_replace", tasks)
+        self.assertEqual(tasks.count("regex_replace('^sha256:', '')"), 2)
+        self.assertIn("Remember canonical immutable fixture image IDs", tasks)
+        self.assertIn("sha256:{{ voice_fixture_asterisk_image_id_raw", tasks)
+        self.assertIn("sha256:{{ voice_fixture_sipp_image_id_raw", tasks)
+
     def test_install_is_fail_closed_and_does_not_use_shell_module(self) -> None:
         tasks = self.read("roles/voice_fixture/tasks/main.yml")
         self.assertIn("NO_PSTN_SYNTHETIC_ONLY", tasks)
