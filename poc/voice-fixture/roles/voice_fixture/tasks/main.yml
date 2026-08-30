@@ -11,11 +11,11 @@
 - name: Require the fixed Debian 13 AMD64 CP1 identity
   ansible.builtin.assert:
     that:
-      - ansible_distribution == 'Debian'
-      - ansible_distribution_major_version == '13'
-      - ansible_architecture == 'x86_64'
-      - ansible_service_mgr == 'systemd'
-      - voice_fixture_controller_ipv4 in ansible_all_ipv4_addresses
+      - ansible_facts['distribution'] == 'Debian'
+      - ansible_facts['distribution_major_version'] == '13'
+      - ansible_facts['architecture'] == 'x86_64'
+      - ansible_facts['service_mgr'] == 'systemd'
+      - voice_fixture_controller_ipv4 in ansible_facts['all_ipv4_addresses']
     fail_msg: >-
       The synthetic fixture is restricted to Debian 13 AMD64 CP1 at its fixed
       private address. It must not be redirected to a public or unknown host.
