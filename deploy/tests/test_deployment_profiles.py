@@ -125,6 +125,15 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("azure-infrastructure-after.log", cpctl)
         self.assertIn("azure_infrastructure=passed", cpctl)
 
+    def test_azure_single_preflight_binds_hostname_to_topology(self) -> None:
+        preflight = (
+            PROJECT_ROOT / "deploy" / "roles" / "preflight" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("cp_expected_hostname == 'controller'", preflight)
+        self.assertIn("cp_expected_hostname == 'viv-sbc-poc-cp1'", preflight)
+        self.assertIn("'legacy-single-node'", preflight)
+        self.assertIn("'poc-three-node'", preflight)
+
     def test_host_disables_llmnr_without_installing_resolved(self) -> None:
         policy = (
             PROJECT_ROOT

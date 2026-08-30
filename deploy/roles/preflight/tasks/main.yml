@@ -149,7 +149,11 @@
       - cp_azure_public_ip is defined
       - cp_ingress_external_connect_address is defined
       - cp_ingress_external_connect_address == cp_azure_public_ip
-      - cp_expected_hostname == 'controller'
+      - >-
+        (cp_azure_infrastructure_topology | default('legacy-single-node')) ==
+        'legacy-single-node' and cp_expected_hostname == 'controller' or
+        (cp_azure_infrastructure_topology | default('legacy-single-node')) ==
+        'poc-three-node' and cp_expected_hostname == 'viv-sbc-poc-cp1'
       - not (cp_ingress_local_tls | bool)
       - cp_ingress_https_port | int == 443
       - cp_resource_host_https_port is defined
