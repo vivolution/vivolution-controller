@@ -105,6 +105,26 @@
         fail_msg: Direct Routing authority contains a synthetic or unexpected secret digest.
       when: edge_runtime_profile == 'DIRECT_ROUTING'
 
+    - name: Inspect the shared Edge state traversal root before creating candidate paths
+      ansible.builtin.stat:
+        path: /var/lib/vivolution-edge
+        follow: false
+      register: edge_activation_state_traversal_root
+
+    - name: Require traversal-only access before any activation debris can be created
+      ansible.builtin.assert:
+        that:
+          - edge_activation_state_traversal_root.stat.exists
+          - edge_activation_state_traversal_root.stat.isdir | default(false)
+          - not (edge_activation_state_traversal_root.stat.islnk | default(false))
+          - edge_activation_state_traversal_root.stat.pw_name == 'root'
+          - edge_activation_state_traversal_root.stat.gr_name == 'root'
+          - edge_activation_state_traversal_root.stat.mode == '0751'
+        fail_msg: >-
+          Activation requires the root-owned traversal-only Edge state root so
+          the unprivileged Agent can reach only its separately protected state
+          and candidate workspace leaves.
+
     - name: Define the canonical candidate slug and fixed remote paths
       ansible.builtin.set_fact:
         edge_activation_candidate_slug: >-

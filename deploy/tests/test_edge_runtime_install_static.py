@@ -124,8 +124,13 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
 
     def test_unprivileged_agent_state_and_fixed_root_directories(self) -> None:
         tasks = self.read("roles/edge_runtime_install/tasks/main.yml")
+        verify = self.read("roles/edge_verify/tasks/main.yml")
+        activation = self.read("playbooks/activate-edge.yml")
         self.assertIn("name: vivolution-edge-agent", tasks)
         self.assertIn("shell: /usr/sbin/nologin", tasks)
+        self.assertIn("Allow traversal only to independently protected Edge state leaves", tasks)
+        self.assertIn("path: /var/lib/vivolution-edge\n    state: directory", tasks)
+        self.assertIn("mode: '0751'", tasks)
         self.assertIn("/var/lib/vivolution-edge/agent-state/tenant", tasks)
         self.assertIn("owner: vivolution-edge-agent", tasks)
         self.assertIn("/var/lib/vivolution-edge/runtime-inbox", tasks)
@@ -133,6 +138,20 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
         self.assertIn("/var/lib/vivolution-edge/activation-evidence", tasks)
         self.assertIn("group: vivolution-edge-agent\n      mode: '0750'", tasks)
         self.assertGreaterEqual(tasks.count("mode: '0700'"), 3)
+        self.assertIn("Inspect the shared Edge state traversal root", verify)
+        self.assertIn("edge_verify_state_traversal_root.stat.mode == '0751'", verify)
+        self.assertIn(
+            "Inspect the shared Edge state traversal root before creating candidate paths",
+            activation,
+        )
+        self.assertIn(
+            "edge_activation_state_traversal_root.stat.mode == '0751'",
+            activation,
+        )
+        self.assertLess(
+            activation.index("Inspect the shared Edge state traversal root before creating candidate paths"),
+            activation.index("Create the isolated unprivileged candidate workspace"),
+        )
 
     def test_node_facts_and_runtime_authority_are_exact_and_separate(self) -> None:
         facts = self.read("roles/edge_runtime_install/templates/node-facts.json.j2")

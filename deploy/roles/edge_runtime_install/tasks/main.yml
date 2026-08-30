@@ -223,6 +223,14 @@
     password_lock: true
     state: present
 
+- name: Allow traversal only to independently protected Edge state leaves
+  ansible.builtin.file:
+    path: /var/lib/vivolution-edge
+    state: directory
+    owner: root
+    group: root
+    mode: '0751'
+
 - name: Create fixed runtime, inbox, state, and evidence directories
   ansible.builtin.file:
     path: "{{ item.path }}"

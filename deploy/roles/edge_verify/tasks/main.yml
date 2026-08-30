@@ -7,6 +7,26 @@
       - ansible_facts['architecture'] == 'x86_64'
     fail_msg: Edge platform identity drifted from Debian 13 AMD64.
 
+- name: Inspect the shared Edge state traversal root
+  ansible.builtin.stat:
+    path: /var/lib/vivolution-edge
+    follow: false
+  register: edge_verify_state_traversal_root
+
+- name: Require traversal-only access to independently protected Edge state leaves
+  ansible.builtin.assert:
+    that:
+      - edge_verify_state_traversal_root.stat.exists
+      - edge_verify_state_traversal_root.stat.isdir | default(false)
+      - not (edge_verify_state_traversal_root.stat.islnk | default(false))
+      - edge_verify_state_traversal_root.stat.pw_name == 'root'
+      - edge_verify_state_traversal_root.stat.gr_name == 'root'
+      - edge_verify_state_traversal_root.stat.mode == '0751'
+    fail_msg: >-
+      The shared Edge state root must permit traversal without directory
+      listing so the unprivileged Agent and data-plane services can reach only
+      their separately protected leaves.
+
 - name: Inspect exact installed edge package metadata
   ansible.builtin.command:
     argv:
