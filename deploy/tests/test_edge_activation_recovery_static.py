@@ -112,7 +112,10 @@ print(environment.from_string(expression).render(**variables).strip())
         method = core[core.index("    def health(") : core.index("    def rollback(")]
         self.assertLess(method.index("with self._lock()"), method.index("self._initialize()"))
         self.assertLess(method.index("self._read_journal()"), method.index("self._initialize()"))
-        self.assertLess(method.index("self._read_journal()"), method.index("self._baseline_health()"))
+        self.assertLess(
+            method.index("self._read_journal()"),
+            method.index("self._baseline_health(state.active)"),
+        )
         self.assertIn("transaction journal exists", method)
         self.assertIn('"kind": "EdgeRuntimeHealth"', method)
         self.assertIn('"active": state.active.record()', method)

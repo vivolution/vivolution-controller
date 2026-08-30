@@ -415,6 +415,8 @@ class FakeRunner(CommandRunner):
         self.fail_offline_parse_once = False
         self.fail_start_opensips_once = False
         self.crash_checkpoint: str | None = None
+        self.runtime_layout: RuntimeLayout | None = None
+        self.socket_inventory_override: str | None = None
 
     def run(self, argv, *, timeout=30):
         command = tuple(argv)
@@ -435,12 +437,23 @@ class FakeRunner(CommandRunner):
         if command[:2] == ("/usr/bin/systemctl", "is-active"):
             return CommandResult(0, "active\n")
         if command == ("/usr/bin/ss", "-H", "-lntup"):
+            if self.socket_inventory_override is not None:
+                return CommandResult(0, self.socket_inventory_override)
+            active = None
+            if self.runtime_layout is not None and self.runtime_layout.active_link.is_symlink():
+                active = os.readlink(self.runtime_layout.active_link)
+            if active == "bootstrap":
+                voice_listener = "udp UNCONN 0 0 127.0.0.1:5060 0.0.0.0:*\n"
+            else:
+                voice_listener = (
+                    "tcp LISTEN 0 128 10.20.2.4:5061 0.0.0.0:*\n"
+                    "tcp LISTEN 0 128 10.20.2.4:15061 0.0.0.0:*\n"
+                )
             return CommandResult(
                 0,
-                "tcp LISTEN 0 128 10.20.2.4:5061 0.0.0.0:*\n"
-                "tcp LISTEN 0 128 10.20.2.4:15061 0.0.0.0:*\n"
-                "udp UNCONN 0 0 127.0.0.1:2223 0.0.0.0:*\n"
-                "tcp LISTEN 0 128 127.0.0.1:2224 0.0.0.0:*\n",
+                voice_listener
+                + "udp UNCONN 0 0 127.0.0.1:2223 0.0.0.0:*\n"
+                + "tcp LISTEN 0 128 127.0.0.1:2224 0.0.0.0:*\n",
             )
         if command[:5] == ("/usr/sbin/nft", "list", "table", "inet", "vivolution_edge_filter"):
             return CommandResult(
@@ -564,6 +577,7 @@ class RuntimeHarness:
         self, runner: FakeRunner | None = None, *, monotonic_clock=None
     ) -> tuple[RuntimeManager, FakeRunner]:
         runner = runner or FakeRunner()
+        runner.runtime_layout = self.layout
         keywords = {"clock": lambda: NOW}
         if monotonic_clock is not None:
             keywords["monotonic_clock"] = monotonic_clock
@@ -1094,6 +1108,8 @@ class RuntimeTests(unittest.TestCase):
         evidence = caught.exception.evidence
         self.assertEqual(evidence["status"], "RUNTIME_APPLY_FAILED_ROLLED_BACK")
         self.assertEqual(evidence["agentAction"], "ABORT_PENDING")
+        self.assertEqual(evidence["rollback"]["status"], "HEALTHY")
+        self.assertIn("start OpenSIPS failed", evidence["failure"])
         self.assertEqual(os.readlink(self.harness.layout.active_link), "bootstrap")
         state = json.loads(self.harness.layout.state_file.read_bytes())
         self.assertEqual(state["highestSeenSequence"], self.harness.sequence)
@@ -1174,6 +1190,38 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(os.readlink(self.harness.layout.active_link), "bootstrap")
         self.assertFalse(self.harness.layout.journal_file.exists())
 
+    def test_staged_journal_recovery_validates_bootstrap_prior(self) -> None:
+        class StopCrashRunner(FakeRunner):
+            def __init__(self) -> None:
+                super().__init__()
+                self.crash_once = True
+
+            def run(self, argv, *, timeout=30):
+                command = tuple(argv)
+                if (
+                    self.crash_once
+                    and command
+                    == ("/usr/bin/systemctl", "stop", "opensips.service")
+                ):
+                    self.crash_once = False
+                    raise InjectedCrash("first-service-stop")
+                return super().run(argv, timeout=timeout)
+
+        manager, _ = self.harness.manager(StopCrashRunner())
+        with self.assertRaises(InjectedCrash):
+            manager.activate(self.harness.sequence, self.harness.digest)
+        journal = json.loads(self.harness.layout.journal_file.read_bytes())
+        self.assertEqual(journal["phase"], "STAGED")
+        self.assertEqual(os.readlink(self.harness.layout.active_link), "bootstrap")
+
+        recovery, _ = self.harness.manager(FakeRunner())
+        evidence = recovery.recover()
+        self.assertEqual(evidence["status"], "CRASH_RECOVERED_TO_PRIOR_LKG")
+        state = json.loads(self.harness.layout.state_file.read_bytes())
+        self.assertEqual(state["active"]["kind"], "BOOTSTRAP")
+        self.assertEqual(os.readlink(self.harness.layout.active_link), "bootstrap")
+        self.assertFalse(self.harness.layout.journal_file.exists())
+
     def test_health_reports_exact_protected_active_identity_and_baseline_gates(self) -> None:
         manager, _ = self.harness.manager()
         result = manager.health()
@@ -1207,6 +1255,83 @@ class RuntimeTests(unittest.TestCase):
                 "rtpengine-control-loopback",
             },
         )
+
+    def test_bootstrap_health_rejects_candidate_signaling_listeners(self) -> None:
+        runner = FakeRunner()
+        runner.socket_inventory_override = (
+            "udp UNCONN 0 0 127.0.0.1:5060 0.0.0.0:*\n"
+            "tcp LISTEN 0 128 10.20.2.4:5061 0.0.0.0:*\n"
+            "tcp LISTEN 0 128 10.20.2.4:15061 0.0.0.0:*\n"
+            "udp UNCONN 0 0 127.0.0.1:2223 0.0.0.0:*\n"
+            "tcp LISTEN 0 128 127.0.0.1:2224 0.0.0.0:*\n"
+        )
+        manager, _ = self.harness.manager(runner)
+        with self.assertRaisesRegex(
+            RuntimeApplyError,
+            "managed listener inventory is not exact for the BOOTSTRAP release",
+        ):
+            manager.health()
+
+    def test_bootstrap_health_rejects_control_listener_on_wrong_address(self) -> None:
+        runner = FakeRunner()
+        runner.socket_inventory_override = (
+            "udp UNCONN 0 0 127.0.0.1:5060 0.0.0.0:*\n"
+            "udp UNCONN 0 0 10.20.2.4:2223 0.0.0.0:*\n"
+            "tcp LISTEN 0 128 127.0.0.1:2224 0.0.0.0:*\n"
+        )
+        manager, _ = self.harness.manager(runner)
+        with self.assertRaisesRegex(
+            RuntimeApplyError,
+            "managed listener inventory is not exact for the BOOTSTRAP release",
+        ):
+            manager.health()
+
+    def test_bootstrap_health_rejects_wrong_protocol_wildcard_and_duplicate(self) -> None:
+        exact_controls = (
+            "udp UNCONN 0 0 127.0.0.1:2223 0.0.0.0:*\n"
+            "tcp LISTEN 0 128 127.0.0.1:2224 0.0.0.0:*\n"
+        )
+        cases = {
+            "wrong-protocol": (
+                "tcp LISTEN 0 128 127.0.0.1:5060 0.0.0.0:*\n"
+                + exact_controls
+            ),
+            "wildcard": (
+                "udp UNCONN 0 0 0.0.0.0:5060 0.0.0.0:*\n"
+                + exact_controls
+            ),
+            "duplicate": (
+                "udp UNCONN 0 0 127.0.0.1:5060 0.0.0.0:*\n"
+                "udp UNCONN 0 0 127.0.0.1:5060 0.0.0.0:*\n"
+                + exact_controls
+            ),
+        }
+        for name, inventory in cases.items():
+            with self.subTest(name=name):
+                runner = FakeRunner()
+                runner.socket_inventory_override = inventory
+                manager, _ = self.harness.manager(runner)
+                with self.assertRaisesRegex(
+                    RuntimeApplyError,
+                    "managed listener inventory is not exact for the BOOTSTRAP release",
+                ):
+                    manager.health()
+
+    def test_candidate_health_requires_candidate_signaling_listeners(self) -> None:
+        runner = FakeRunner()
+        runner.socket_inventory_override = (
+            "udp UNCONN 0 0 127.0.0.1:5060 0.0.0.0:*\n"
+            "udp UNCONN 0 0 127.0.0.1:2223 0.0.0.0:*\n"
+            "tcp LISTEN 0 128 127.0.0.1:2224 0.0.0.0:*\n"
+        )
+        manager, _ = self.harness.manager(runner)
+        with self.assertRaises(ApplyFailed) as caught:
+            manager.activate(self.harness.sequence, self.harness.digest)
+        self.assertIn(
+            "managed listener inventory is not exact for the CANDIDATE release",
+            caught.exception.evidence["failure"],
+        )
+        self.assertEqual(os.readlink(self.harness.layout.active_link), "bootstrap")
 
     def test_health_refuses_and_preserves_an_interrupted_transaction_journal(self) -> None:
         runner = FakeRunner()

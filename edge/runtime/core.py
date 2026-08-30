@@ -1317,7 +1317,12 @@ class RuntimeManager:
     def _apply_active_firewall(self) -> None:
         self._run(["/usr/sbin/nft", "--file", str(self.layout.live_nftables)], "apply owned nftables table")
 
-    def _baseline_health(self) -> Tuple[str, ...]:
+    def _baseline_health(self, active: ReleaseRef) -> Tuple[str, ...]:
+        self._validate_release(active)
+        if self._active_relative() != active.relative_path:
+            raise RuntimeSecurityError(
+                "protected active release differs from the live release pointer"
+            )
         gates = []
         for service in ("nftables.service", "rtpengine-daemon.service", "opensips.service"):
             if self._run(["/usr/bin/systemctl", "is-active", service], "{} health".format(service)).strip() != "active":
@@ -1351,24 +1356,40 @@ class RuntimeManager:
                 "immutable node facts are unavailable to active health"
             ) from exc
         sockets = self._run(["/usr/bin/ss", "-H", "-lntup"], "listener inventory")
-        expectations = (
-            (facts.private_ipv4, 5061),
-            (facts.private_ipv4, 15061),
-            ("127.0.0.1", 2223),
-            ("127.0.0.1", 2224),
-        )
-        for address, port in expectations:
-            pattern = re.compile(
-                r"(?<![0-9A-Fa-f:.]){}:{}(?:\s|$)".format(
-                    re.escape(address), port
+        if active.kind == "BOOTSTRAP":
+            expected_listeners = {
+                ("udp", "UNCONN", "127.0.0.1", 5060),
+                ("udp", "UNCONN", "127.0.0.1", 2223),
+                ("tcp", "LISTEN", "127.0.0.1", 2224),
+            }
+        else:
+            expected_listeners = {
+                ("tcp", "LISTEN", facts.private_ipv4, 5061),
+                ("tcp", "LISTEN", facts.private_ipv4, 15061),
+                ("udp", "UNCONN", "127.0.0.1", 2223),
+                ("tcp", "LISTEN", "127.0.0.1", 2224),
+            }
+        managed_ports = {5060, 5061, 15061, 2223, 2224}
+        observed_listeners = []
+        for line in sockets.splitlines():
+            fields = line.split()
+            if len(fields) < 5 or fields[0] not in {"tcp", "udp"}:
+                continue
+            local = re.fullmatch(r"(.+):([0-9]+)", fields[4])
+            if local is None or int(local.group(2)) not in managed_ports:
+                continue
+            observed_listeners.append(
+                (fields[0], fields[1], local.group(1), int(local.group(2)))
+            )
+        if (
+            len(observed_listeners) != len(expected_listeners)
+            or set(observed_listeners) != expected_listeners
+        ):
+            raise RuntimeApplyError(
+                "managed listener inventory is not exact for the {} release".format(
+                    active.kind
                 )
             )
-            if pattern.search(sockets) is None:
-                raise RuntimeApplyError(
-                    "required listener {}:{} is absent".format(address, port)
-                )
-        if re.search(r"(?:0\.0\.0\.0|\[::\]):222[34]\b", sockets):
-            raise RuntimeApplyError("RTPengine control listener escaped loopback")
         return tuple(
             gates
             + [
@@ -1383,7 +1404,7 @@ class RuntimeManager:
     def _candidate_health(
         self, candidate: ValidatedCandidate, release: ReleaseRef
     ) -> Tuple[Tuple[str, ...], Tuple[Mapping[str, Any], ...]]:
-        gates = list(self._baseline_health())
+        gates = list(self._baseline_health(release))
         nft = self._run(
             ["/usr/sbin/nft", "list", "table", "inet", "vivolution_edge_filter"], "candidate nftables inventory"
         )
@@ -1778,7 +1799,7 @@ class RuntimeManager:
         self.runner.checkpoint("rollback-pointer-activated")
         self._apply_active_firewall()
         self._start_services()
-        return self._baseline_health()
+        return self._baseline_health(prior)
 
     def _execute_switch(
         self,
@@ -1804,7 +1825,7 @@ class RuntimeManager:
         self._write_journal(transaction)
         self.runner.checkpoint("services-started")
         if candidate is None:
-            return self._baseline_health(), ()
+            return self._baseline_health(transaction.target), ()
         return self._candidate_health(candidate, transaction.target)
 
     def activate(self, sequence: int, manifest_digest: str) -> Mapping[str, Any]:
@@ -1978,7 +1999,7 @@ class RuntimeManager:
                 if transaction.operation == "APPLY"
                 else None
             )
-            gates = self._baseline_health()
+            gates = self._baseline_health(state.active)
             _unlink_atomic_marker(self.layout.journal_file)
             result: Dict[str, Any] = {
                 "active": state.active.record(),
@@ -2015,7 +2036,7 @@ class RuntimeManager:
             gates = self._rollback_live(transaction.prior)
         else:
             self._start_services()
-            gates = self._baseline_health()
+            gates = self._baseline_health(transaction.prior)
         _unlink_atomic_marker(self.layout.journal_file)
         node_id = "unknown"
         try:
@@ -2054,7 +2075,7 @@ class RuntimeManager:
                     "runtime health is unavailable while a transaction journal exists"
                 )
             state = self._initialize()
-            gates = self._baseline_health()
+            gates = self._baseline_health(state.active)
             return {
                 "active": state.active.record(),
                 "apiVersion": RUNTIME_API_VERSION,
