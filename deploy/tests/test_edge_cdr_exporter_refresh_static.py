@@ -145,7 +145,8 @@ class EdgeCdrExporterRefreshStaticTests(unittest.TestCase):
             "Compile and import installed CDR exporter in isolated interpreter",
             "Reprove locked runtime health after CDR exporter refresh",
         )
-        self.assertIn("importlib.util.spec_from_file_location", validation)
+        self.assertIn("importlib.machinery.SourceFileLoader", validation)
+        self.assertIn("importlib.util.spec_from_loader", validation)
         self.assertIn('module.MARKER != "VIVO_SYNTHETIC_CDR_V1"', validation)
         self.assertIn(
             '("", "NOTICE:", "NOTICE:script: ")', validation

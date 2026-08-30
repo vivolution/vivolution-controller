@@ -377,18 +377,21 @@
               - -B
               - -c
               - |
-                import hashlib, importlib.util, pathlib, sys
+                import hashlib, importlib.machinery, importlib.util, pathlib, sys
                 source = pathlib.Path(sys.argv[1])
                 raw = source.read_bytes()
                 if hashlib.sha256(raw).hexdigest() != sys.argv[2]:
                     raise SystemExit("installed CDR exporter digest changed")
                 compile(raw, str(source), "exec")
                 sys.path.insert(0, "/usr/lib/vivolution-edge/python")
-                spec = importlib.util.spec_from_file_location("vivolution_cdr_export_refresh", source)
+                loader = importlib.machinery.SourceFileLoader(
+                    "vivolution_cdr_export_refresh", str(source)
+                )
+                spec = importlib.util.spec_from_loader(loader.name, loader)
                 if spec is None or spec.loader is None:
                     raise SystemExit("cannot construct CDR exporter module spec")
                 module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                loader.exec_module(module)
                 if module.MARKER != "VIVO_SYNTHETIC_CDR_V1":
                     raise SystemExit("CDR exporter marker contract changed")
                 if tuple(module.OPENSIPS_LOG_PREFIXES) != ("", "NOTICE:", "NOTICE:script: "):
