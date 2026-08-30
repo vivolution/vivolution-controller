@@ -1745,8 +1745,8 @@ tcp_connection_lifetime=3600
 advertised_address="{facts.node_fqdn}"
 socket=tls:{facts.private_ipv4}:5061
 socket=tls:{facts.private_ipv4}:15061
-alias={facts.node_fqdn}:5061
-alias={facts.node_fqdn}:15061
+alias=tls:{facts.node_fqdn}:5061
+alias=tls:{facts.node_fqdn}:15061
 mpath="/usr/lib/x86_64-linux-gnu/opensips/modules/"
 
 loadmodule "signaling.so"

@@ -1466,6 +1466,17 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("$hdr(From)", synthetic)
         self.assertNotIn("timer_route[", synthetic)
         self.assertNotIn('t_new_request("OPTIONS"', synthetic)
+        self.assertEqual(
+            [line for line in synthetic.splitlines() if line.startswith("socket=")],
+            ["socket=tls:10.20.2.4:5061", "socket=tls:10.20.2.4:15061"],
+        )
+        self.assertEqual(
+            [line for line in synthetic.splitlines() if line.startswith("alias=")],
+            [
+                "alias=tls:sbc1.voice.vivolution.ae:5061",
+                "alias=tls:sbc1.voice.vivolution.ae:15061",
+            ],
+        )
         self.assertIn(
             '    $du = "sip:10.20.1.4:16061;transport=tls";\n'
             '    force_send_socket("tls:10.20.2.4:15061");\n'
@@ -1507,6 +1518,17 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("#!define VIVO_SYNTHETIC_CDR", direct)
         self.assertNotIn('loadmodule "xlog.so"', direct)
         self.assertIn("#!ifdef VIVO_SYNTHETIC_CDR", direct)
+        self.assertEqual(
+            [line for line in direct.splitlines() if line.startswith("socket=")],
+            ["socket=tls:10.20.2.4:5061", "socket=tls:10.20.2.4:15061"],
+        )
+        self.assertEqual(
+            [line for line in direct.splitlines() if line.startswith("alias=")],
+            [
+                "alias=tls:sbc1.voice.vivolution.ae:5061",
+                "alias=tls:sbc1.voice.vivolution.ae:15061",
+            ],
+        )
 
         self.assertEqual(direct_route.options_interval_seconds, 60)
         self.assertEqual(
