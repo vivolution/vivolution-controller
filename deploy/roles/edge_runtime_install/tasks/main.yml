@@ -36,10 +36,10 @@
       Signed runtime installation requires an exact first-tenant identity,
       supported fail-closed runtime profile, and the fixed port allocation.
 
-- name: Require the exact synthetic first-generation fixture boundary
+- name: Require the exact synthetic replacement-generation fixture boundary
   ansible.builtin.assert:
     that:
-      - edge_generation | int == 1
+      - edge_generation | int >= 1
       - edge_synthetic_teams_source_ipv4_cidrs == []
       - edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32']
       - edge_pbx_media_destination_port_start | int == 21000
@@ -48,8 +48,8 @@
       - edge_fixture_client_certificate_src == inventory_dir ~ '/generated/fixture/' ~ inventory_hostname ~ '.crt'
       - edge_fixture_client_key_src == inventory_dir ~ '/generated/fixture/' ~ inventory_hostname ~ '.key'
     fail_msg: >-
-      SYNTHETIC_PRIVATE is restricted to generation 1, empty compiler
-      synthetic-source facts, and the fixed CP1 fixture identity.
+      SYNTHETIC_PRIVATE requires a positive immutable node generation, empty
+      compiler synthetic-source facts, and the fixed CP1 fixture identity.
   when: edge_runtime_profile == 'SYNTHETIC_PRIVATE'
 
 - name: Require an explicit Direct Routing replacement generation

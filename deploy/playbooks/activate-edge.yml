@@ -30,13 +30,15 @@
           Refusing activation without the exact signed candidate identity,
           protected local envelope digest, and explicit activation acknowledgement.
 
-    - name: Require the fixed synthetic activation boundary
+    - name: Require the fixed synthetic replacement-generation activation boundary
       ansible.builtin.assert:
         that:
-          - edge_generation | int == 1
+          - edge_generation | int >= 1
           - edge_synthetic_teams_source_ipv4_cidrs == []
           - edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32']
-        fail_msg: SYNTHETIC_PRIVATE activation must retain the fixed generation-1 CP1 fixture boundary.
+        fail_msg: >-
+          SYNTHETIC_PRIVATE activation requires a positive immutable node
+          generation and must retain the fixed CP1 fixture boundary.
       when: edge_runtime_profile == 'SYNTHETIC_PRIVATE'
 
     - name: Require an explicit Direct Routing replacement activation

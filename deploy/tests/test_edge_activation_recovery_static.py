@@ -184,6 +184,12 @@ print(environment.from_string(expression).render(**variables).strip())
         self.assertIn("/usr/bin/hostnamectl, --static", playbook)
         self.assertIn("edge_activation_recovery_profile == edge_runtime_profile", playbook)
         self.assertIn(
+            "edge_activation_recovery_generation | int >= 1 and\n"
+            "             edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32']",
+            playbook,
+        )
+        self.assertNotIn("edge_activation_recovery_generation | int == 1", playbook)
+        self.assertIn(
             "edge_activation_recovery_manifest_digest == edge_activation_manifest_digest",
             playbook,
         )

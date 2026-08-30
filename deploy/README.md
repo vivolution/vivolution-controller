@@ -281,10 +281,13 @@ the certificate validator.
 
 ## Edge profile deployment and replacement
 
-`playbooks/install-edge.yml` and `playbooks/activate-edge.yml` accept exactly
-`SYNTHETIC_PRIVATE` generation 1 or `DIRECT_ROUTING` generation 2 and later.
-The synthetic branch requires the fixed CP1 fixture files and source. The
-Direct Routing branch requires no fixture credential; it requires a
+`playbooks/install-edge.yml` and `playbooks/activate-edge.yml` accept
+`SYNTHETIC_PRIVATE` on any positive immutable node generation, or
+`DIRECT_ROUTING` generation 2 and later. A reimaged/re-enrolled synthetic
+replacement advances its generation instead of replaying or rewriting the
+retired node identity. The synthetic branch always requires the same fixed CP1
+fixture files, source, and media boundary. The Direct Routing branch requires
+no fixture credential; it requires a
 controller-side PBX CA bundle pinned by SHA-256, real globally routable PBX
 source CIDRs no broader than `/24`, and separate exact install and activation
 acknowledgements.
@@ -333,9 +336,11 @@ staging, then runs locked runtime health on the replacement. Its evidence keeps
 ## Private synthetic node-failover gate
 
 `playbooks/qualify-synthetic-node-failover.yml` is the bounded disruptive POC
-gate for new-call availability on the generation-1 private fleet. Supply its
-exact acknowledgement only on the command line; do not store it as an
-inventory default:
+gate for new-call availability on one common positive-generation private
+fleet. Both inventory nodes must name the same expected generation. Installed
+node facts and root runtime authority must independently equal each node's
+inventory generation. Supply the exact acknowledgement only on the command
+line; do not store it as an inventory default:
 
 ```bash
 ANSIBLE_ROLES_PATH=deploy/roles ansible-playbook \
@@ -352,6 +357,11 @@ two-direction call through SBC2 inside the gate. The alternate command has a
 110-second hard process timeout and acceptance time is measured with the
 fixture host's monotonic clock, so wall-clock correction cannot shorten the
 gate.
+
+The failover request and v0.2 acceptance evidence carry each runtime node's
+exact generation. Every primary, alternate, and restored Edge CDR
+reconciliation must name the corresponding requested generation. A mixed
+generation fleet or a phase from the wrong generation fails closed.
 
 Before either service is stopped, SBC1 persists an exact root-owned recovery
 marker. One protected node-local injector then arms a 150-second transient

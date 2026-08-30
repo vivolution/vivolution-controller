@@ -39,12 +39,14 @@ NOW = datetime(2026, 8, 30, 4, 45, tzinfo=timezone.utc)
 KEY_ID = "cp1-signing-2026-01"
 
 
-def local_context(node_id: str = "sbc1") -> security_core.LocalContext:
+def local_context(
+    node_id: str = "sbc1", *, generation: int = 1
+) -> security_core.LocalContext:
     return security_core.LocalContext(
         scope="TENANT",
         cluster_id="cluster-uaen-poc-01",
         node_id=node_id,
-        generation=1,
+        generation=generation,
         slot="A",
         customer_account_id="vivolution-technologies-llc",
         m365_tenant_id="9b7a1c2d-3e4f-4a5b-8c6d-7e8f9012abcd",
@@ -809,6 +811,31 @@ class SecurityCoreTests(unittest.TestCase):
                 self.assertFalse(
                     (self.state_directory / security_core.StateStore.STATE_FILE).exists()
                 )
+
+    def test_trusted_prior_generation_is_rejected_without_creating_state(self) -> None:
+        envelope = make_envelope(self.private_key)
+        self.assertEqual(envelope["manifest"]["target"]["generation"], 1)
+
+        with self.assertRaises(security_core.EnvelopeRejected) as caught:
+            security_core.verify_and_stage(
+                envelope_bytes(envelope),
+                local_context=local_context(generation=2),
+                keyring=self.keyring,
+                state_directory=self.state_directory,
+                now=NOW,
+            )
+
+        self.assertIn(
+            "$.manifest.target.generation: wrong target: expected 2",
+            str(caught.exception),
+        )
+        self.assertFalse(
+            (self.state_directory / security_core.StateStore.STATE_FILE).exists()
+        )
+        self.assertEqual(
+            sorted(path.name for path in self.state_directory.iterdir()),
+            [security_core.StateStore.LOCK_FILE],
+        )
 
     def test_duplicate_member_input_is_rejected_before_signature_verification(self) -> None:
         raw = b'{"manifest":{},"manifest":{},"signatures":[]}'

@@ -39,7 +39,7 @@
           - edge_activation_local_evidence_dir == inventory_dir ~ '/generated/activation-evidence'
           - >-
             (edge_activation_recovery_profile == 'SYNTHETIC_PRIVATE' and
-             edge_activation_recovery_generation | int == 1 and
+             edge_activation_recovery_generation | int >= 1 and
              edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32']) or
             (edge_activation_recovery_profile == 'DIRECT_ROUTING' and
              edge_activation_recovery_generation | int >= 2)

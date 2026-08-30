@@ -77,6 +77,15 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
         self.assertIn("mode: '0555'", tasks)
         self.assertIn("mode: '0444'", tasks)
 
+    def test_synthetic_install_and_activation_accept_positive_replacement_generations(self) -> None:
+        tasks = self.read("roles/edge_runtime_install/tasks/main.yml")
+        activation = self.read("playbooks/activate-edge.yml")
+        for source in (tasks, activation):
+            self.assertIn("edge_generation | int >= 1", source)
+            self.assertNotIn("edge_generation | int == 1", source)
+        self.assertIn("fixed CP1 fixture identity", tasks)
+        self.assertIn("edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32']", activation)
+
     def test_wrappers_clear_environment_and_root_helper_has_no_path_input(self) -> None:
         agent = self.read("roles/edge_runtime_install/templates/vivolution-edge-agent.j2")
         compiler = self.read("roles/edge_runtime_install/templates/vivolution-edge-compiler.j2")

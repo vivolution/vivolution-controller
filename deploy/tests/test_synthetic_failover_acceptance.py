@@ -42,11 +42,13 @@ class SyntheticFailoverEvidenceTests(unittest.TestCase):
         self.completed = epoch_ms("20260830T080030Z")
         self.started_monotonic = 10_000_000_000
         self.completed_monotonic = 30_000_000_000
+        self.generation = 2
         self.request = {
             "acknowledgement": evidence.ACKNOWLEDGEMENT,
             "alternate": {
                 "activeManifestDigest": "sha256:" + "b" * 64,
                 "activeSequence": 1,
+                "generation": self.generation,
                 "nodeId": "sbc2",
                 "privateIpv4": "10.20.2.5",
                 "slot": "B",
@@ -61,6 +63,7 @@ class SyntheticFailoverEvidenceTests(unittest.TestCase):
             "primary": {
                 "activeManifestDigest": "sha256:" + "a" * 64,
                 "activeSequence": 1,
+                "generation": self.generation,
                 "nodeId": "sbc1",
                 "privateIpv4": "10.20.2.4",
                 "slot": "A",
@@ -68,6 +71,7 @@ class SyntheticFailoverEvidenceTests(unittest.TestCase):
             "restoredPrimary": {
                 "activeManifestDigest": "sha256:" + "a" * 64,
                 "activeSequence": 1,
+                "generation": self.generation,
                 "nodeId": "sbc1",
                 "privateIpv4": "10.20.2.4",
                 "slot": "A",
@@ -118,6 +122,7 @@ class SyntheticFailoverEvidenceTests(unittest.TestCase):
         node: str,
         target: str,
         *,
+        generation: int | None = None,
         rtp_uas_delta: int = 12,
     ) -> None:
         summary = (
@@ -135,7 +140,9 @@ class SyntheticFailoverEvidenceTests(unittest.TestCase):
         fixture_cdr = cdr_contract.canonical_bytes(
             cdr_contract.compile_fixture_cdr(asterisk_cdr, test_id, node)
         )
-        edge_cdr = self.edge_cdr(test_id, node)
+        edge_cdr = self.edge_cdr(
+            test_id, node, self.generation if generation is None else generation
+        )
         artifacts = {
             "RESULT": result,
             "asterisk-cdr-delta.csv": asterisk_cdr,
@@ -201,12 +208,12 @@ class SyntheticFailoverEvidenceTests(unittest.TestCase):
         csv.writer(stream, quoting=csv.QUOTE_ALL, lineterminator="\n").writerows(rows)
         return stream.getvalue().encode("utf-8")
 
-    def edge_cdr(self, test_id: str, node: str) -> bytes:
+    def edge_cdr(self, test_id: str, node: str, generation: int) -> bytes:
         slot = "A" if node == "sbc1" else "B"
         node_identity = {
             "allocationId": "alloc-vivolution-1",
             "clusterId": "cluster-vivolution-poc",
-            "generation": 1,
+            "generation": generation,
             "nodeFactsDigest": "sha256:" + "1" * 64,
             "nodeId": node,
             "routeToken": "ABCDEF123456",
@@ -305,9 +312,13 @@ class SyntheticFailoverEvidenceTests(unittest.TestCase):
     def test_complete_private_failover_compiles_exact_acceptance(self) -> None:
         result = evidence.compile_evidence(self.directory)
         self.assertEqual(result["status"], "SYNTHETIC_NEW_CALL_FAILOVER_ACCEPTED")
+        self.assertEqual(result["apiVersion"], evidence.EVIDENCE_API_VERSION)
         self.assertEqual(result["liveM365Interoperability"], "NOT_ASSERTED")
         self.assertEqual(result["activeCallMigration"], "NOT_TESTED_NOT_CLAIMED")
         self.assertEqual(result["failoverElapsedMilliseconds"], 20_000)
+        self.assertEqual(
+            [node["generation"] for node in result["runtimeNodes"]], [2, 2]
+        )
         self.assertEqual(
             [call["phase"] for call in result["fixtureCalls"]],
             [
@@ -348,6 +359,30 @@ class SyntheticFailoverEvidenceTests(unittest.TestCase):
         self.request["restoredPrimary"]["activeSequence"] = 2
         self.write_request()
         with self.assertRaisesRegex(evidence.FailoverEvidenceError, "exact pre-failure"):
+            evidence.compile_evidence(self.directory)
+
+    def test_mixed_request_generations_are_rejected_before_phase_acceptance(self) -> None:
+        self.request["alternate"]["generation"] = 3
+        self.write_request()
+        with self.assertRaisesRegex(evidence.FailoverEvidenceError, "common positive fleet"):
+            evidence.compile_evidence(self.directory)
+
+    def test_each_phase_cdr_must_match_its_exact_request_generation(self) -> None:
+        self.write_phase(
+            "alternate",
+            "20260830T080020Z-sbc2-2",
+            "sbc2",
+            "10.20.2.5",
+            generation=3,
+        )
+        with self.assertRaisesRegex(evidence.FailoverEvidenceError, "wrong Edge or generation"):
+            evidence.compile_evidence(self.directory)
+
+    def test_non_positive_request_generation_is_rejected(self) -> None:
+        for identity in ("primary", "alternate", "restoredPrimary"):
+            self.request[identity]["generation"] = 0
+        self.write_request()
+        with self.assertRaisesRegex(evidence.FailoverEvidenceError, "generation.*fixed bounds"):
             evidence.compile_evidence(self.directory)
 
     def test_fixture_summary_is_bound_to_its_manifest(self) -> None:
@@ -615,6 +650,13 @@ class SyntheticFailoverPlaybookStaticTests(unittest.TestCase):
             "groups.get('edge_nodes', []) | sort == ['sbc1', 'sbc2']",
             "hostvars['sbc1'].edge_runtime_profile == 'SYNTHETIC_PRIVATE'",
             "hostvars['sbc2'].edge_runtime_profile == 'SYNTHETIC_PRIVATE'",
+            "edge_failover_expected_fleet_generation",
+            "edge_failover_sbc1_facts.generation | int ==",
+            "edge_failover_sbc2_facts.generation | int ==",
+            "edge_failover_sbc1_authority.generation | int ==",
+            "edge_failover_sbc2_authority.generation | int ==",
+            "nodeIdentity.generation | int ==",
+            "edge.vivolution.ae/synthetic-failover-request/v0.2",
             "SYSTEMD_STOP_COMPLETE_DATA_PLANE",
             "CLOSED_FROM_FIXTURE_CONTROLLER",
             "SYNTHETIC_NEW_CALL_FAILOVER_ACCEPTED",
@@ -626,6 +668,7 @@ class SyntheticFailoverPlaybookStaticTests(unittest.TestCase):
         self.assertNotIn("ignore_errors", source)
         self.assertNotIn("az ", source)
         self.assertNotIn("MicrosoftTeams", source)
+        self.assertNotIn("edge_generation | int == 1", source)
 
     def test_clock_contains_stop_detection_alternate_call_and_not_restore(self) -> None:
         source = PLAYBOOK.read_text(encoding="utf-8")

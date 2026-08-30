@@ -291,9 +291,9 @@ end-to-end reconciliation.
 
 ## Synthetic node-failover acceptance
 
-After both generation-1 nodes have the same signed `SYNTHETIC_PRIVATE` tenant
-allocation active, run the disruptive two-node acceptance workflow only with
-the one-run acknowledgement:
+After both nodes on one common positive immutable generation have the same
+signed `SYNTHETIC_PRIVATE` tenant allocation active, run the disruptive
+two-node acceptance workflow only with the one-run acknowledgement:
 
 ```sh
 ANSIBLE_ROLES_PATH=deploy/roles ansible-playbook \
@@ -302,8 +302,10 @@ ANSIBLE_ROLES_PATH=deploy/roles ansible-playbook \
   deploy/playbooks/qualify-synthetic-node-failover.yml
 ```
 
-The playbook refuses any fleet other than exact `sbc1`/`sbc2` generation 1 and
-one fixture controller. It proves both nodes are healthy and hold the same
+The playbook refuses any fleet other than exact `sbc1`/`sbc2` on the same
+positive inventory generation and one fixture controller. It requires each
+node's installed facts and root runtime authority to match that node's exact
+inventory generation. It then proves both nodes are healthy and hold the same
 cluster/customer/M365-tenant/tenant-context/service/allocation route, places a
 two-direction baseline call through SBC1, and starts the 120-second clock
 before deliberately stopping both `opensips.service` and
@@ -331,6 +333,11 @@ successful Edge-to-fixture CDR reconciliation for each phase; see
 writes canonical non-secret evidence below the ignored private inventory path
 `generated/synthetic-failover/<baseline-test-id>/acceptance.json` with status
 `SYNTHETIC_NEW_CALL_FAILOVER_ACCEPTED`.
+
+The v0.2 request and acceptance records carry each node's immutable
+generation. All three Edge/fixture CDR reconciliations must match the exact
+requested generation for their phase; mixed generations or stale-generation
+CDRs are rejected.
 
 This is deliberately a private route-availability exercise. The runner is the
 route selector: it targets SBC1 before the failure and SBC2 after detecting the

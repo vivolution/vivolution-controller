@@ -4,7 +4,7 @@
     that:
       - inventory_hostname in ['sbc1', 'sbc2']
       - edge_runtime_profile == 'SYNTHETIC_PRIVATE'
-      - edge_generation | int == 1
+      - edge_generation | int >= 1
       - edge_fixture_rotation_acknowledgement == 'ROTATE_SYNTHETIC_FIXTURE_PKI_ON_BOTH_EDGES'
       - edge_fixture_rotation_controller_staging_root is match('^/')
       - edge_fixture_rotation_ca_src == edge_fixture_rotation_controller_staging_root ~ '/fixture-ca.crt'
@@ -14,7 +14,7 @@
       - edge_fixture_rotation_client_certificate_sha256 is match('^[0-9a-f]{64}$')
       - edge_fixture_rotation_client_key_sha256 is match('^[0-9a-f]{64}$')
     fail_msg: >-
-      Fixture PKI rotation is limited to the exact active generation-1
+      Fixture PKI rotation is limited to exact active positive-generation
       synthetic nodes, protected controller staging paths, reviewed digests,
       and the explicit two-node acknowledgement.
 

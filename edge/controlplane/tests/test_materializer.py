@@ -261,6 +261,37 @@ class MaterializerTests(unittest.TestCase):
         )
         self.assertFalse(release.evidence["readiness"]["runtimeApplied"])
 
+    def test_synthetic_replacement_generation_materializes_signed_node_release(self) -> None:
+        replacement_record = facts_record()
+        replacement_record["generation"] = 2
+        replacement_facts = NodeFacts.from_mapping(replacement_record)
+        release = self.materialize(facts=replacement_facts)
+        target = release.envelope["manifest"]["target"]
+        self.assertEqual(target["generation"], 2)
+        self.assertEqual(target["nodeId"], "sbc1")
+        self.assertEqual(
+            release.evidence["readiness"]["syntheticFixtureAuthority"],
+            "EXTERNAL_FIXED_ROOT_RUNTIME_POLICY",
+        )
+        public_bytes = base64.b64decode(
+            release.public_key_metadata["publicKeyBase64"], validate=True
+        )
+        state_directory = self.root / "synthetic-generation-2-agent-state"
+        state_directory.mkdir(mode=0o700)
+        staged = security_core.verify_and_stage(
+            release.envelope_bytes,
+            local_context=local_context(replacement_facts),
+            keyring=security_core.PinnedKeyring({KEY_ID: public_bytes}),
+            state_directory=state_directory,
+            now=ISSUED,
+        )
+        compiled = compile_tenant_bundle(
+            release.envelope,
+            replacement_facts,
+            VerificationReceipt.from_mapping(staged.evidence()),
+        )
+        self.assertEqual(dict(compiled.artifacts), dict(release.artifacts))
+
     def test_direct_routing_profile_materializes_signed_node_release(self) -> None:
         profile = FirstTenantProfile.from_mapping(direct_profile_record())
         facts = NodeFacts.from_mapping(facts_record(direct_routing=True))

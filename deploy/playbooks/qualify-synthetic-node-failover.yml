@@ -19,6 +19,8 @@
     edge_failover_results_root: /var/lib/vivolution/voice-fixture/results
     edge_failover_local_root: "{{ inventory_dir }}/generated/synthetic-failover"
     edge_failover_remote_collector: /run/lock/vivolution-synthetic-failover-collector.py
+    edge_failover_expected_fleet_generation: >-
+      {{ hostvars['sbc1'].edge_generation | int }}
     edge_failover_evidence_compiler: >-
       {{ playbook_dir }}/../scripts/synthetic_failover_evidence.py
     edge_failover_cdr_reconciler: >-
@@ -51,16 +53,22 @@
           - edge_failover_local_root == inventory_dir ~ '/generated/synthetic-failover'
           - hostvars['sbc1'].edge_runtime_profile == 'SYNTHETIC_PRIVATE'
           - hostvars['sbc2'].edge_runtime_profile == 'SYNTHETIC_PRIVATE'
-          - hostvars['sbc1'].edge_generation | int == 1
-          - hostvars['sbc2'].edge_generation | int == 1
+          - edge_failover_expected_fleet_generation | int >= 1
+          - >-
+            hostvars['sbc1'].edge_generation | int ==
+            edge_failover_expected_fleet_generation | int
+          - >-
+            hostvars['sbc2'].edge_generation | int ==
+            edge_failover_expected_fleet_generation | int
           - hostvars['sbc1'].edge_slot == 'A'
           - hostvars['sbc2'].edge_slot == 'B'
           - hostvars['sbc1'].edge_private_ipv4 == '10.20.2.4'
           - hostvars['sbc2'].edge_private_ipv4 == '10.20.2.5'
         fail_msg: >-
           Synthetic failover is deliberately disruptive. It requires exactly
-          SBC1/SBC2 generation 1, one private fixture controller, the fixed
-          120-second gate, and the one-run acknowledgement.
+          SBC1/SBC2 on one identical positive replacement generation, one
+          private fixture controller, the fixed 120-second gate, and the
+          one-run acknowledgement.
 
     - name: Inspect a durable recovery marker from an interrupted prior run
       ansible.builtin.stat:
@@ -409,8 +417,15 @@
           - edge_failover_sbc2_facts.slot == 'B'
           - edge_failover_sbc1_facts.privateIpv4 == '10.20.2.4'
           - edge_failover_sbc2_facts.privateIpv4 == '10.20.2.5'
-          - edge_failover_sbc1_facts.generation | int == 1
-          - edge_failover_sbc2_facts.generation | int == 1
+          - >-
+            edge_failover_sbc1_facts.generation | int ==
+            hostvars['sbc1'].edge_generation | int
+          - >-
+            edge_failover_sbc2_facts.generation | int ==
+            hostvars['sbc2'].edge_generation | int
+          - >-
+            edge_failover_sbc1_facts.generation | int ==
+            edge_failover_sbc2_facts.generation | int
           - edge_failover_sbc1_facts.clusterId == edge_failover_sbc2_facts.clusterId
           - edge_failover_sbc1_facts.customerAccountId == edge_failover_sbc2_facts.customerAccountId
           - edge_failover_sbc1_facts.m365TenantId == edge_failover_sbc2_facts.m365TenantId
@@ -427,8 +442,12 @@
           - edge_failover_sbc2_facts.authorizedPbxSourceIpv4Cidrs == ['10.20.1.4/32']
           - edge_failover_sbc1_authority.profile == 'SYNTHETIC_PRIVATE'
           - edge_failover_sbc2_authority.profile == 'SYNTHETIC_PRIVATE'
-          - edge_failover_sbc1_authority.generation | int == 1
-          - edge_failover_sbc2_authority.generation | int == 1
+          - >-
+            edge_failover_sbc1_authority.generation | int ==
+            edge_failover_sbc1_facts.generation | int
+          - >-
+            edge_failover_sbc2_authority.generation | int ==
+            edge_failover_sbc2_facts.generation | int
           - edge_failover_sbc1_authority.nodeId == 'sbc1'
           - edge_failover_sbc2_authority.nodeId == 'sbc2'
           - edge_failover_sbc1_authority.slot == 'A'
@@ -1033,12 +1052,15 @@
         edge_failover_phase_records:
           - node: sbc1
             phase: primary
+            generation: "{{ edge_failover_sbc1_facts.generation | int }}"
             testId: "{{ edge_failover_primary_test_id }}"
           - node: sbc2
             phase: alternate
+            generation: "{{ edge_failover_sbc2_facts.generation | int }}"
             testId: "{{ edge_failover_alternate_test_id }}"
           - node: sbc1
             phase: restored
+            generation: "{{ edge_failover_sbc1_facts.generation | int }}"
             testId: "{{ edge_failover_restored_test_id }}"
 
     - name: Export exact Edge-side CDR evidence for every accepted call phase
@@ -1060,6 +1082,9 @@
         that:
           - (item.stdout | from_json).testId == item.item.testId
           - (item.stdout | from_json).nodeIdentity.nodeId == item.item.node
+          - >-
+            (item.stdout | from_json).nodeIdentity.generation | int ==
+            item.item.generation | int
           - (item.stdout | from_json).status == 'TWO_LOGICAL_SYNTHETIC_CALLS_ACCOUNTED'
           - (item.stdout | from_json).liveM365Interoperability == 'NOT_ASSERTED'
         fail_msg: Edge CDR export did not bind the exact call phase.
@@ -1235,6 +1260,9 @@
             'NOT_ASSERTED'
           - (item.content | b64decode | from_json).testId == item.item.testId
           - (item.content | b64decode | from_json).nodeIdentity.nodeId == item.item.node
+          - >-
+            (item.content | b64decode | from_json).nodeIdentity.generation | int ==
+            item.item.generation | int
           - (item.content | b64decode | from_json).matchedCalls | length == 2
           - >-
             (item.content | b64decode | from_json).reconciliationDigest is
@@ -1273,10 +1301,11 @@
             activeSequence: >-
               {{ (edge_failover_alternate_status_after_raw.stdout |
                   from_json).active.sequence | int }}
+            generation: "{{ edge_failover_sbc2_facts.generation | int }}"
             nodeId: sbc2
             privateIpv4: 10.20.2.5
             slot: B
-          apiVersion: edge.vivolution.ae/synthetic-failover-request/v0.1
+          apiVersion: edge.vivolution.ae/synthetic-failover-request/v0.2
           completedAtEpochMs: >-
             {{ (edge_failover_completed.stdout | from_json).epochMs | int }}
           completedAtMonotonicNs: >-
@@ -1290,6 +1319,7 @@
           primary:
             activeManifestDigest: "{{ edge_failover_sbc1_status.active.manifestDigest }}"
             activeSequence: "{{ edge_failover_sbc1_status.active.sequence | int }}"
+            generation: "{{ edge_failover_sbc1_facts.generation | int }}"
             nodeId: sbc1
             privateIpv4: 10.20.2.4
             slot: A
@@ -1300,6 +1330,7 @@
             activeSequence: >-
               {{ (edge_failover_restored_status_raw.stdout |
                   from_json).active.sequence | int }}
+            generation: "{{ edge_failover_sbc1_facts.generation | int }}"
             nodeId: sbc1
             privateIpv4: 10.20.2.4
             slot: A
@@ -1369,6 +1400,10 @@
             (edge_failover_acceptance_raw.content | b64decode | from_json).failoverElapsedMilliseconds | int <= 120000
           - >-
             (edge_failover_acceptance_raw.content | b64decode | from_json).primaryRestoredAndRetested | bool
+          - >-
+            (edge_failover_acceptance_raw.content | b64decode | from_json).runtimeNodes |
+            map(attribute='generation') | unique | list ==
+            [edge_failover_expected_fleet_generation | int]
         fail_msg: The compiled evidence expanded beyond the private synthetic gate.
 
     - name: Report the non-secret synthetic failover evidence location

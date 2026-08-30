@@ -23,8 +23,8 @@ import stat
 from typing import Any, Mapping
 
 
-REQUEST_API_VERSION = "edge.vivolution.ae/synthetic-failover-request/v0.1"
-EVIDENCE_API_VERSION = "edge.vivolution.ae/synthetic-failover-evidence/v0.1"
+REQUEST_API_VERSION = "edge.vivolution.ae/synthetic-failover-request/v0.2"
+EVIDENCE_API_VERSION = "edge.vivolution.ae/synthetic-failover-evidence/v0.2"
 BUNDLE_API_VERSION = "edge.vivolution.ae/synthetic-fixture-result-bundle/v0.1"
 ACKNOWLEDGEMENT = "RUN_SYNTHETIC_SBC1_TO_SBC2_FAILOVER_WITHIN_120_SECONDS"
 LIVE_M365_STATUS = "NOT_ASSERTED"
@@ -49,6 +49,7 @@ _REQUEST_KEYS = {
 _NODE_KEYS = {
     "activeManifestDigest",
     "activeSequence",
+    "generation",
     "nodeId",
     "privateIpv4",
     "slot",
@@ -589,6 +590,7 @@ def _validate_cdr_reconciliation(
     phase: str,
     test_id: str,
     node_id: str,
+    expected_generation: int,
     route_identity: Mapping[str, Any],
 ) -> str:
     cdr_contract = _load_cdr_contract()
@@ -632,12 +634,17 @@ def _validate_cdr_reconciliation(
         record["nodeIdentity"], _RECONCILIATION_NODE_KEYS, f"{phase} CDR node identity"
     )
     expected_slot = "A" if node_id == "sbc1" else "B"
+    generation = _integer(
+        node["generation"], f"{phase} CDR node generation", 1, 2**31 - 1
+    )
     if (
         node["nodeId"] != node_id
         or node["slot"] != expected_slot
-        or node["generation"] != 1
+        or generation != expected_generation
     ):
-        raise FailoverEvidenceError(f"{phase} CDR reconciliation names the wrong Edge")
+        raise FailoverEvidenceError(
+            f"{phase} CDR reconciliation names the wrong Edge or generation"
+        )
     if not isinstance(node["routeToken"], str) or re.fullmatch(
         r"[0-9A-F]{12}", node["routeToken"]
     ) is None:
@@ -724,12 +731,14 @@ def _validate_node(value: object, *, node: str, address: str, slot: str) -> Mapp
     if record["nodeId"] != node or record["privateIpv4"] != address or record["slot"] != slot:
         raise FailoverEvidenceError(f"{node} runtime identity is not the fixed POC node")
     sequence = _integer(record["activeSequence"], f"{node} active sequence", 1, 2**53 - 1)
+    generation = _integer(record["generation"], f"{node} generation", 1, 2**31 - 1)
     digest = record["activeManifestDigest"]
     if not isinstance(digest, str) or _DIGEST_RE.fullmatch(digest) is None:
         raise FailoverEvidenceError(f"{node} active manifest digest is invalid")
     return {
         "activeManifestDigest": digest,
         "activeSequence": sequence,
+        "generation": generation,
         "nodeId": node,
         "privateIpv4": address,
         "slot": slot,
@@ -771,6 +780,10 @@ def _validate_request(
     )
     if primary != restored:
         raise FailoverEvidenceError("restored SBC1 is not the exact pre-failure active runtime")
+    if primary["generation"] != alternate["generation"]:
+        raise FailoverEvidenceError(
+            "SBC1 and SBC2 must use one common positive fleet generation"
+        )
 
     route = _exact_mapping(record["routeIdentity"], _ROUTE_KEYS, "logical tenant route")
     for key in (
@@ -865,6 +878,11 @@ def compile_evidence(directory: Path) -> Mapping[str, Any]:
             phase=phase,
             test_id=summary["testId"],
             node_id=expected_node,
+            expected_generation=(
+                normalized["alternate"]["generation"]
+                if phase == "alternate"
+                else normalized["primary"]["generation"]
+            ),
             route_identity=normalized["routeIdentity"],
         )
         calls.append(

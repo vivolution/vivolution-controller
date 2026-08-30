@@ -66,6 +66,8 @@ class EdgeFixtureRotationStaticTests(unittest.TestCase):
         playbook = PLAYBOOK.read_text(encoding="utf-8")
         self.assertIn("ROTATE_SYNTHETIC_FIXTURE_PKI_ON_BOTH_EDGES", tasks)
         self.assertIn("edge_runtime_profile == 'SYNTHETIC_PRIVATE'", tasks)
+        self.assertIn("edge_generation | int >= 1", tasks)
+        self.assertNotIn("edge_generation | int == 1", tasks)
         self.assertIn("item.stat.checksum == item.item.sha256", tasks)
         self.assertIn("serial: 1", playbook)
         self.assertIn("groups['edge_nodes'] | sort == ['sbc1', 'sbc2']", playbook)
