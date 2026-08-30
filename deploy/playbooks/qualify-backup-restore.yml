@@ -121,7 +121,7 @@
             that:
               - "'TABLE public core_tenantcontext' in cp_restore_archive_list.stdout"
               - "'TABLE DATA public auth_user' in cp_restore_archive_list.stdout"
-              - "'TABLE DATA cp_security rls_signing_key' not in cp_restore_archive_list.stdout"
+              - "'TABLE cp_security rls_signing_key' in cp_restore_archive_list.stdout"
             fail_msg: Qualification dump is missing required controller schema or operator data.
 
         - name: Prove unique isolated restore database is absent
@@ -199,7 +199,7 @@
           changed_when: true
           no_log: true
 
-        - name: Install the current RLS signing key into the isolated restore
+        - name: Atomically prove key exclusion and install the current RLS signing key
           ansible.builtin.command:
             argv:
               - psql
@@ -212,13 +212,21 @@
               - --no-password
           args:
             stdin: |
+              BEGIN;
+              SET LOCAL row_security = off;
+              LOCK TABLE cp_security.rls_signing_key IN ACCESS EXCLUSIVE MODE;
+              DO $guard$
+              BEGIN
+                  IF EXISTS (SELECT 1 FROM cp_security.rls_signing_key) THEN
+                      RAISE EXCEPTION 'qualification dump contains forbidden signing-key material';
+                  END IF;
+              END
+              $guard$;
               \getenv rls_signing_key RLS_CONTEXT_SIGNING_KEY
-              INSERT INTO cp_security.rls_signing_key AS installed_key
+              INSERT INTO cp_security.rls_signing_key
                   (singleton, key_material, rotated_at)
-              VALUES (true, decode(:'rls_signing_key', 'hex'), statement_timestamp())
-              ON CONFLICT (singleton) DO UPDATE
-              SET key_material = EXCLUDED.key_material,
-                  rotated_at = EXCLUDED.rotated_at;
+              VALUES (true, decode(:'rls_signing_key', 'hex'), statement_timestamp());
+              COMMIT;
           environment:
             PGPASSWORD: "{{ cp_db_owner_password }}"
             RLS_CONTEXT_SIGNING_KEY: "{{ cp_rls_context_key }}"

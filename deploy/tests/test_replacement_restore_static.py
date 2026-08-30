@@ -4,6 +4,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 PLAYBOOK = ROOT / "deploy" / "playbooks" / "restore-replacement-controller.yml"
+QUALIFICATION_PLAYBOOK = ROOT / "deploy" / "playbooks" / "qualify-backup-restore.yml"
 JOURNAL_HELPER = ROOT / "deploy" / "scripts" / "controller_restore_journal.py"
 
 
@@ -11,6 +12,7 @@ class ReplacementRestoreStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = PLAYBOOK.read_text(encoding="utf-8")
+        cls.qualification_source = QUALIFICATION_PLAYBOOK.read_text(encoding="utf-8")
         cls.journal_source = JOURNAL_HELPER.read_text(encoding="utf-8")
 
     def test_restore_is_exactly_acknowledged_and_digest_pinned(self) -> None:
@@ -18,12 +20,35 @@ class ReplacementRestoreStaticTests(unittest.TestCase):
         self.assertIn("cp_import_dump_stat.stat.checksum", self.source)
         self.assertIn("cp_import_expected_sha256", self.source)
         self.assertIn("cp_import_fixed_dump_path", self.source)
+        self.assertIn(
+            "cp_controller_readiness_retries | default(30)", self.source
+        )
+        self.assertIn(
+            "cp_controller_readiness_delay | default(2)", self.source
+        )
 
     def test_restore_uses_isolated_database_and_integrity_gate(self) -> None:
         self.assertIn("vivolution_import_", self.source)
         self.assertIn("restore-integrity-check.sql", self.source)
         self.assertIn("--exit-on-error", self.source)
-        self.assertIn("TABLE DATA cp_security rls_signing_key' not in", self.source)
+        self.assertIn("--exclude-table-data=cp_security.rls_signing_key", self.qualification_source)
+        for playbook_source in (self.source, self.qualification_source):
+            self.assertIn("SET LOCAL row_security = off", playbook_source)
+            self.assertIn(
+                "LOCK TABLE cp_security.rls_signing_key IN ACCESS EXCLUSIVE MODE",
+                playbook_source,
+            )
+            self.assertIn(
+                "IF EXISTS (SELECT 1 FROM cp_security.rls_signing_key)",
+                playbook_source,
+            )
+            self.assertIn("RAISE EXCEPTION", playbook_source)
+            self.assertNotIn("ON CONFLICT (singleton) DO UPDATE", playbook_source)
+        self.assertNotIn("TABLE DATA cp_security rls_signing_key' not in", self.source)
+        self.assertNotIn(
+            "TABLE DATA cp_security rls_signing_key' not in",
+            self.qualification_source,
+        )
 
     def test_swap_is_rollback_safe_and_plaintext_is_removed(self) -> None:
         self.assertIn("vivolution_preimport_", self.source)

@@ -10,6 +10,8 @@
     cp_import_journal_helper: /usr/local/libexec/vivolution-controller-restore-journal
     cp_import_lock_path: /var/lib/vivolution/backups/cp1-restore-transaction-v1.lock
     cp_import_lock_unit: vivolution-cp1-restore-transaction-lock.service
+    cp_import_readiness_retries: "{{ cp_controller_readiness_retries | default(30) }}"
+    cp_import_readiness_delay: "{{ cp_controller_readiness_delay | default(2) }}"
   tasks:
     - name: Derive digest-bound restore identities
       ansible.builtin.set_fact:
@@ -208,8 +210,8 @@
             method: GET
             status_code: 200
           register: cp_import_rollback_ready
-          retries: "{{ cp_controller_readiness_retries }}"
-          delay: "{{ cp_controller_readiness_delay }}"
+          retries: "{{ cp_import_readiness_retries }}"
+          delay: "{{ cp_import_readiness_delay }}"
           until: cp_import_rollback_ready.status == 200
 
         - name: Remove any retained plaintext import archive after rollback recovery
@@ -252,8 +254,8 @@
             method: GET
             status_code: 200
           register: cp_import_complete_ready
-          retries: "{{ cp_controller_readiness_retries }}"
-          delay: "{{ cp_controller_readiness_delay }}"
+          retries: "{{ cp_import_readiness_retries }}"
+          delay: "{{ cp_import_readiness_delay }}"
           until: cp_import_complete_ready.status == 200
 
         - name: Remove any retained plaintext archive after completion recovery
@@ -315,7 +317,6 @@
               - "'TABLE public core_tenantcontext' in cp_import_archive_list.stdout"
               - "'TABLE DATA public auth_user' in cp_import_archive_list.stdout"
               - "'TABLE cp_security rls_signing_key' in cp_import_archive_list.stdout"
-              - "'TABLE DATA cp_security rls_signing_key' not in cp_import_archive_list.stdout"
             fail_msg: The supplied archive is not the qualified CP1 backup shape.
           when: cp_import_recovery_action in ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT']
 
@@ -384,7 +385,7 @@
           no_log: true
           when: cp_import_recovery_action in ['START', 'BEGIN_IMPORT', 'RESTART_IMPORT']
 
-        - name: Reinstall the current signed RLS context key
+        - name: Atomically prove key exclusion and install the current signed RLS context key
           ansible.builtin.command:
             argv:
               - psql
@@ -397,13 +398,21 @@
               - --no-password
           args:
             stdin: |
+              BEGIN;
+              SET LOCAL row_security = off;
+              LOCK TABLE cp_security.rls_signing_key IN ACCESS EXCLUSIVE MODE;
+              DO $guard$
+              BEGIN
+                  IF EXISTS (SELECT 1 FROM cp_security.rls_signing_key) THEN
+                      RAISE EXCEPTION 'qualified archive contains forbidden signing-key material';
+                  END IF;
+              END
+              $guard$;
               \getenv rls_signing_key RLS_CONTEXT_SIGNING_KEY
-              INSERT INTO cp_security.rls_signing_key AS installed_key
+              INSERT INTO cp_security.rls_signing_key
                   (singleton, key_material, rotated_at)
-              VALUES (true, decode(:'rls_signing_key', 'hex'), statement_timestamp())
-              ON CONFLICT (singleton) DO UPDATE
-              SET key_material = EXCLUDED.key_material,
-                  rotated_at = EXCLUDED.rotated_at;
+              VALUES (true, decode(:'rls_signing_key', 'hex'), statement_timestamp());
+              COMMIT;
           environment:
             PGPASSWORD: "{{ cp_db_owner_password }}"
             RLS_CONTEXT_SIGNING_KEY: "{{ cp_rls_context_key }}"
@@ -515,8 +524,8 @@
             method: GET
             status_code: 200
           register: cp_import_ready
-          retries: "{{ cp_controller_readiness_retries }}"
-          delay: "{{ cp_controller_readiness_delay }}"
+          retries: "{{ cp_import_readiness_retries }}"
+          delay: "{{ cp_import_readiness_delay }}"
           until: cp_import_ready.status == 200
 
         - name: Durably record the passed readiness gate
