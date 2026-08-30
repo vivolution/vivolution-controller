@@ -9,7 +9,7 @@ configuration. It pairs these two gateways with the one expected Entra tenant:
 
 The only outbound voice route matches `^\+971[1-9][0-9]{7,8}$`. It therefore
 does not match short emergency/service codes or non-UAE E.164 numbers. It uses a
-dedicated PSTN usage and per-user policy for exactly two explicitly supplied
+dedicated PSTN usage and per-user policy for one or two explicitly supplied
 test users. Nothing in this package creates a domain, user, license, trial,
 subscription, PSTN service, or emergency-calling configuration.
 
@@ -37,7 +37,7 @@ Azure subscription login.
 | Voice route | `Vivolution-POC-UAE-Plus971` |
 | Voice routing policy | `Vivolution-POC-UAE` |
 | Gateways, in failover order | `sbc1.vivolution.ae`, `sbc2.vivolution.ae` |
-| User numbers | two distinct, explicitly supplied `+971` E.164 numbers |
+| User numbers | one or two distinct, explicitly supplied `+971` E.164 numbers |
 
 The scripts never replace the tenant's global PSTN usage list. They call
 `Set-CsOnlinePstnUsage` with `Add` for apply and `Remove` for rollback. An
@@ -56,10 +56,11 @@ codes so an unavailable first node can advance to the second configured trunk.
    FQDNs deliberately use this domain so a licensed `@vivolution.ae` user can
    satisfy Microsoft's domain-activation requirement without changing UPNs or
    consuming a separate license only for a nested subdomain.
-4. Two enabled users in that domain with `Teams` and `PhoneSystem` feature
-   types, `TeamsUpgradeEffectiveMode=TeamsOnly`, an `infra.lync.com` registrar,
-   and no on-premises LineURI.
-5. Two distinct test Direct Routing numbers matching the fixed `+971` pattern.
+4. One or two enabled users in that domain with `Teams` and `PhoneSystem`
+   feature types, `TeamsUpgradeEffectiveMode=TeamsOnly`, an `infra.lync.com`
+   registrar, and no on-premises LineURI.
+5. One distinct test Direct Routing number per configured user, matching the
+   fixed `+971` pattern.
 6. Public SBC DNS, certificate, TLS, SIP OPTIONS, and media qualification must
    already have passed the separate infrastructure runbook. These scripts do
    not pretend to validate the data plane from Microsoft 365.
@@ -72,9 +73,10 @@ Keep the live configuration and state out of Git:
 Copy-Item ./config.example.psd1 ./config.psd1
 ```
 
-Replace all four placeholders in `Users`. The module rejects placeholder UPNs,
-placeholder numbers, duplicates, other UPN domains, other country codes, and
-changes to any locked tenant/gateway/routing value.
+Keep one or both `Users` entries and replace every retained placeholder. The
+module rejects zero or more than two users, placeholder UPNs/numbers,
+duplicates, other UPN domains, other country codes, and changes to any locked
+tenant/gateway/routing value.
 
 ## Read-only preflight
 
@@ -120,8 +122,9 @@ with the same configuration to converge, or run the journal-driven rollback.
 ```
 
 Verification requires both exact enabled gateways, the dedicated usage, exact
-route and policy, the two Direct Routing number assignments, the two policy
-grants, and `EnterpriseVoiceEnabled` on both users. A successful configuration
+route and policy, every configured Direct Routing number assignment and policy
+grant, and `EnterpriseVoiceEnabled` on every configured user. A successful
+configuration
 read-back does not by itself prove SIP OPTIONS or calls; retain call/CDR evidence
 from the end-to-end qualification run.
 

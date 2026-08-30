@@ -20,7 +20,8 @@ class Microsoft365OnboardingStaticTests(unittest.TestCase):
             "^\\+971[1-9][0-9]{7,8}$",
         ):
             self.assertIn(value, MODULE + CONFIG)
-        self.assertIn("Exactly two test users must be supplied", MODULE)
+        self.assertIn("One or two test users must be supplied", MODULE)
+        self.assertIn("$users.Count -lt 1 -or $users.Count -gt 2", MODULE)
         self.assertIn("must be in the verified vivolution.ae domain", MODULE)
         self.assertNotIn("@voice\\.vivolution\\.ae", MODULE)
 

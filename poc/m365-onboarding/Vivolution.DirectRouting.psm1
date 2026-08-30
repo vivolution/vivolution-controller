@@ -188,8 +188,8 @@ function Assert-VivolutionConfiguration {
     }
 
     $users = @($Configuration.Users)
-    if ($users.Count -ne 2) {
-        throw 'Exactly two test users must be supplied.'
+    if ($users.Count -lt 1 -or $users.Count -gt 2) {
+        throw 'One or two test users must be supplied.'
     }
 
     $seenUpns = @{}
