@@ -31,6 +31,62 @@ class VoiceFixtureStaticTests(unittest.TestCase):
             text=True,
         )
 
+    def run_podman_image_id_helper(
+        self, value: str
+    ) -> subprocess.CompletedProcess[str]:
+        readiness = self.read(
+            "roles/voice_fixture/templates/vivolution-voice-fixture-readiness.j2"
+        )
+        helper = readiness.split("# BEGIN PODMAN IMAGE ID HELPER\n", 1)[1].split(
+            "# END PODMAN IMAGE ID HELPER\n", 1
+        )[0]
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"set -euo pipefail\n{helper}\ncanonicalize_podman_image_id \"$1\"",
+                "image-id-test",
+                value,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def run_runtime_image_helper(
+        self, *, output: str, status: int, expected: str
+    ) -> subprocess.CompletedProcess[str]:
+        readiness = self.read(
+            "roles/voice_fixture/templates/vivolution-voice-fixture-readiness.j2"
+        )
+        helper = readiness.split("# BEGIN PODMAN IMAGE ID HELPER\n", 1)[1].split(
+            "# END PODMAN IMAGE ID HELPER\n", 1
+        )[0]
+        helper = helper.replace("{{ '{{' }}.Image{{ '}}' }}", "{{.Image}}")
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                (
+                    "set -euo pipefail\n"
+                    f"{helper}\n"
+                    "podman() { printf '%s' \"$PODMAN_OUTPUT\"; "
+                    "return \"$PODMAN_STATUS\"; }\n"
+                    "require_runtime_image vivolution-voice-fixture-asterisk \"$1\""
+                ),
+                "runtime-image-test",
+                expected,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "PODMAN_OUTPUT": output,
+                "PODMAN_STATUS": str(status),
+            },
+        )
+
     def test_all_expected_artifacts_exist(self) -> None:
         required = [
             "README.md",
@@ -580,6 +636,9 @@ require_exact_word_set 'fixture SocketBindAllow' "$normalized_words" \
 
     def test_podman_image_ids_are_strictly_normalized(self) -> None:
         tasks = self.read("roles/voice_fixture/tasks/main.yml")
+        readiness = self.read(
+            "roles/voice_fixture/templates/vivolution-voice-fixture-readiness.j2"
+        )
         self.assertIn("Remember raw immutable fixture image IDs", tasks)
         self.assertEqual(tasks.count("is match('^(sha256:)?[0-9a-f]{64}$')"), 2)
         self.assertIn("voice_fixture_asterisk_image_id_raw | regex_replace", tasks)
@@ -588,6 +647,54 @@ require_exact_word_set 'fixture SocketBindAllow' "$normalized_words" \
         self.assertIn("Remember canonical immutable fixture image IDs", tasks)
         self.assertIn("sha256:{{ voice_fixture_asterisk_image_id_raw", tasks)
         self.assertIn("sha256:{{ voice_fixture_sipp_image_id_raw", tasks)
+        digest = "a" * 64
+        for representation in (digest, f"sha256:{digest}"):
+            with self.subTest(representation=representation):
+                result = self.run_podman_image_id_helper(representation)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, f"sha256:{digest}\n")
+        for invalid in (
+            "",
+            "a" * 63,
+            "A" * 64,
+            f"sha512:{digest}",
+            f"sha256:{digest}extra",
+        ):
+            with self.subTest(invalid=invalid):
+                result = self.run_podman_image_id_helper(invalid)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+        self.assertIn("fixture runtime image does not match", readiness)
+        self.assertIn("fixture runtime image inspection failed", readiness)
+
+        for representation in (digest, f"sha256:{digest}"):
+            with self.subTest(runtime_representation=representation):
+                result = self.run_runtime_image_helper(
+                    output=representation,
+                    status=0,
+                    expected=f"sha256:{digest}",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+
+        fail_closed_cases = (
+            (digest, 42, f"sha256:{digest}"),
+            ("malformed", 0, f"sha256:{digest}"),
+            ("b" * 64, 0, f"sha256:{digest}"),
+        )
+        for output, status, expected in fail_closed_cases:
+            with self.subTest(output=output, status=status, expected=expected):
+                result = self.run_runtime_image_helper(
+                    output=output,
+                    status=status,
+                    expected=expected,
+                )
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_rtp_config_disables_ice_without_triggering_empty_stun_dns(self) -> None:
+        rtp = self.read("roles/voice_fixture/templates/rtp.conf.j2")
+        self.assertIn("icesupport=no", rtp)
+        self.assertNotIn("stunaddr", rtp)
 
     def test_sipp_version_probe_accepts_only_its_documented_no_call_exit(self) -> None:
         tasks = self.read("roles/voice_fixture/tasks/main.yml")

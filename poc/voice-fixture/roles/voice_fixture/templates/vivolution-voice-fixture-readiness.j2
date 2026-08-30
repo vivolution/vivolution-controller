@@ -526,6 +526,46 @@ require_exact_pjsip_transport_detail() {
 }
 # END ASTERISK CONTRACT HELPERS
 
+# BEGIN PODMAN IMAGE ID HELPER
+canonicalize_podman_image_id() {
+    local raw=$1
+
+    if [[ $raw =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        printf '%s\n' "$raw"
+    elif [[ $raw =~ ^[0-9a-f]{64}$ ]]; then
+        printf 'sha256:%s\n' "$raw"
+    else
+        printf 'fixture Podman image ID is malformed\n' >&2
+        return 1
+    fi
+}
+
+require_runtime_image() {
+    local container=$1
+    local expected=$2
+    local raw
+    local actual
+
+    if [[ ! $container =~ ^[a-z0-9][a-z0-9_.-]{0,127}$ ||
+          ! $expected =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        printf 'fixture runtime image inputs are malformed\n' >&2
+        return 1
+    fi
+    if ! raw=$(podman inspect --format '{{ '{{' }}.Image{{ '}}' }}' "$container"); then
+        printf 'fixture runtime image inspection failed: %s\n' "$container" >&2
+        return 1
+    fi
+    if ! actual=$(canonicalize_podman_image_id "$raw"); then
+        return 1
+    fi
+    if [[ $actual != "$expected" ]]; then
+        printf 'fixture runtime image does not match its immutable selection: %s\n' \
+            "$container" >&2
+        return 1
+    fi
+}
+# END PODMAN IMAGE ID HELPER
+
 [[ -d $runtime_root && ! -L $runtime_root ]]
 [[ $(stat --format='%u:%g:%a' -- "$runtime_root") == '0:0:750' ]]
 [[ -d $state_root && ! -L $state_root ]]
@@ -779,8 +819,8 @@ asterisk_image=$(<"$asterisk_image_file")
 sipp_image=$(<"$sipp_image_file")
 [[ $asterisk_image =~ ^sha256:[0-9a-f]{64}$ ]]
 [[ $sipp_image =~ ^sha256:[0-9a-f]{64}$ ]]
-[[ $(podman inspect --format '{{ '{{' }}.Image{{ '}}' }}' vivolution-voice-fixture-asterisk) == "$asterisk_image" ]]
-[[ $(podman inspect --format '{{ '{{' }}.Image{{ '}}' }}' vivolution-voice-fixture-sipp) == "$sipp_image" ]]
+require_runtime_image vivolution-voice-fixture-asterisk "$asterisk_image"
+require_runtime_image vivolution-voice-fixture-sipp "$sipp_image"
 
 active_firewall=$(nft list ruleset)
 for token in \
