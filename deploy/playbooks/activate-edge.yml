@@ -111,6 +111,13 @@
         follow: false
       register: edge_activation_state_traversal_root
 
+    - name: Inspect the shared Edge state ACL before creating candidate paths
+      ansible.posix.acl:
+        path: /var/lib/vivolution-edge
+        state: query
+        follow: false
+      register: edge_activation_state_traversal_acl
+
     - name: Require traversal-only access before any activation debris can be created
       ansible.builtin.assert:
         that:
@@ -120,10 +127,13 @@
           - edge_activation_state_traversal_root.stat.pw_name == 'root'
           - edge_activation_state_traversal_root.stat.gr_name == 'root'
           - edge_activation_state_traversal_root.stat.mode == '0751'
+          - >-
+            edge_activation_state_traversal_acl.acl | sort ==
+            (['user::rwx', 'user:vivolution-edge-agent:r-x', 'group::r-x',
+              'mask::r-x', 'other::--x'] | sort)
         fail_msg: >-
-          Activation requires the root-owned traversal-only Edge state root so
-          the unprivileged Agent can reach only its separately protected state
-          and candidate workspace leaves.
+          Activation requires the exact root-owned state root and named Agent
+          ACL before any candidate workspace or evidence path can be created.
 
     - name: Define the canonical candidate slug and fixed remote paths
       ansible.builtin.set_fact:

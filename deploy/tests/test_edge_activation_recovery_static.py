@@ -188,6 +188,17 @@ print(environment.from_string(expression).render(**variables).strip())
             playbook,
         )
         self.assertIn("Bind recovery to the installed node and full tenant allocation identity", playbook)
+        self.assertIn(
+            "Require the exact Agent path-walk authority before recovery",
+            playbook,
+        )
+        self.assertIn("edge_recovery_state_traversal_root.stat.mode == '0751'", playbook)
+        self.assertIn("edge_recovery_state_traversal_acl.acl | sort", playbook)
+        self.assertIn("user:vivolution-edge-agent:r-x", playbook)
+        self.assertLess(
+            playbook.index("Require the exact Agent path-walk authority before recovery"),
+            playbook.index("Define only candidate-specific recovery and cleanup paths"),
+        )
 
         recover = playbook.index("Reconcile any durable runtime transaction journal first")
         status = playbook.index("Read the protected runtime status after journal recovery")

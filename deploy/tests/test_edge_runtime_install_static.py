@@ -131,6 +131,56 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
         self.assertIn("Allow traversal only to independently protected Edge state leaves", tasks)
         self.assertIn("path: /var/lib/vivolution-edge\n    state: directory", tasks)
         self.assertIn("mode: '0751'", tasks)
+        self.assertIn(
+            "Grant only the Agent read-traverse access for secure path walking",
+            tasks,
+        )
+        self.assertIn("entity: vivolution-edge-agent", tasks)
+        self.assertIn("permissions: rx", tasks)
+        self.assertIn("state: query", tasks)
+        self.assertIn("user:vivolution-edge-agent:r-x", tasks)
+        for path in (
+            "/var/lib/vivolution-edge/agent-home",
+            "/var/lib/vivolution-edge/agent-home/.ansible",
+            "/var/lib/vivolution-edge/agent-home/.ansible/tmp",
+        ):
+            self.assertIn(f"path: {path}", tasks)
+            self.assertIn(path, verify)
+        for path in (
+            "/var/lib/vivolution-edge/agent-home",
+            "/var/lib/vivolution-edge/agent-home/.ansible",
+        ):
+            self.assertIn(
+                f"- path: {path}\n"
+                "      owner: root\n"
+                "      group: vivolution-edge-agent\n"
+                "      mode: '0710'",
+                tasks,
+            )
+        self.assertIn(
+            "- path: /var/lib/vivolution-edge/agent-home/.ansible/tmp\n"
+            "      owner: vivolution-edge-agent\n"
+            "      group: vivolution-edge-agent\n"
+            "      mode: '0700'",
+            tasks,
+        )
+        self.assertIn(
+            "Require private Agent-owned execution paths for privilege dropping",
+            verify,
+        )
+        self.assertIn("follow: false", tasks)
+        self.assertIn("item.stat.pw_name ==", verify)
+        self.assertIn("item.item.endswith('/tmp')", verify)
+        self.assertIn("item.stat.gr_name == 'vivolution-edge-agent'", verify)
+        self.assertIn("item.stat.mode == ('0700'", verify)
+        self.assertIn("getent\n      - passwd\n      - vivolution-edge-agent", verify)
+        self.assertIn("'/var/lib/vivolution-edge/agent-home'", verify)
+        self.assertIn("'/usr/sbin/nologin'", verify)
+        self.assertIn("edge_verify_agent_primary_group.stdout", verify)
+        self.assertIn("Inspect the ACL package required for secure privilege dropping", verify)
+        self.assertIn("path: /usr/bin/setfacl", verify)
+        self.assertIn("edge_verify_acl_package.stdout | trim == 'installed|amd64'", verify)
+        self.assertIn("edge_verify_setfacl.stat.mode == '0755'", verify)
         self.assertIn("/var/lib/vivolution-edge/agent-state/tenant", tasks)
         self.assertIn("owner: vivolution-edge-agent", tasks)
         self.assertIn("/var/lib/vivolution-edge/runtime-inbox", tasks)
@@ -140,6 +190,8 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
         self.assertGreaterEqual(tasks.count("mode: '0700'"), 3)
         self.assertIn("Inspect the shared Edge state traversal root", verify)
         self.assertIn("edge_verify_state_traversal_root.stat.mode == '0751'", verify)
+        self.assertIn("edge_verify_state_traversal_acl.acl | sort", verify)
+        self.assertIn("user:vivolution-edge-agent:r-x", verify)
         self.assertIn(
             "Inspect the shared Edge state traversal root before creating candidate paths",
             activation,
@@ -148,6 +200,8 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
             "edge_activation_state_traversal_root.stat.mode == '0751'",
             activation,
         )
+        self.assertIn("edge_activation_state_traversal_acl.acl | sort", activation)
+        self.assertIn("user:vivolution-edge-agent:r-x", activation)
         self.assertLess(
             activation.index("Inspect the shared Edge state traversal root before creating candidate paths"),
             activation.index("Create the isolated unprivileged candidate workspace"),

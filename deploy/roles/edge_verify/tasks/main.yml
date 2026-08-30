@@ -13,6 +13,13 @@
     follow: false
   register: edge_verify_state_traversal_root
 
+- name: Inspect the exact shared Edge state traversal ACL
+  ansible.posix.acl:
+    path: /var/lib/vivolution-edge
+    state: query
+    follow: false
+  register: edge_verify_state_traversal_acl
+
 - name: Require traversal-only access to independently protected Edge state leaves
   ansible.builtin.assert:
     that:
@@ -22,10 +29,103 @@
       - edge_verify_state_traversal_root.stat.pw_name == 'root'
       - edge_verify_state_traversal_root.stat.gr_name == 'root'
       - edge_verify_state_traversal_root.stat.mode == '0751'
+      - >-
+        edge_verify_state_traversal_acl.acl | sort ==
+        (['user::rwx', 'user:vivolution-edge-agent:r-x', 'group::r-x',
+          'mask::r-x', 'other::--x'] | sort)
     fail_msg: >-
       The shared Edge state root must permit traversal without directory
-      listing so the unprivileged Agent and data-plane services can reach only
-      their separately protected leaves.
+      listing, with read-traverse granted only to the unprivileged Agent for
+      secure component-by-component path validation.
+
+- name: Inspect the dedicated Agent execution home and Ansible temporary path
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /var/lib/vivolution-edge/agent-home
+    - /var/lib/vivolution-edge/agent-home/.ansible
+    - /var/lib/vivolution-edge/agent-home/.ansible/tmp
+  register: edge_verify_agent_execution_paths
+
+- name: Inspect the dedicated Agent account binding
+  ansible.builtin.command:
+    argv:
+      - getent
+      - passwd
+      - vivolution-edge-agent
+  register: edge_verify_agent_passwd
+  changed_when: false
+
+- name: Inspect the dedicated Agent primary group
+  ansible.builtin.command:
+    argv:
+      - id
+      - --group
+      - --name
+      - vivolution-edge-agent
+  register: edge_verify_agent_primary_group
+  changed_when: false
+
+- name: Inspect the ACL package required for secure privilege dropping
+  ansible.builtin.command:
+    argv:
+      - dpkg-query
+      - --show
+      - '--showformat=${db:Status-Status}|${Architecture}\n'
+      - acl
+  register: edge_verify_acl_package
+  changed_when: false
+
+- name: Inspect the ACL helper without following links
+  ansible.builtin.stat:
+    path: /usr/bin/setfacl
+    follow: false
+  register: edge_verify_setfacl
+
+- name: Require private Agent-owned execution paths for privilege dropping
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isdir | default(false)
+      - not (item.stat.islnk | default(false))
+      - >-
+        item.stat.pw_name ==
+        ('vivolution-edge-agent' if item.item.endswith('/tmp') else 'root')
+      - item.stat.gr_name == 'vivolution-edge-agent'
+      - >-
+        item.stat.mode == ('0700' if item.item.endswith('/tmp') else '0710')
+    fail_msg: >-
+      The Agent execution hierarchy must remain private and non-linked, with
+      only the temporary leaf writable by the unprivileged Agent.
+  loop: "{{ edge_verify_agent_execution_paths.results }}"
+
+- name: Require the execution hierarchy to match the Agent NSS identity
+  ansible.builtin.assert:
+    that:
+      - edge_verify_agent_passwd.stdout_lines | length == 1
+      - edge_verify_agent_passwd.stdout.split(':') | length == 7
+      - edge_verify_agent_passwd.stdout.split(':')[5] == '/var/lib/vivolution-edge/agent-home'
+      - edge_verify_agent_passwd.stdout.split(':')[6] == '/usr/sbin/nologin'
+      - edge_verify_agent_primary_group.stdout | trim == 'vivolution-edge-agent'
+    fail_msg: >-
+      The private execution hierarchy is not bound to the expected non-login
+      Agent account and primary group.
+
+- name: Require the secure ACL privilege-drop dependency
+  ansible.builtin.assert:
+    that:
+      - edge_verify_acl_package.stdout | trim == 'installed|amd64'
+      - edge_verify_setfacl.stat.exists
+      - edge_verify_setfacl.stat.isreg | default(false)
+      - not (edge_verify_setfacl.stat.islnk | default(false))
+      - edge_verify_setfacl.stat.nlink | int == 1
+      - edge_verify_setfacl.stat.pw_name == 'root'
+      - edge_verify_setfacl.stat.gr_name == 'root'
+      - edge_verify_setfacl.stat.mode == '0755'
+    fail_msg: >-
+      The regular root-owned ACL helper required for secure controller-to-Agent
+      module staging is missing or has drifted.
 
 - name: Inspect exact installed edge package metadata
   ansible.builtin.command:

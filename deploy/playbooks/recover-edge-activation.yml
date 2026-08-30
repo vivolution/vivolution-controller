@@ -49,6 +49,36 @@
           second exact copy of the profile, generation, sequence, and manifest
           digest.
 
+    - name: Inspect the shared Edge state root before recovery evidence can be created
+      ansible.builtin.stat:
+        path: /var/lib/vivolution-edge
+        follow: false
+      register: edge_recovery_state_traversal_root
+
+    - name: Inspect the shared Edge state ACL before recovery evidence can be created
+      ansible.posix.acl:
+        path: /var/lib/vivolution-edge
+        state: query
+        follow: false
+      register: edge_recovery_state_traversal_acl
+
+    - name: Require the exact Agent path-walk authority before recovery
+      ansible.builtin.assert:
+        that:
+          - edge_recovery_state_traversal_root.stat.exists
+          - edge_recovery_state_traversal_root.stat.isdir | default(false)
+          - not (edge_recovery_state_traversal_root.stat.islnk | default(false))
+          - edge_recovery_state_traversal_root.stat.pw_name == 'root'
+          - edge_recovery_state_traversal_root.stat.gr_name == 'root'
+          - edge_recovery_state_traversal_root.stat.mode == '0751'
+          - >-
+            edge_recovery_state_traversal_acl.acl | sort ==
+            (['user::rwx', 'user:vivolution-edge-agent:r-x', 'group::r-x',
+              'mask::r-x', 'other::--x'] | sort)
+        fail_msg: >-
+          Recovery requires the exact root-owned state root and named Agent ACL
+          before any recovery evidence or candidate path can be touched.
+
     - name: Define only candidate-specific recovery and cleanup paths
       ansible.builtin.set_fact:
         edge_recovery_work_dir: >-
