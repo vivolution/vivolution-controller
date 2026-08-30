@@ -161,7 +161,11 @@ Asterisk 22.10.1 is built from the upstream tag archive whose SHA-256 is fixed
 in the Containerfile because Debian 13 does not ship an Asterisk binary
 package. SIPp uses Debian 13's exact `sip-tester` package version. Runtime
 containers use `Pull=never` and have no allowed path to package mirrors or the
-Internet.
+Internet. The two one-time build commands use an IPv4-only `slirp4netns`
+userspace network with host-loopback access disabled. This gives their pinned
+package/source fetches DNS and HTTPS without weakening the controller's
+default-drop forwarding chain or giving build steps the host network
+namespace; it is not used by either runtime container.
 
 ## Readiness and calls
 

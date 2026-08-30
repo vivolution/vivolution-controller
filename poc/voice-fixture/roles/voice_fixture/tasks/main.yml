@@ -72,6 +72,7 @@
       - nftables
       - openssl
       - podman
+      - slirp4netns
       - util-linux
     state: present
     update_cache: true
@@ -937,6 +938,7 @@
     argv:
       - podman
       - build
+      - --network=slirp4netns:allow_host_loopback=false,enable_ipv6=false
       - --pull=never
       - --build-arg
       - "BASE_IMAGE={{ voice_fixture_base_image }}"
@@ -955,6 +957,7 @@
     argv:
       - podman
       - build
+      - --network=slirp4netns:allow_host_loopback=false,enable_ipv6=false
       - --pull=never
       - --build-arg
       - "BASE_IMAGE={{ voice_fixture_python_base_image }}"

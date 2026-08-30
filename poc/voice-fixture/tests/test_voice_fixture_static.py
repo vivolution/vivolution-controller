@@ -229,6 +229,22 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertIn("SIPP_DEBIAN_VERSION=1:3.7.3-2", sipp)
         self.assertIn('"sip-tester=${SIPP_DEBIAN_VERSION}"', sipp)
 
+    def test_build_network_bypasses_only_the_blocked_bridge_path(self) -> None:
+        tasks = self.read("roles/voice_fixture/tasks/main.yml")
+        build_network = (
+            "--network=slirp4netns:allow_host_loopback=false,enable_ipv6=false"
+        )
+        self.assertIn("      - slirp4netns\n", tasks)
+        self.assertEqual(tasks.count(build_network), 2)
+        for block in re.findall(
+            r"- name: Build the .+? fixture image .+?(?=\n- name:|\Z)",
+            tasks,
+            flags=re.DOTALL,
+        ):
+            self.assertIn(build_network, block)
+            self.assertNotIn("--network=host", block)
+        self.assertIn("--network=none", tasks)
+
     def test_install_is_fail_closed_and_does_not_use_shell_module(self) -> None:
         tasks = self.read("roles/voice_fixture/tasks/main.yml")
         self.assertIn("NO_PSTN_SYNTHETIC_ONLY", tasks)
@@ -241,6 +257,7 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertNotIn("ansible.builtin.shell:", tasks)
         self.assertNotRegex(tasks, r"(?m)^\s*shell:")
         self.assertIn("podman, pull", tasks)
+        self.assertIn("      - slirp4netns\n", tasks)
         self.assertIn("--pull=never", tasks)
         self.assertIn("Prove systemd cgroup socket-bind denial is enforced", tasks)
         self.assertIn("Prove systemd cgroup IP egress denial is enforced", tasks)
