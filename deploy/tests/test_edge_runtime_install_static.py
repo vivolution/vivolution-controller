@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 
@@ -89,8 +90,37 @@ class EdgeRuntimeInstallStaticTests(unittest.TestCase):
         self.assertIn("recover|status", runtime)
         self.assertIn("[ \"$#\" -eq 5 ]", runtime)
         self.assertIn("[ \"$#\" -eq 1 ]", runtime)
+        self.assertIn("edge_digest_length=$(/usr/bin/printf", runtime)
+        self.assertIn("/usr/bin/wc -c", runtime)
+        self.assertNotIn("${#", runtime)
         self.assertNotIn("eval ", runtime)
         self.assertNotIn("$6", runtime)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as wrapper:
+            wrapper.write(runtime)
+            wrapper.flush()
+            syntax = subprocess.run(
+                ["/bin/sh", "-n", wrapper.name],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(syntax.returncode, 0, syntax.stderr)
+            for digest in ("sha256:" + "a" * 63, "sha256:" + "a" * 65):
+                rejected = subprocess.run(
+                    [
+                        "/bin/sh",
+                        wrapper.name,
+                        "activate",
+                        "--sequence",
+                        "1",
+                        "--manifest-digest",
+                        digest,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(rejected.returncode, 64)
 
     def test_unprivileged_agent_state_and_fixed_root_directories(self) -> None:
         tasks = self.read("roles/edge_runtime_install/tasks/main.yml")

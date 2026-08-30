@@ -7,7 +7,8 @@ case "${1-}" in
     [ "$2" = "--sequence" ] || exit 64
     [ "$4" = "--manifest-digest" ] || exit 64
     case "$3" in ''|*[!0-9]*) exit 64 ;; esac
-    [ "${#5}" -eq 71 ] || exit 64
+    edge_digest_length=$(/usr/bin/printf '%s' "$5" | /usr/bin/wc -c)
+    [ "$edge_digest_length" -eq 71 ] || exit 64
     case "$5" in sha256:*) ;; *) exit 64 ;; esac
     edge_digest_hex=${5#sha256:}
     case "$edge_digest_hex" in *[!0-9a-f]*) exit 64 ;; esac
