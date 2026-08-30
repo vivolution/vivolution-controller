@@ -472,6 +472,7 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
         self.assertIn("openssl", base)
         self.assertIn("ntpsec", base)
         self.assertIn("util-linux", base)
+        self.assertIn("- acl", base)
         ntp = self.read("roles/edge_base_os/templates/ntpsec.conf.j2")
         self.assertIn("edge_ntp_server_ipv4_cidrs", ntp)
         self.assertNotIn("pool ", ntp)

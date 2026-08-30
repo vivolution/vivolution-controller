@@ -21,6 +21,7 @@
 - name: Install the native edge foundation packages
   ansible.builtin.apt:
     name:
+      - acl
       - ca-certificates
       - curl
       - iproute2
