@@ -9,6 +9,7 @@ ARG PJPROJECT_SOURCE_SHA256=04b2eb1f0f01aa0ad1945b167171843448a51aa6b7c3e806496d
 
 COPY pjsip-tls-listener-bind-fail-closed.patch /tmp/pjsip-tls-listener-bind-fail-closed.patch
 COPY pjproject-tls-kernel-autobind.patch /tmp/pjproject-tls-kernel-autobind.patch
+COPY pjproject-dns-kernel-autobind.patch /tmp/pjproject-dns-kernel-autobind.patch
 
 RUN set -eux; \
     apt-get update; \
@@ -57,7 +58,7 @@ WORKDIR /usr/src/asterisk-${ASTERISK_VERSION}
 
 RUN set -eux; \
     export EXTERNALS_CACHE_DIR=/usr/src/cache; \
-    CFLAGS='-DVIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT=1' ./configure \
+    CFLAGS='-DVIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT=1 -DVIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT=1' ./configure \
         --prefix=/usr \
         --sysconfdir=/etc \
         --localstatedir=/var \
@@ -69,14 +70,26 @@ RUN set -eux; \
     patch --batch --forward --strip=1 \
         --directory=third-party/pjproject/source \
         < /tmp/pjproject-tls-kernel-autobind.patch; \
+    patch --batch --forward --strip=1 \
+        --directory=third-party/pjproject/source \
+        < /tmp/pjproject-dns-kernel-autobind.patch; \
     grep --fixed-strings --quiet \
         'if (status != PJ_SUCCESS && status != PJ_EPENDING)' \
         third-party/pjproject/source/pjsip/src/pjsip/sip_transport_tls.c; \
     grep --fixed-strings --quiet \
         'if (!port_range && pj_sockaddr_get_port(localaddr) == 0)' \
         third-party/pjproject/source/pjlib/src/pj/ssl_sock_imp_common.c; \
+    grep --fixed-strings --quiet \
+        'VIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT == 1' \
+        third-party/pjproject/source/pjlib-util/src/pjlib-util/resolver.c; \
+    grep --fixed-strings --quiet \
+        'resv->udp6_sock = PJ_INVALID_SOCKET;' \
+        third-party/pjproject/source/pjlib-util/src/pjlib-util/resolver.c; \
     grep --fixed-strings --quiet -- \
         '-DVIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT=1' \
+        third-party/pjproject/source/build.mak; \
+    grep --fixed-strings --quiet -- \
+        '-DVIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT=1' \
         third-party/pjproject/source/build.mak; \
     make menuselect.makeopts; \
     menuselect/menuselect \

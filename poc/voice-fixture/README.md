@@ -251,8 +251,19 @@ perform the normal kernel ephemeral auto-bind; positive listener and RTP binds
 remain subject to the exact systemd allow-list. Readiness also requires the
 kernel route for Asterisk's host UID `10001` to each fixed Edge address to
 select `eth0` with source `10.20.1.4`, preserving the source identity that
-PJProject's redundant bind would otherwise select. The composite
-`nosounds1-tlsbind3` image revision prevents reuse of either older variant.
+PJProject's redundant bind would otherwise select.
+
+PJProject's asynchronous DNS resolver also explicitly binds its IPv4 UDP
+socket to wildcard port zero. The exact systemd bind boundary rejects that
+operation. Its error path then destroys a zero-initialized IPv6 socket field;
+without an invalid-socket sentinel, that can close unrelated descriptor zero,
+including the already-live TLS listener. The fixture-only DNS patch uses the
+same kernel auto-bind behavior for the resolver's IPv4 UDP socket and
+initializes the optional IPv6 socket to `PJ_INVALID_SOCKET`. IPv6 remains
+excluded by `RestrictAddressFamilies`; no new positive bind is authorized.
+Readiness requires the container resolver authority to remain exactly the
+loopback-only systemd-resolved stub at `127.0.0.53`. The composite
+`nosounds1-tlsbind4` image revision prevents reuse of older variants.
 
 ## Readiness and calls
 

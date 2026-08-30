@@ -624,6 +624,14 @@ for unit in "${units[@]}"; do
         "${normalized_socket_binds[*]}" "${expected_socket_binds[@]}"
 done
 
+asterisk_resolver_config=$(
+    podman exec vivolution-voice-fixture-asterisk cat /etc/resolv.conf
+)
+if [[ $asterisk_resolver_config != $'nameserver 127.0.0.53\noptions edns0 trust-ad' ]]; then
+    printf 'Asterisk resolver authority is not the exact loopback-only stub\n' >&2
+    exit 3
+fi
+
 expected_asterisk_modules=(
     app_dial.so
     app_milliwatt.so

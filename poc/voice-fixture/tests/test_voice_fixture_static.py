@@ -39,6 +39,7 @@ class VoiceFixtureStaticTests(unittest.TestCase):
             "roles/voice_fixture/tasks/main.yml",
             "roles/voice_fixture/handlers/main.yml",
             "roles/voice_fixture/files/asterisk/Containerfile",
+            "roles/voice_fixture/files/asterisk/pjproject-dns-kernel-autobind.patch",
             "roles/voice_fixture/files/sipp/Containerfile",
             "roles/voice_fixture/files/sipp/bin/fixture_sipp.py",
             "roles/voice_fixture/files/bin/synthetic_cdr_evidence.py",
@@ -206,7 +207,7 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         config = self.read("roles/voice_fixture/templates/asterisk.conf.j2")
         tasks = self.read("roles/voice_fixture/tasks/main.yml")
         image_tag = (
-            "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind3"
+            "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind4"
         )
         self.assertIn(image_tag, defaults)
         self.assertIn(image_tag, teardown_defaults)
@@ -364,6 +365,14 @@ class VoiceFixtureStaticTests(unittest.TestCase):
         self.assertIn(".uid == 10001", readiness)
         self.assertIn(".flags == [] and .cache == []", readiness)
         self.assertIn("fixture kernel-autobind route identity is not exact", readiness)
+        self.assertIn(
+            "podman exec vivolution-voice-fixture-asterisk cat /etc/resolv.conf",
+            readiness,
+        )
+        self.assertIn(
+            "$'nameserver 127.0.0.53\\noptions edns0 trust-ad'", readiness
+        )
+        self.assertIn("exact loopback-only stub", readiness)
 
     def test_readiness_accepts_only_equivalent_systemd_policy_renderings(self) -> None:
         socket_renderings = {

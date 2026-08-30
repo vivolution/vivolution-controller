@@ -164,7 +164,7 @@ class AsteriskRuntimeContractStaticTests(unittest.TestCase):
             "third-party/pjproject/source/pjsip/src/pjsip/sip_transport_tls.c",
             containerfile,
         )
-        tag = "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind3"
+        tag = "voice-fixture-asterisk:22.10.1-xmldoc1-nosounds1-tlsbind4"
         self.assertIn(tag, defaults)
         self.assertIn(tag, teardown_defaults)
 
@@ -205,7 +205,8 @@ class AsteriskRuntimeContractStaticTests(unittest.TestCase):
         )
         self.assertIn("+    if (port_range) {", patch)
         self.assertIn(
-            "CFLAGS='-DVIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT=1' "
+            "CFLAGS='-DVIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT=1 "
+            "-DVIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT=1' "
             "./configure",
             containerfile,
         )
@@ -222,6 +223,49 @@ class AsteriskRuntimeContractStaticTests(unittest.TestCase):
         )
         self.assertIn(
             "third-party/pjproject/source/pjlib/src/pj/ssl_sock_imp_common.c",
+            containerfile,
+        )
+
+    def test_pjproject_dns_uses_kernel_autobind_and_safe_socket_sentinels(self) -> None:
+        patch = self.read(
+            "roles/voice_fixture/files/asterisk/"
+            "pjproject-dns-kernel-autobind.patch"
+        )
+        containerfile = self.read("roles/voice_fixture/files/asterisk/Containerfile")
+
+        self.assertEqual(patch.count("--- a/"), 1)
+        self.assertIn(
+            "--- a/pjlib-util/src/pjlib-util/resolver.c\n"
+            "+++ b/pjlib-util/src/pjlib-util/resolver.c\n",
+            patch,
+        )
+        self.assertIn(
+            "+#if defined(VIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT) && \\\n"
+            "+    VIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT == 1",
+            patch,
+        )
+        self.assertIn("+    resv->udp6_sock = PJ_INVALID_SOCKET;", patch)
+        self.assertEqual(
+            [
+                line
+                for line in patch.splitlines()
+                if line.startswith("-") and not line.startswith("---")
+            ],
+            ["-    status = pj_sock_bind_in(resv->udp_sock, 0, 0);"],
+        )
+        self.assertIn(
+            "COPY pjproject-dns-kernel-autobind.patch ", containerfile
+        )
+        self.assertIn(
+            "< /tmp/pjproject-dns-kernel-autobind.patch", containerfile
+        )
+        self.assertIn(
+            "'-DVIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT=1' \\\n"
+            "        third-party/pjproject/source/build.mak",
+            containerfile,
+        )
+        self.assertIn(
+            "third-party/pjproject/source/pjlib-util/src/pjlib-util/resolver.c",
             containerfile,
         )
 
