@@ -408,12 +408,16 @@ wait_for_sipp_uas_recovery
         self.assertIn("m=audio 22032", self.read(
             "roles/voice_fixture/files/sipp/scenarios/teams-uac.xml"
         ))
-        self.assertIn("m=audio 22000", self.read(
-            "roles/voice_fixture/files/sipp/scenarios/teams-uas.xml"
-        ))
-        self.assertIn("^INVITE sips?:\\+9710000001001@", self.read(
-            "roles/voice_fixture/files/sipp/scenarios/teams-uas.xml"
-        ))
+        uas = self.read("roles/voice_fixture/files/sipp/scenarios/teams-uas.xml")
+        self.assertIn("m=audio 22000", uas)
+        self.assertIn("^INVITE sips?:\\+9710000001001@", uas)
+        self.assertEqual(
+            uas.count(
+                "Contact: <sips:teams-fixture@[local_ip]:[local_port];transport=tls>"
+            ),
+            3,
+        )
+        self.assertNotIn("Contact: <sip:teams-fixture@", uas)
         self.assertIn("INVITE sip:+9710000001001@", self.read(
             "roles/voice_fixture/files/sipp/scenarios/teams-uac.xml"
         ))
@@ -899,7 +903,7 @@ require_exact_word_set 'fixture SocketBindAllow' "$normalized_words" \
             "e55b15f567760e9febeef366a1ab51a5239d197a132ce931b78c826d22d31e69",
             defaults,
         )
-        image_tag = "voice-fixture-sipp:3.7.7-sni1-txn1"
+        image_tag = "voice-fixture-sipp:3.7.7-sni1-txn1-sips1"
         self.assertIn(image_tag, defaults)
         self.assertIn(image_tag, teardown_defaults)
         self.assertIn(

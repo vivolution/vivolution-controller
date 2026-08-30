@@ -30,7 +30,7 @@
       [last_To:];tag=fixture-[pid]-[call_number]
       [last_Call-ID:]
       [last_CSeq:]
-      Contact: <sip:teams-fixture@[local_ip]:[local_port];transport=tls>
+      Contact: <sips:teams-fixture@[local_ip]:[local_port];transport=tls>
       Content-Length: 0
     ]]>
   </send>
@@ -46,7 +46,7 @@
       [last_To:];tag=fixture-[pid]-[call_number]
       [last_Call-ID:]
       [last_CSeq:]
-      Contact: <sip:teams-fixture@[local_ip]:[local_port];transport=tls>
+      Contact: <sips:teams-fixture@[local_ip]:[local_port];transport=tls>
       Supported: timer
       Content-Type: application/sdp
       Content-Length: [len]
@@ -81,7 +81,7 @@
       To: [$fixture_them]
       [last_Call-ID:]
       CSeq: [cseq] BYE
-      Contact: <sip:teams-fixture@[local_ip]:[local_port];transport=tls>
+      Contact: <sips:teams-fixture@[local_ip]:[local_port];transport=tls>
       Max-Forwards: 20
       Content-Length: 0
     ]]>

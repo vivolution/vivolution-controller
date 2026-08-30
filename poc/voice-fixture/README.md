@@ -190,6 +190,11 @@ less-precise CSeq-method fallback for requests carrying `start_txn`; leaving a
 provisional response unbound would therefore reject even a valid 100, 180, or
 183 response instead of weakening transaction matching.
 
+The persistent UAS preserves the secure URI scheme on every dialog Contact.
+An Asterisk-originated `sips:` INVITE therefore receives only `sips:` Contacts;
+returning a `sip:` Contact over the same TLS socket would still be a semantic
+downgrade and Asterisk correctly rejects it with `480 SIPS Required`.
+
 The SIPp build retains TLS, SCTP, PCAP, GSL, and SHA-256 support. Only the
 stripped executable and its resolved dynamic libraries are copied into the
 runtime stage; build tools and source are excluded. Runtime containers use
