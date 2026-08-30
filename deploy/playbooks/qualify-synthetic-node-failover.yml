@@ -1,7 +1,6 @@
 ---
 - name: Qualify bounded private new-call failover from SBC1 to SBC2
   hosts: localhost
-  connection: local
   gather_facts: false
   any_errors_fatal: true
 
@@ -17,7 +16,10 @@
     edge_failover_deadman_path: "{{ edge_failover_lock_dir }}/recover-data-plane"
     edge_failover_injector_path: "{{ edge_failover_lock_dir }}/inject-data-plane-failure"
     edge_failover_results_root: /var/lib/vivolution/voice-fixture/results
-    edge_failover_local_root: "{{ inventory_dir }}/generated/synthetic-failover"
+    edge_failover_inventory_dir: >-
+      {{ hostvars[edge_failover_primary]['inventory_dir'] }}
+    edge_failover_local_root: >-
+      {{ edge_failover_inventory_dir }}/generated/synthetic-failover
     edge_failover_remote_collector: /run/lock/vivolution-synthetic-failover-collector.py
     edge_failover_expected_fleet_generation: >-
       {{ hostvars['sbc1'].edge_generation | int }}
@@ -49,8 +51,19 @@
           - edge_failover_alternate_call_timeout_seconds | int == 110
           - edge_failover_deadman_delay_seconds | int == 150
           - edge_failover_deadman_delay_seconds | int > edge_failover_gate_seconds | int
-          - inventory_dir is match('^/')
-          - edge_failover_local_root == inventory_dir ~ '/generated/synthetic-failover'
+          - edge_failover_inventory_dir is match('^/')
+          - >-
+            hostvars[edge_failover_primary]['inventory_dir'] ==
+            edge_failover_inventory_dir
+          - >-
+            hostvars[edge_failover_alternate]['inventory_dir'] ==
+            edge_failover_inventory_dir
+          - >-
+            hostvars[groups['fixture_controller'][0]]['inventory_dir'] ==
+            edge_failover_inventory_dir
+          - >-
+            edge_failover_local_root ==
+            edge_failover_inventory_dir ~ '/generated/synthetic-failover'
           - hostvars['sbc1'].edge_runtime_profile == 'SYNTHETIC_PRIVATE'
           - hostvars['sbc2'].edge_runtime_profile == 'SYNTHETIC_PRIVATE'
           - edge_failover_expected_fleet_generation | int >= 1

@@ -434,6 +434,13 @@ ANSIBLE_ROLES_PATH=deploy/roles ansible-playbook \
   deploy/playbooks/qualify-synthetic-node-failover.yml
 ```
 
+Keep the inventory path absolute. The play runs its orchestration and evidence
+compiler on Ansible's implicit local controller, which intentionally has no
+`inventory_dir`; it derives the protected evidence directory from the
+inventory-backed `sbc1` host and requires SBC2 and the fixture controller to
+come from that same directory. Delegated node and fixture tasks retain their
+inventory-defined SSH connections.
+
 The playbook binds both healthy nodes to one immutable logical tenant route,
 proves a complete two-direction fixture call through SBC1, then starts a
 conservative 120-second clock before stopping SBC1 OpenSIPS and RTPengine. It

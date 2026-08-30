@@ -349,6 +349,12 @@ ANSIBLE_ROLES_PATH=deploy/roles ansible-playbook \
   deploy/playbooks/qualify-synthetic-node-failover.yml
 ```
 
+The inventory path must be absolute. Local evidence is rooted beside the
+inventory by using the inventory-backed SBC1 host; Ansible's implicit
+`localhost` does not define `inventory_dir`. SBC2 and the fixture controller
+must resolve to the same inventory directory, and delegated work uses their
+inventory SSH connections.
+
 The playbook refuses any fleet other than exact `sbc1`/`sbc2` on the same
 positive inventory generation and one fixture controller. It requires each
 node's installed facts and root runtime authority to match that node's exact

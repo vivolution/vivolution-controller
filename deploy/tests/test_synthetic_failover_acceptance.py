@@ -643,6 +643,42 @@ class SyntheticFailoverRemoteCollectionTests(unittest.TestCase):
 
 
 class SyntheticFailoverPlaybookStaticTests(unittest.TestCase):
+    def test_local_orchestration_preserves_inventory_host_connections(self) -> None:
+        source = PLAYBOOK.read_text(encoding="utf-8")
+        header = source[: source.index("  vars:")]
+        self.assertIn("  hosts: localhost\n", header)
+        self.assertNotIn("  connection:", header)
+        for delegate in (
+            "delegate_to: sbc1",
+            'delegate_to: "{{ groups[\'fixture_controller\'][0] }}"',
+        ):
+            self.assertIn(delegate, source)
+
+    def test_evidence_root_uses_an_inventory_backed_host_directory(self) -> None:
+        source = PLAYBOOK.read_text(encoding="utf-8")
+        variables = source[source.index("  vars:") : source.index("  tasks:")]
+        contract = source[
+            source.index("Require the exact private two-node disruption contract") :
+            source.index("Inspect a durable recovery marker from an interrupted prior run")
+        ]
+        self.assertIn(
+            "{{ hostvars[edge_failover_primary]['inventory_dir'] }}", variables
+        )
+        self.assertIn(
+            "{{ edge_failover_inventory_dir }}/generated/synthetic-failover",
+            variables,
+        )
+        self.assertIn(
+            "hostvars[edge_failover_alternate]['inventory_dir'] ==",
+            contract,
+        )
+        self.assertIn(
+            "hostvars[groups['fixture_controller'][0]]['inventory_dir'] ==",
+            contract,
+        )
+        self.assertIn("edge_failover_inventory_dir is match('^/')", contract)
+        self.assertNotIn('"{{ inventory_dir }}/generated/synthetic-failover"', source)
+
     def test_playbook_is_exact_disruptive_synthetic_workflow(self) -> None:
         source = PLAYBOOK.read_text(encoding="utf-8")
         for token in (
