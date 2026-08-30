@@ -170,6 +170,12 @@ on exact FQDN matching: no wildcard or no-SNI TLS domain is introduced. The
 fixture runner supplies only the hard-coded SBC1/SBC2 FQDN after proving its
 static private-IP mapping and the public server certificate.
 
+The UAC scenario binds every provisional and final INVITE response to the
+named transaction started by that INVITE. SIPp 3.7.7 deliberately omits its
+less-precise CSeq-method fallback for requests carrying `start_txn`; leaving a
+provisional response unbound would therefore reject even a valid 100, 180, or
+183 response instead of weakening transaction matching.
+
 The SIPp build retains TLS, SCTP, PCAP, GSL, and SHA-256 support. Only the
 stripped executable and its resolved dynamic libraries are copied into the
 runtime stage; build tools and source are excluded. Runtime containers use

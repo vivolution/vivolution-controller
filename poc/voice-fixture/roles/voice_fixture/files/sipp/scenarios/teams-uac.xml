@@ -29,9 +29,9 @@
     ]]>
   </send>
 
-  <recv response="100" optional="true" />
-  <recv response="180" optional="true" />
-  <recv response="183" optional="true" />
+  <recv response="100" optional="true" response_txn="invite" />
+  <recv response="180" optional="true" response_txn="invite" />
+  <recv response="183" optional="true" response_txn="invite" />
   <recv response="200" response_txn="invite" rrs="true" />
 
   <send ack_txn="invite">

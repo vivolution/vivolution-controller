@@ -350,6 +350,31 @@ class VoiceFixtureStaticTests(unittest.TestCase):
             "roles/voice_fixture/files/sipp/scenarios/teams-uac.xml"
         ))
 
+    def test_sipp_uac_binds_every_response_to_its_started_transaction(self) -> None:
+        path = ROOT / "roles/voice_fixture/files/sipp/scenarios/teams-uac.xml"
+        root = ET.parse(path).getroot()
+        self.assertEqual(
+            [send.get("start_txn") for send in root.findall("send")],
+            ["invite", None, "bye"],
+        )
+        self.assertEqual(
+            [
+                (
+                    recv.get("response"),
+                    recv.get("optional"),
+                    recv.get("response_txn"),
+                )
+                for recv in root.findall("recv")
+            ],
+            [
+                ("100", "true", "invite"),
+                ("180", "true", "invite"),
+                ("183", "true", "invite"),
+                ("200", None, "invite"),
+                ("200", None, "bye"),
+            ],
+        )
+
     def test_runner_has_exact_target_allowlist_and_rtp_evidence(self) -> None:
         runner = self.read("roles/voice_fixture/files/sipp/bin/fixture_sipp.py")
         self.assertIn('EDGE_IPS = {ipaddress.ip_address("10.20.2.4"), ipaddress.ip_address("10.20.2.5")}', runner)
