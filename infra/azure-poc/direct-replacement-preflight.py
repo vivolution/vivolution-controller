@@ -529,8 +529,11 @@ def _validate_budget_and_headroom(budget: Any, cost: Any) -> Dict[str, Any]:
     if not isinstance(budget, dict) or budget.get("name") != EXPECTED_BUDGET_NAME:
         raise PreflightError("the exact USD 100 POC budget is absent")
     expected_budget_id = (
-        "/subscriptions/{}/providers/Microsoft.Consumption/budgets/{}".format(
-            EXPECTED_SUBSCRIPTION_ID, EXPECTED_BUDGET_NAME
+        "/subscriptions/{}/resourceGroups/{}/providers/"
+        "Microsoft.Consumption/budgets/{}".format(
+            EXPECTED_SUBSCRIPTION_ID,
+            EXPECTED_RESOURCE_GROUP,
+            EXPECTED_BUDGET_NAME,
         )
     )
     if (
@@ -1060,15 +1063,25 @@ def validate_live_plan(
         _resource_id("Microsoft.Compute/virtualMachines", name).lower()
         for name in present_nodes
     }
+    expected_availability_set_keys = {
+        "faultDomains",
+        "id",
+        "location",
+        "name",
+        "sku",
+        "tags",
+        "updateDomains",
+        "vmIds",
+    }
     if (
         not isinstance(availability_set, dict)
+        or set(availability_set) != expected_availability_set_keys
         or not _same_id(availability_set.get("id"), expected_as_id)
         or availability_set.get("name") != EXPECTED_AVAILABILITY_SET_NAME
         or str(availability_set.get("location", "")).lower() != EXPECTED_LOCATION
         or availability_set.get("sku") != "Aligned"
         or availability_set.get("faultDomains") != 2
         or availability_set.get("updateDomains") != 5
-        or availability_set.get("provisioningState") != "Succeeded"
         or availability_set.get("tags") != _required_common_tags()
         or {str(value).lower() for value in (availability_set.get("vmIds") or [])} != expected_vm_ids
     ):
@@ -1291,15 +1304,19 @@ def collect_live_observations(path: Path, *, runner: Runner = _run) -> Dict[str,
         [
             "az", "vm", "availability-set", "show", "--resource-group", EXPECTED_RESOURCE_GROUP,
             "--name", EXPECTED_AVAILABILITY_SET_NAME, *common, "--query",
-            "{id:id,name:name,location:location,tags:tags,sku:sku.name,faultDomains:platformFaultDomainCount,updateDomains:platformUpdateDomainCount,vmIds:virtualMachines[].id,provisioningState:provisioningState}",
+            "{id:id,name:name,location:location,tags:tags,sku:sku.name,faultDomains:platformFaultDomainCount,updateDomains:platformUpdateDomainCount,vmIds:virtualMachines[].id}",
         ],
         "availability set",
         runner,
     )
     budget_url = (
-        "https://management.azure.com/subscriptions/{}/providers/Microsoft.Consumption/"
-        "budgets/{}?api-version=2023-11-01"
-    ).format(EXPECTED_SUBSCRIPTION_ID, EXPECTED_BUDGET_NAME)
+        "https://management.azure.com/subscriptions/{}/resourceGroups/{}/providers/"
+        "Microsoft.Consumption/budgets/{}?api-version=2023-11-01"
+    ).format(
+        EXPECTED_SUBSCRIPTION_ID,
+        EXPECTED_RESOURCE_GROUP,
+        EXPECTED_BUDGET_NAME,
+    )
     budget = _json_from_runner(
         ["az", "rest", "--method", "get", "--url", budget_url, *common],
         "budget",

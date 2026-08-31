@@ -255,7 +255,6 @@ def live_observations(present_nodes=(), *, locked_nodes=None):
             ),
             "location": "uaenorth",
             "name": preflight.EXPECTED_AVAILABILITY_SET_NAME,
-            "provisioningState": "Succeeded",
             "sku": "Aligned",
             "tags": preflight._required_common_tags(),
             "updateDomains": 5,
@@ -268,8 +267,9 @@ def live_observations(present_nodes=(), *, locked_nodes=None):
             ],
         },
         "budget": {
-            "id": "/subscriptions/{}/providers/Microsoft.Consumption/budgets/{}".format(
+            "id": "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Consumption/budgets/{}".format(
                 preflight.EXPECTED_SUBSCRIPTION_ID,
+                preflight.EXPECTED_RESOURCE_GROUP,
                 preflight.EXPECTED_BUDGET_NAME,
             ),
             "name": preflight.EXPECTED_BUDGET_NAME,
@@ -685,6 +685,17 @@ class DirectReplacementLivePlanTests(unittest.TestCase):
         bad_availability_set = live_observations()
         bad_availability_set["availabilitySet"]["faultDomains"] = 3
         cases.append(bad_availability_set)
+        extra_availability_set_field = live_observations()
+        extra_availability_set_field["availabilitySet"]["provisioningState"] = "Succeeded"
+        cases.append(extra_availability_set_field)
+        wrong_budget_scope = live_observations()
+        wrong_budget_scope["budget"]["id"] = (
+            "/subscriptions/{}/providers/Microsoft.Consumption/budgets/{}".format(
+                preflight.EXPECTED_SUBSCRIPTION_ID,
+                preflight.EXPECTED_BUDGET_NAME,
+            )
+        )
+        cases.append(wrong_budget_scope)
         cp1_ip = live_observations()
         cp1_ip["nodes"][0]["nic"]["ipConfigurations"][0]["privateIPAddress"] = "10.20.1.5"
         cases.append(cp1_ip)
