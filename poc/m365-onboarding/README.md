@@ -7,11 +7,17 @@ configuration. It pairs these two gateways with the one expected Entra tenant:
 - `sbc2.vivolution.ae:5061`
 - tenant `151cd01a-1e81-40a9-b898-d8646e1a8760`
 
-The only outbound voice route matches `^\+971[1-9][0-9]{7,8}$`. It therefore
-does not match short emergency/service codes or non-UAE E.164 numbers. It uses a
-dedicated PSTN usage and per-user policy for one or two explicitly supplied
-test users. Nothing in this package creates a domain, user, license, trial,
-subscription, PSTN service, or emergency-calling configuration.
+The only outbound voice route matches
+`^(?:\+971000000200[12]|\+971[1-9][0-9]{7,8})$`. The two exact `+9710000002001`
+and `+9710000002002` destinations terminate on CP1 as non-billable tone and
+echo tests; every other admitted value must match the bounded UAE PSTN pattern.
+User line assignments remain restricted to `^\+971[1-9][0-9]{7,8}$`, so the
+local test destinations cannot be assigned as user identities. Short
+emergency/service codes and non-UAE E.164 numbers remain outside the route. The
+package uses a dedicated PSTN usage and per-user policy for one or two
+explicitly supplied test users. Nothing in this package creates a domain,
+user, license, trial, subscription, PSTN service, or emergency-calling
+configuration.
 
 ## Important support boundary
 
@@ -37,6 +43,7 @@ Azure subscription login.
 | Voice route | `Vivolution-POC-UAE-Plus971` |
 | Voice routing policy | `Vivolution-POC-UAE` |
 | Gateways, in failover order | `sbc1.vivolution.ae`, `sbc2.vivolution.ae` |
+| Non-billable route probes | `+9710000002001` tone, `+9710000002002` echo |
 | User numbers | one or two distinct, explicitly supplied `+971` E.164 numbers |
 
 The scripts never replace the tenant's global PSTN usage list. They call

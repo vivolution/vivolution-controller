@@ -12,7 +12,7 @@
     PstnUsage         = 'Vivolution-POC-UAE'
     VoiceRoute        = 'Vivolution-POC-UAE-Plus971'
     VoiceRoutingPolicy = 'Vivolution-POC-UAE'
-    NumberPattern     = '^\+971[1-9][0-9]{7,8}$'
+    NumberPattern     = '^(?:\+971000000200[12]|\+971[1-9][0-9]{7,8})$'
 
     # Replace all four values. The scripts reject placeholders, duplicate
     # identities/numbers, non-vivolution.ae UPNs, and non-UAE numbers.

@@ -11,7 +11,8 @@ $script:SipSignalingPort = 5061
 $script:PstnUsage = 'Vivolution-POC-UAE'
 $script:VoiceRoute = 'Vivolution-POC-UAE-Plus971'
 $script:VoiceRoutingPolicy = 'Vivolution-POC-UAE'
-$script:NumberPattern = '^\+971[1-9][0-9]{7,8}$'
+$script:NumberPattern = '^(?:\+971000000200[12]|\+971[1-9][0-9]{7,8})$'
+$script:UserNumberPattern = '^\+971[1-9][0-9]{7,8}$'
 $script:GatewayDescription = 'Vivolution OpenSIPS non-certified POC; no Microsoft support claim'
 $script:ApplyAcknowledgement =
     'APPLY VIVOLUTION DIRECT ROUTING POC TO 151cd01a-1e81-40a9-b898-d8646e1a8760'
@@ -236,7 +237,7 @@ function Assert-VivolutionConfiguration {
         if ($upn -notmatch '^[a-z0-9.!#$%&''*+/=?^_`{|}~-]+@vivolution\.ae$') {
             throw "User UPN '$upn' must be in the verified vivolution.ae domain."
         }
-        if ($number -notmatch $script:NumberPattern) {
+        if ($number -notmatch $script:UserNumberPattern) {
             throw "Telephone number '$number' is not an allowed +971 Direct Routing number."
         }
         if ($seenUpns.ContainsKey($upn)) {

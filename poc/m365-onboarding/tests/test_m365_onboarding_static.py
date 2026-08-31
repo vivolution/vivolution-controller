@@ -17,12 +17,16 @@ class Microsoft365OnboardingStaticTests(unittest.TestCase):
             "sbc1.vivolution.ae",
             "sbc2.vivolution.ae",
             "SipSignalingPort = 5061",
+            "^(?:\\+971000000200[12]|\\+971[1-9][0-9]{7,8})$",
             "^\\+971[1-9][0-9]{7,8}$",
         ):
             self.assertIn(value, MODULE + CONFIG)
         self.assertIn("One or two test users must be supplied", MODULE)
         self.assertIn("$users.Count -lt 1 -or $users.Count -gt 2", MODULE)
         self.assertIn("must be in the verified vivolution.ae domain", MODULE)
+        self.assertIn("$number -notmatch $script:UserNumberPattern", MODULE)
+        self.assertIn("+9710000002001", README)
+        self.assertIn("+9710000002002", README)
         self.assertNotIn("@voice\\.vivolution\\.ae", MODULE)
 
     def test_preflight_checks_tenant_domain_and_user_readiness(self):
