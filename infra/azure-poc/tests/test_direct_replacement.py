@@ -562,6 +562,20 @@ class DirectReplacementLivePlanTests(unittest.TestCase):
     }
     observed_at = datetime(2026, 8, 31, 1, 2, 3, tzinfo=timezone.utc)
 
+    def test_live_query_failure_names_the_exact_observation(self):
+        def reject(_argv):
+            raise preflight.PreflightError("Azure CLI command failed: 429")
+
+        with self.assertRaisesRegex(
+            preflight.PreflightError,
+            r"^provider-level what-if query failed: Azure CLI command failed: 429$",
+        ):
+            preflight._json_from_runner(
+                ["az", "deployment", "sub", "what-if"],
+                "provider-level what-if",
+                reject,
+            )
+
     def validate(self, observations):
         return preflight.validate_live_plan(
             observations,

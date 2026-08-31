@@ -427,7 +427,11 @@ def _run(argv: Sequence[str]) -> str:
 
 def _json_from_runner(argv: Sequence[str], label: str, runner: Runner) -> Any:
     try:
-        return json.loads(runner(argv))
+        raw = runner(argv)
+    except PreflightError as exc:
+        raise PreflightError("{} query failed: {}".format(label, exc)) from exc
+    try:
+        return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise PreflightError("Azure CLI returned malformed {} JSON".format(label)) from exc
 
