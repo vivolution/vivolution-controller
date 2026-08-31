@@ -417,6 +417,74 @@ still exist, the CP1 lock remains exact, and the POC DNS names remain absent.
 It has no command path capable of deleting either protected group or the shared
 parent zone. An already absent POC group is an idempotent zero-action result.
 
+## Exact Edge OS-disk SKU correction
+
+If the deployed Edge VM model still reports a reimage-derived attached
+`Premium_LRS` OS disk while this template and inventory declare
+`StandardSSD_LRS`, use `remediate_edge_os_disk_sku.py`. Do not weaken the
+infrastructure qualifier to accept the more expensive disk. The helper binds
+the exact subscription, tenant, resource group, availability set, VM,
+system-assigned principal, attached disk resource ID and `uniqueId`,
+`managedBy`, NIC, private IP, public IP, boot ID, immutable runtime hashes,
+runtime status, health, and required units. It accepts only Premium SSD as the
+source and Standard SSD as the target.
+
+Generate a read-only plan from the repository root:
+
+```bash
+/opt/homebrew/bin/python3.13 infra/azure-poc/remediate_edge_os_disk_sku.py \
+  --mode plan \
+  --expected-subscription-id 'a806949c-240f-4541-8c61-fd97f6d1f953' \
+  --expected-tenant-id 'efc3bcaa-8879-4366-a452-2b8efa76b16a' \
+  --ssh-private-key '/Users/jay/.ssh/vivolution-sbc-cp1-ed25519' \
+  --known-hosts 'deploy/inventories/poc-edge-template/generated/azure-poc/generated/known_hosts'
+```
+
+Review the complete canonical JSON and retain its `planSha256`. Apply only
+that plan, using a runner-private `0700` state directory and the exact
+acknowledgement:
+
+```bash
+/opt/homebrew/bin/python3.13 infra/azure-poc/remediate_edge_os_disk_sku.py \
+  --mode apply \
+  --expected-subscription-id 'a806949c-240f-4541-8c61-fd97f6d1f953' \
+  --expected-tenant-id 'efc3bcaa-8879-4366-a452-2b8efa76b16a' \
+  --ssh-private-key '/Users/jay/.ssh/vivolution-sbc-cp1-ed25519' \
+  --known-hosts 'deploy/inventories/poc-edge-template/generated/azure-poc/generated/known_hosts' \
+  --journal 'deploy/.state/edge-os-disk-sku-remediation.json' \
+  --approved-plan-sha256 '<planSha256-from-immediately-preceding-plan>' \
+  --confirmation 'CONVERT-VIVOLUTION-SBC-POC-EDGE-OS-DISKS-TO-STANDARD-SSD'
+```
+
+The execution order is deliberately SBC2 then SBC1, keeping the primary node
+online during the first conversion. Before every deallocation, the exact peer
+must be running, runtime-healthy, and complete the full two-direction private
+fixture call. The peer repeats that call while the target is observably
+Azure-deallocated. The helper journals `BASELINED`, the pre-mutation request
+phases, `DEALLOCATED`, `OUTAGE_PEER_QUALIFIED`, `SKU_UPDATED`, `STARTED`, and
+`QUALIFIED`; it then
+requires a changed boot ID, unchanged Azure/runtime identity, exact Standard
+SSD attachment, and a full call through the recovered node. VM and disk
+mutations use only the plan-bound resource IDs. At no point may both nodes be
+deallocated.
+
+After any runner, SSH, or Azure interruption, rerun the exact same apply
+command with the same plan digest and journal. Observed state and the protected
+journal select the only safe remainder. A normal update failure attempts to
+restart and re-qualify the unchanged disk without advancing the journal;
+identity drift refuses automatic recovery. Never delete or edit the journal.
+One fixed protected fleet lock serializes both planning and applying even if a
+caller tries to select a different journal filename.
+SIGINT, SIGTERM, and ordinary command failures enter the same bounded recovery
+path. A fresh mixed Premium/Standard fleet is rejected: only the original
+durable journal may authorize a partially completed conversion.
+
+This focused correction deliberately does not replace the repository's full
+Agent-pending-state, activation/recovery-journal, complete result-manifest, or
+three-source CDR evidence gates. After it reports applied, rerun
+`qualify-azure-infrastructure.yml` and the existing synthetic call/failover
+qualification before treating the corrected fleet as accepted.
+
 ## Security and operating boundary
 
 - Password authentication is disabled in the VM model; the template accepts only an SSH public key.
