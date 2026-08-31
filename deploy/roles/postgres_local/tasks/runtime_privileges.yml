@@ -8,7 +8,7 @@
       Runtime ACL reconciliation is a post-migration local-PostgreSQL cutover
       step and must not run during the bridge release.
 
-- name: Reconcile explicit file-session runtime database privileges
+- name: Reconcile explicit shared-session runtime database privileges
   block:
     - name: Render protected runtime privilege reconciliation SQL
       ansible.builtin.template:
@@ -37,7 +37,7 @@
       ansible.builtin.assert:
         that:
           - >-
-            'CP_RUNTIME_PRIVILEGES_OK=file-sessions-auth-readonly-core-dml' in
+            'CP_RUNTIME_PRIVILEGES_OK=shared-db-sessions-auth-readonly-core-dml' in
             (cp_db_runtime_privilege_result.stdout | default(''))
         fail_msg: The explicit PostgreSQL runtime privilege contract was not verified.
   always:

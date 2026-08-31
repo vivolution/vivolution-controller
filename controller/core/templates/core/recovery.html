@@ -1,0 +1,49 @@
+{% extends "core/document_base.html" %}
+
+{% block title %}Recovery · Vivolution Control Plane{% endblock %}
+
+{% block content %}
+<article class="vivo-docs__recovery">
+  <p class="vivo-docs__eyebrow">Public recovery information</p>
+  <h1>Vivolution Control Plane Recovery</h1>
+  <p>
+    This page is intentionally available without an operator session so it remains useful
+    during an authentication or database incident. It does not expose logs, topology,
+    configuration data or credential-reset controls.
+  </p>
+
+  <section>
+    <h2>Check the service boundary</h2>
+    <ol>
+      <li>Confirm this browser address is the expected controller FQDN and uses trusted HTTPS.</li>
+      <li>Open <code>/health/live</code>. HTTP 200 confirms the web process is responding.</li>
+      <li>Return to the <a href="{% url 'admin:login' %}">operator sign-in page</a>.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>If sign-in is unavailable</h2>
+    <p>
+      Sign in to the Ubuntu VM console or approved SSH endpoint. Inspect installer status with
+      <code>sudo ./installer/install.sh status</code>, resume an interrupted installation with
+      <code>sudo ./installer/install.sh resume</code>, or reconcile a completed installation
+      with <code>sudo ./installer/install.sh reconcile</code>. Create a redacted diagnostic
+      archive with <code>sudo ./installer/install.sh support-bundle</code> when support asks for
+      one, and inspect it before sharing. The initial credential remains in the root-only
+      <code>/var/lib/vivolution-installer/credentials.txt</code> file.
+    </p>
+    <p>
+      The installer owns the operator credential. Password reset or rotation is not available
+      in this release, and the web password-change endpoints are blocked. Application backup
+      and restore, release upgrades, CP2/CP3 HA and external load-balancer workflows are also
+      unavailable / planned. Do not edit the database, container environment, password hashes
+      or installer state manually.
+    </p>
+    <p>
+      When contacting support, provide the controller FQDN, UTC time, this installed release
+      identifier—<code>{{ vivolution_release_id }}</code>—and a sanitized error description.
+      Never send passwords, cookies, database URLs, private keys or complete environment files.
+    </p>
+  </section>
+</article>
+{% endblock %}

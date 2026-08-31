@@ -21,6 +21,7 @@
 - name: Enable PgBouncer
   ansible.builtin.systemd_service:
     name: pgbouncer.service
+    masked: false
     enabled: true
     state: started
 

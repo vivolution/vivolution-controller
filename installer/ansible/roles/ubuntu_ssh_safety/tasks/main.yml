@@ -1,0 +1,198 @@
+---
+- name: Resolve the declared non-root SSH administrator
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ cp_ssh_allowed_user }}"]
+  register: cp_ssh_passwd_entry
+  changed_when: false
+
+- name: Require one regular non-root SSH administrator
+  ansible.builtin.assert:
+    that:
+      - cp_ssh_passwd_entry.stdout_lines | length == 1
+      - cp_ssh_passwd_entry.stdout.split(':') | length == 7
+      - cp_ssh_passwd_entry.stdout.split(':')[2] | int >= 1000
+      - cp_ssh_passwd_entry.stdout.split(':')[2] | int < 60000
+      - cp_ssh_passwd_entry.stdout.split(':')[5] == '/home/' ~ cp_ssh_allowed_user
+      - cp_ssh_passwd_entry.stdout.split(':')[6] in ['/bin/bash', '/bin/sh', '/bin/zsh']
+    fail_msg: The declared SSH administrator is not a unique regular non-root account.
+
+- name: Remember SSH administrator ownership
+  ansible.builtin.set_fact:
+    cp_ssh_allowed_uid: "{{ cp_ssh_passwd_entry.stdout.split(':')[2] | int }}"
+    cp_ssh_allowed_gid: "{{ cp_ssh_passwd_entry.stdout.split(':')[3] | int }}"
+    cp_ssh_allowed_home: "{{ cp_ssh_passwd_entry.stdout.split(':')[5] }}"
+
+- name: Inspect administrator SSH key paths
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ cp_ssh_allowed_home }}"
+    - "{{ cp_ssh_allowed_home }}/.ssh"
+    - "{{ cp_ssh_allowed_home }}/.ssh/authorized_keys"
+  register: cp_ssh_key_paths
+
+- name: Require protected administrator SSH key ownership and modes
+  ansible.builtin.assert:
+    that:
+      - cp_ssh_key_paths.results[0].stat.isdir | default(false)
+      - not (cp_ssh_key_paths.results[0].stat.islnk | default(false))
+      - cp_ssh_key_paths.results[0].stat.uid | int == cp_ssh_allowed_uid | int
+      - cp_ssh_key_paths.results[0].stat.gid | int == cp_ssh_allowed_gid | int
+      - cp_ssh_key_paths.results[0].stat.mode is match('^0?[57][0145][0145]$')
+      - cp_ssh_key_paths.results[1].stat.isdir | default(false)
+      - not (cp_ssh_key_paths.results[1].stat.islnk | default(false))
+      - cp_ssh_key_paths.results[1].stat.uid | int == cp_ssh_allowed_uid | int
+      - cp_ssh_key_paths.results[1].stat.gid | int == cp_ssh_allowed_gid | int
+      - cp_ssh_key_paths.results[1].stat.mode == '0700'
+      - cp_ssh_key_paths.results[2].stat.isreg | default(false)
+      - not (cp_ssh_key_paths.results[2].stat.islnk | default(false))
+      - cp_ssh_key_paths.results[2].stat.uid | int == cp_ssh_allowed_uid | int
+      - cp_ssh_key_paths.results[2].stat.gid | int == cp_ssh_allowed_gid | int
+      - cp_ssh_key_paths.results[2].stat.mode == '0600'
+      - cp_ssh_key_paths.results[2].stat.nlink | int == 1
+    fail_msg: The administrator home, .ssh directory, or authorized_keys metadata is unsafe.
+
+- name: Read administrator authorized keys for reconnect-safety validation
+  ansible.builtin.slurp:
+    src: "{{ cp_ssh_allowed_home }}/.ssh/authorized_keys"
+  register: cp_ssh_authorized_keys_file
+
+- name: Select canonical option-free administrator public keys
+  ansible.builtin.set_fact:
+    cp_ssh_option_free_authorized_key_lines: >-
+      {{ (cp_ssh_authorized_keys_file.content | b64decode).splitlines() |
+         select('match', cp_ssh_option_free_public_key_pattern) | list }}
+  vars:
+    cp_ssh_option_free_public_key_pattern: '^(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)[ \t]+[A-Za-z0-9+/]{16,}={0,2}(?:[ \t]+[^\r\n]*)?$'
+
+- name: Require an option-free public key suitable for unrestricted reconnect
+  ansible.builtin.assert:
+    that:
+      - cp_ssh_option_free_authorized_key_lines | length >= 1
+    fail_msg: >-
+      Password login cannot be disabled until authorized_keys contains at least
+      one canonical public key without from=, expiry-time, cert-authority,
+      forced-command, or other connection options.
+
+- name: Cryptographically prove the option-free reconnect keys
+  block:
+    - name: Create a protected option-free key validation file
+      ansible.builtin.tempfile:
+        state: file
+        path: /run
+        prefix: vivolution-option-free-authorized-keys.
+      register: cp_ssh_option_free_key_file
+
+    - name: Populate the protected option-free key validation file
+      ansible.builtin.copy:
+        dest: "{{ cp_ssh_option_free_key_file.path }}"
+        owner: root
+        group: root
+        mode: '0600'
+        content: "{{ cp_ssh_option_free_authorized_key_lines | join('\n') }}\n"
+
+    - name: Parse every option-free reconnect key
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -l
+          - -E
+          - sha256
+          - -f
+          - "{{ cp_ssh_option_free_key_file.path }}"
+      register: cp_ssh_option_free_key_fingerprints
+      changed_when: false
+
+    - name: Require every option-free reconnect key to be cryptographically valid
+      ansible.builtin.assert:
+        that:
+          - cp_ssh_option_free_key_fingerprints.rc == 0
+          - >-
+            cp_ssh_option_free_key_fingerprints.stdout_lines | length ==
+            cp_ssh_option_free_authorized_key_lines | length
+          - >-
+            cp_ssh_option_free_key_fingerprints.stdout_lines |
+            select('search', ' SHA256:[A-Za-z0-9+/]{20,} ') | list | length ==
+            cp_ssh_option_free_key_fingerprints.stdout_lines | length
+        fail_msg: A canonical option-free administrator key is not cryptographically valid.
+  always:
+    - name: Remove the protected option-free key validation file
+      ansible.builtin.file:
+        path: "{{ cp_ssh_option_free_key_file.path }}"
+        state: absent
+      when:
+        - cp_ssh_option_free_key_file is defined
+        - cp_ssh_option_free_key_file.path is defined
+
+- name: Cryptographically parse every authorized SSH public key
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -l
+      - -E
+      - sha256
+      - -f
+      - "{{ cp_ssh_allowed_home }}/.ssh/authorized_keys"
+  register: cp_ssh_authorized_key_fingerprints
+  changed_when: false
+
+- name: Require at least one real SHA-256-fingerprinted administrator key
+  ansible.builtin.assert:
+    that:
+      - cp_ssh_authorized_key_fingerprints.rc == 0
+      - cp_ssh_authorized_key_fingerprints.stdout_lines | length >= 1
+      - >-
+        cp_ssh_authorized_key_fingerprints.stdout_lines |
+        select('search', ' SHA256:[A-Za-z0-9+/]{20,} ') | list | length ==
+        cp_ssh_authorized_key_fingerprints.stdout_lines | length
+    fail_msg: Password login cannot be disabled until authorized_keys contains real public keys.
+
+- name: Install key-only OpenSSH hardening after key proof
+  ansible.builtin.template:
+    src: 00-vivolution-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/00-vivolution-hardening.conf
+    owner: root
+    group: root
+    mode: '0644'
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Reload OpenSSH
+
+- name: Validate the complete OpenSSH configuration
+  ansible.builtin.command:
+    argv: [/usr/sbin/sshd, -t]
+  changed_when: false
+
+- name: Inspect the effective OpenSSH administrator policy
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/sshd
+      - -T
+      - -C
+      - "user={{ cp_ssh_allowed_user }},host={{ cp_expected_hostname }},addr=127.0.0.1"
+  register: cp_ssh_effective_policy
+  changed_when: false
+
+- name: Require the effective key-only OpenSSH policy
+  ansible.builtin.assert:
+    that:
+      - "'permitrootlogin no' in cp_ssh_effective_policy.stdout_lines"
+      - "'passwordauthentication no' in cp_ssh_effective_policy.stdout_lines"
+      - "'kbdinteractiveauthentication no' in cp_ssh_effective_policy.stdout_lines"
+      - "'pubkeyauthentication yes' in cp_ssh_effective_policy.stdout_lines"
+      - "'authenticationmethods publickey' in cp_ssh_effective_policy.stdout_lines"
+      - >-
+        (cp_ssh_effective_policy.stdout_lines |
+         select('equalto', 'allowusers ' ~ cp_ssh_allowed_user) | list) ==
+        ['allowusers ' ~ cp_ssh_allowed_user]
+      - "'allowtcpforwarding no' in cp_ssh_effective_policy.stdout_lines"
+      - "'allowagentforwarding no' in cp_ssh_effective_policy.stdout_lines"
+    fail_msg: The effective OpenSSH daemon policy is not the declared key-only contract.
+
+- name: Apply validated OpenSSH hardening
+  ansible.builtin.meta: flush_handlers
+
+- name: Require OpenSSH to remain active after hardening
+  ansible.builtin.command:
+    argv: [systemctl, is-active, ssh.service]
+  changed_when: false

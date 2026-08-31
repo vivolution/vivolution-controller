@@ -1,0 +1,232 @@
+:root {
+  color-scheme: light dark;
+  --vivo-background: #f4f7fb;
+  --vivo-surface: #ffffff;
+  --vivo-text: #172033;
+  --vivo-muted: #526078;
+  --vivo-border: #d9e1ec;
+  --vivo-brand: #1257a6;
+  --vivo-brand-dark: #0b376d;
+  --vivo-notice: #e8f2ff;
+  --vivo-warning: #fff5d8;
+  --vivo-code: #eef2f7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.vivo-docs {
+  margin: 0;
+  background: var(--vivo-background);
+  color: var(--vivo-text);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 16px;
+  line-height: 1.65;
+}
+
+.vivo-docs a {
+  color: var(--vivo-brand);
+}
+
+.vivo-docs a:focus-visible,
+.vivo-admin-links a:focus-visible {
+  outline: 3px solid #ffbf47;
+  outline-offset: 3px;
+}
+
+.vivo-docs__header {
+  align-items: center;
+  background: var(--vivo-brand-dark);
+  color: #ffffff;
+  display: flex;
+  gap: 2rem;
+  justify-content: space-between;
+  padding: 1rem clamp(1rem, 4vw, 4rem);
+}
+
+.vivo-docs__header a {
+  color: #ffffff;
+}
+
+.vivo-docs__header nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.vivo-docs__brand {
+  font-size: 1.25rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.vivo-docs__release {
+  margin: 0.2rem 0 0;
+}
+
+.vivo-docs__main {
+  margin: 0 auto;
+  max-width: 1500px;
+  padding: 2rem clamp(1rem, 4vw, 4rem) 4rem;
+}
+
+.vivo-docs__layout {
+  display: grid;
+  gap: 2rem;
+  grid-template-columns: minmax(14rem, 18rem) minmax(0, 1fr);
+}
+
+.vivo-docs__toc {
+  align-self: start;
+  background: var(--vivo-surface);
+  border: 1px solid var(--vivo-border);
+  border-radius: 0.75rem;
+  padding: 1rem 1.25rem;
+  position: sticky;
+  top: 1rem;
+}
+
+.vivo-docs__toc h2 {
+  font-size: 1rem;
+  margin-top: 0;
+}
+
+.vivo-docs__toc ol {
+  margin-bottom: 0;
+  padding-left: 1.25rem;
+}
+
+.vivo-docs__article,
+.vivo-docs__recovery {
+  background: var(--vivo-surface);
+  border: 1px solid var(--vivo-border);
+  border-radius: 0.75rem;
+  box-shadow: 0 0.8rem 2rem rgb(27 51 84 / 8%);
+  padding: clamp(1.25rem, 4vw, 3.5rem);
+}
+
+.vivo-docs__article section + section,
+.vivo-docs__recovery section + section {
+  border-top: 1px solid var(--vivo-border);
+  margin-top: 2.5rem;
+  padding-top: 1.5rem;
+}
+
+.vivo-docs__hero h1,
+.vivo-docs__recovery h1 {
+  font-size: clamp(2rem, 5vw, 3.25rem);
+  line-height: 1.12;
+  margin: 0.25rem 0 1rem;
+}
+
+.vivo-docs__eyebrow {
+  color: var(--vivo-brand);
+  font-size: 0.8rem;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.vivo-docs h2 {
+  line-height: 1.25;
+}
+
+.vivo-docs h3 {
+  margin-top: 2rem;
+}
+
+.vivo-docs code,
+.vivo-docs pre {
+  background: var(--vivo-code);
+  border-radius: 0.3rem;
+  color: var(--vivo-text);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.vivo-docs code {
+  padding: 0.1rem 0.3rem;
+}
+
+.vivo-docs pre {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 1rem;
+}
+
+.vivo-docs pre code {
+  padding: 0;
+}
+
+.vivo-docs__notice,
+.vivo-docs__warning {
+  border-left: 0.35rem solid var(--vivo-brand);
+  border-radius: 0.35rem;
+  margin: 1.5rem 0;
+  padding: 1rem 1.25rem;
+}
+
+.vivo-docs__notice {
+  background: var(--vivo-notice);
+}
+
+.vivo-docs__warning {
+  background: var(--vivo-warning);
+  border-left-color: #a66b00;
+}
+
+.vivo-docs__definitions dt {
+  font-weight: 700;
+  margin-top: 1rem;
+}
+
+.vivo-docs__definitions dd {
+  margin-left: 0;
+}
+
+.vivo-docs__footer {
+  color: var(--vivo-muted);
+  padding: 0 1rem 2rem;
+  text-align: center;
+}
+
+.vivo-admin-links {
+  display: flex;
+  gap: 1rem;
+}
+
+.vivo-admin-links a {
+  color: var(--header-link-color);
+  font-weight: 600;
+}
+
+@media (max-width: 800px) {
+  .vivo-docs__header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .vivo-docs__layout {
+    grid-template-columns: 1fr;
+  }
+
+  .vivo-docs__toc {
+    position: static;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --vivo-background: #101621;
+    --vivo-surface: #182132;
+    --vivo-text: #e7edf6;
+    --vivo-muted: #b7c2d2;
+    --vivo-border: #334159;
+    --vivo-brand: #79b8ff;
+    --vivo-brand-dark: #081f3d;
+    --vivo-notice: #17345a;
+    --vivo-warning: #4a390d;
+    --vivo-code: #111a28;
+  }
+}

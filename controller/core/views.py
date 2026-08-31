@@ -1,9 +1,71 @@
+from django.conf import settings
+from django.contrib.admin.views.decorators import staff_member_required
 from django.db import DatabaseError, connection, transaction
-from django.http import JsonResponse
+from django.http import HttpResponseNotFound, JsonResponse
+from django.shortcuts import render
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET
 
 from .rls import set_local_rls_context
+
+DOCUMENT_CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'none'",
+        "base-uri 'none'",
+        "connect-src 'none'",
+        "font-src 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+        "img-src 'self'",
+        "manifest-src 'none'",
+        "media-src 'none'",
+        "object-src 'none'",
+        "script-src 'none'",
+        "style-src 'self'",
+        "worker-src 'none'",
+    )
+)
+
+
+def _render_document(request, template_name):
+    response = render(
+        request,
+        template_name,
+        {"vivolution_release_id": settings.VIVOLUTION_RELEASE_ID},
+    )
+    response.headers["Content-Security-Policy"] = DOCUMENT_CONTENT_SECURITY_POLICY
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    response.headers["Permissions-Policy"] = (
+        "camera=(), geolocation=(), microphone=(), payment=(), usb=()"
+    )
+    response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive"
+    return response
+
+
+@never_cache
+@require_GET
+@staff_member_required(login_url="admin:login")
+def documentation(request):
+    """Render release-matched operator guidance for authenticated staff."""
+
+    return _render_document(request, "core/documentation.html")
+
+
+@never_cache
+@require_GET
+def recovery(request):
+    """Render a deliberately static recovery landing page without database access."""
+
+    return _render_document(request, "core/recovery.html")
+
+
+@never_cache
+def unsupported_password_change(request):
+    """Fail closed until installer-owned credential rotation is implemented."""
+
+    return HttpResponseNotFound(
+        "Operator password rotation is not available in this release."
+    )
 
 
 @require_GET

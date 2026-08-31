@@ -1,0 +1,10 @@
+[Unit]
+Description=Remove expired Vivolution Controller database sessions
+After=vivolution-cp-web.service
+Requires=vivolution-cp-web.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/podman exec vivolution-cp-web python manage.py clearsessions
+Nice=10
+IOSchedulingClass=idle

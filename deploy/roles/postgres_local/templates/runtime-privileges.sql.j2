@@ -328,6 +328,17 @@ BEGIN
                     existing_relation.relname,
                     '{{ cp_db_runtime_user }}'
                 );
+            ELSIF existing_relation.relname = 'django_session' THEN
+                -- Server-side sessions are shared by every controller and
+                -- remain centrally revocable after logout. The session table
+                -- is deliberately the only authentication table with runtime
+                -- CRUD privileges.
+                EXECUTE format(
+                    'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO %I',
+                    existing_relation.nspname,
+                    existing_relation.relname,
+                    '{{ cp_db_runtime_user }}'
+                );
             ELSIF existing_relation.relname = 'auth_user' THEN
                 EXECUTE format(
                     'GRANT SELECT ON TABLE %I.%I TO %I',
@@ -792,6 +803,28 @@ BEGIN
                         privilege_name, relation.relname;
                 END IF;
             END LOOP;
+        ELSIF relation.relname = 'django_session' THEN
+            IF NOT has_table_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'SELECT'
+            ) OR NOT has_table_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'INSERT'
+            ) OR NOT has_table_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'UPDATE'
+            ) OR NOT has_table_privilege(
+                '{{ cp_db_runtime_user }}', relation.oid, 'DELETE'
+            ) THEN
+                RAISE EXCEPTION 'required shared-session privilege is absent';
+            END IF;
+            FOREACH privilege_name IN ARRAY ARRAY[
+                'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN'
+            ] LOOP
+                IF has_table_privilege(
+                    '{{ cp_db_runtime_user }}', relation.oid, privilege_name
+                ) THEN
+                    RAISE EXCEPTION 'forbidden % privilege exists on django_session',
+                        privilege_name;
+                END IF;
+            END LOOP;
         ELSIF relation.relname = 'auth_user' THEN
             IF NOT has_table_privilege(
                 '{{ cp_db_runtime_user }}', relation.oid, 'SELECT'
@@ -1136,6 +1169,6 @@ SELECT (:'cp_acl_before' <> :'cp_acl_after') AS cp_acl_changed
 \if :cp_acl_changed
 \echo VIVOLUTION_DB_CHANGED:runtime-privileges
 \endif
-\echo CP_RUNTIME_PRIVILEGES_OK=file-sessions-auth-readonly-core-dml
+\echo CP_RUNTIME_PRIVILEGES_OK=shared-db-sessions-auth-readonly-core-dml
 
 COMMIT;

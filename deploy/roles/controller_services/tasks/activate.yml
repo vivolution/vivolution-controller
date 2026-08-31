@@ -912,6 +912,8 @@
           - manage.py
           - reconcile_operator
           - "{{ cp_controller_admin_username }}"
+          - --email
+          - "{{ cp_controller_admin_email }}"
       register: cp_controller_initial_operator
       changed_when: >-
         'VIVOLUTION_ADMIN_RECONCILED' in

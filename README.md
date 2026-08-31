@@ -1,7 +1,37 @@
-# Vivolution SBC
+# Vivolution Control Plane and SBC
 
-Status: three-node turnkey POC implementation candidate; offline qualification
-passing, Azure deployment and end-to-end acceptance pending
+Status: provider-neutral Ubuntu CP1 turnkey installer release candidate; local
+tests pass and clean Ubuntu 24.04 qualification is the next release gate.
+
+## Turnkey Controller installer
+
+The product installer configures an administrator-supplied Ubuntu Server VM or
+physical host. It does **not** create Azure, AWS, GCP, VMware, DNS, NAT, public
+IP, or load-balancer resources.
+
+The first released mode is standalone CP1. CP2 and CP3 are deliberately hidden
+until replication, fencing, quorum, failover, and rejoin acceptance tests pass;
+the installer will never disguise independent databases as an HA cluster.
+
+On a fresh Ubuntu Server 24.04 LTS host, clone or unpack the reviewed source and
+run:
+
+```sh
+sudo ./installer/install.sh
+```
+
+The wizard validates the host and public DNS, preserves the active SSH source,
+asks for the node/shared FQDNs and initial operator, generates protected
+credentials, installs PostgreSQL/PgBouncer/Podman/Caddy, deploys the controller,
+runs health checks, and prints the console URL. Interrupted runs use
+`sudo ./installer/install.sh resume`.
+
+- [Installer guide](installer/README.md)
+- [Turnkey architecture and HA contract](architecture/turnkey-installer.md)
+- [Controller application and operator guide](controller/README.md)
+
+The older Azure and SBC material retained below is research and disposable POC
+history. It is not a dependency of the provider-neutral installer.
 
 ## Working hypothesis
 

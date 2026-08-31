@@ -1,5 +1,20 @@
 # CP1 controller release notes
 
+## Release-matched operator documentation
+
+- Adds staff-only HTML configuration guidance at `/docs/` using the existing Django
+  authentication boundary and same-origin, manifest-hashed static assets.
+- Adds a database-independent public `/recovery/` page containing only safe recovery
+  direction, the installed release identifier, and links to liveness and operator login.
+- Adds Vivolution console branding and a documentation link to Django Admin.
+- Applies a script-free Content Security Policy, no-store caching, same-origin resource
+  isolation, permissions restrictions, and search-engine exclusion to both document surfaces.
+- Adds strictly selected, bounded PostgreSQL sessions to the standalone Ubuntu installer with
+  immediate server-side logout revocation, while retaining the legacy-safe file default and
+  explicit signed-cookie compatibility. CP2/CP3 and round-robin remain planned, not released.
+- Allows the privileged operator reconciler to validate, normalize and idempotently maintain
+  an optional contact email without exposing identity administration to the runtime console.
+
 ## Historical initial functional vertical slice
 
 - Django operator administration and health endpoints
@@ -18,8 +33,8 @@ releases remain traceable even before an external artifact registry is added.
 
 - Removes the temporary legacy RLS authorization clauses after the signed-capable bridge
   release was deployed and proven recoverable.
-- Enables an explicit least-privilege runtime database contract with file-backed operator
-  sessions and read-only Django identity/permission access.
+- Enables an explicit least-privilege runtime database contract with narrowly scoped shared
+  PostgreSQL operator sessions and read-only Django identity/permission access.
 - Allows tenant-scoped read access only to linked customer/M365 metadata while keeping all
   tenant-context/metadata writes and all edge-inventory access operator-only.
 - Keeps migrations and initial operator reconciliation on an ephemeral schema-owner path.

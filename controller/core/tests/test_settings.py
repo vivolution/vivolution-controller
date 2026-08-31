@@ -4,16 +4,71 @@ from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase
 
 from cp1 import settings
-from cp1.settings import database_config, env_bool, env_int
+from cp1.settings import (
+    database_config,
+    env_bool,
+    env_int,
+    env_release_id,
+    env_session_engine,
+)
 
 
 class SettingsHelpersTests(SimpleTestCase):
-    def test_operator_sessions_use_ephemeral_file_backend(self):
+    def test_operator_sessions_remain_legacy_safe_file_backed_by_default(self):
         self.assertEqual(
             settings.SESSION_ENGINE,
             "django.contrib.sessions.backends.file",
         )
+        self.assertEqual(settings.SESSION_COOKIE_AGE, 3600)
+        self.assertFalse(settings.SESSION_SAVE_EVERY_REQUEST)
         self.assertEqual(settings.SESSION_FILE_PATH, "/tmp")
+
+    def test_session_engine_accepts_only_db_file_or_signed_cookies(self):
+        supported_engines = {
+            "db": "django.contrib.sessions.backends.db",
+            "file": "django.contrib.sessions.backends.file",
+            "signed_cookies": "django.contrib.sessions.backends.signed_cookies",
+        }
+        for configured_value, expected_engine in supported_engines.items():
+            with self.subTest(configured_value=configured_value):
+                with patch.dict(
+                    "os.environ",
+                    {"SESSION_ENGINE_UNDER_TEST": configured_value},
+                ):
+                    self.assertEqual(
+                        env_session_engine("SESSION_ENGINE_UNDER_TEST"),
+                        expected_engine,
+                    )
+
+        for invalid_value in (
+            "cached_db",
+            "django.contrib.sessions.backends.db",
+            "django.contrib.sessions.backends.signed_cookies",
+            "SIGNED_COOKIES",
+            " signed_cookies ",
+        ):
+            with self.subTest(invalid_value=invalid_value):
+                with patch.dict(
+                    "os.environ",
+                    {"SESSION_ENGINE_UNDER_TEST": invalid_value},
+                ):
+                    with self.assertRaises(ImproperlyConfigured):
+                        env_session_engine("SESSION_ENGINE_UNDER_TEST")
+
+    def test_session_cookie_age_is_hard_bounded(self):
+        for invalid_age in (299, 28801):
+            with self.subTest(invalid_age=invalid_age):
+                with patch.dict(
+                    "os.environ",
+                    {"SESSION_AGE_UNDER_TEST": str(invalid_age)},
+                ):
+                    with self.assertRaises(ImproperlyConfigured):
+                        env_int(
+                            "SESSION_AGE_UNDER_TEST",
+                            3600,
+                            minimum=300,
+                            maximum=28800,
+                        )
 
     def test_database_url_is_parsed_without_logging_credentials(self):
         with patch.dict("os.environ", {"DB_CONN_MAX_AGE": "30"}):
@@ -51,3 +106,19 @@ class SettingsHelpersTests(SimpleTestCase):
         with patch.dict("os.environ", {"SETTING_UNDER_TEST": "301"}):
             with self.assertRaises(ImproperlyConfigured):
                 env_int("SETTING_UNDER_TEST", 60, minimum=5, maximum=300)
+
+    def test_release_identifier_is_bounded_and_safe_for_display(self):
+        with patch.dict("os.environ", {"RELEASE_UNDER_TEST": "cp1-2026.08.31+1"}):
+            self.assertEqual(
+                env_release_id("RELEASE_UNDER_TEST"),
+                "cp1-2026.08.31+1",
+            )
+
+        for invalid_value in ("", "contains spaces", "<script>", "x" * 129):
+            with self.subTest(invalid_value=invalid_value):
+                with patch.dict(
+                    "os.environ",
+                    {"RELEASE_UNDER_TEST": invalid_value},
+                ):
+                    with self.assertRaises(ImproperlyConfigured):
+                        env_release_id("RELEASE_UNDER_TEST")

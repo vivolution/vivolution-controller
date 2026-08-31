@@ -40,6 +40,30 @@ def env_int(name, default, *, minimum=None, maximum=None):
     return parsed
 
 
+def env_release_id(name="VIVOLUTION_RELEASE_ID", default="unversioned"):
+    value = os.environ.get(name, default).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", value):
+        raise ImproperlyConfigured(
+            f"{name} must be a safe release identifier of at most 128 characters"
+        )
+    return value
+
+
+def env_session_engine(name="DJANGO_SESSION_ENGINE", default="file"):
+    value = os.environ.get(name, default)
+    engines = {
+        "db": "django.contrib.sessions.backends.db",
+        "file": "django.contrib.sessions.backends.file",
+        "signed_cookies": "django.contrib.sessions.backends.signed_cookies",
+    }
+    try:
+        return engines[value]
+    except KeyError as exc:
+        raise ImproperlyConfigured(
+            f"{name} must be exactly db, file, or signed_cookies"
+        ) from exc
+
+
 def database_config(database_url):
     parsed = urlparse(database_url)
     if parsed.scheme not in {"postgres", "postgresql"}:
@@ -70,6 +94,7 @@ def database_config(database_url):
 
 TESTING = env_bool("DJANGO_TESTING", False)
 DEBUG = env_bool("DJANGO_DEBUG", False)
+VIVOLUTION_RELEASE_ID = env_release_id()
 
 RLS_CONTEXT_SIGNING_KEY = os.environ.get("RLS_CONTEXT_SIGNING_KEY", "")
 if RLS_CONTEXT_SIGNING_KEY:
@@ -121,7 +146,10 @@ ROOT_URLCONF = "cp1.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        # This project-owned directory takes precedence over Django's bundled
+        # templates so the operator console can carry product branding and a
+        # documentation link without adding a separate frontend toolchain.
+        "DIRS": [BASE_DIR / "core" / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -169,12 +197,21 @@ CSRF_COOKIE_SECURE = env_bool("DJANGO_CSRF_COOKIE_SECURE", not DEBUG and not TES
 SESSION_COOKIE_SECURE = env_bool("DJANGO_SESSION_COOKIE_SECURE", not DEBUG and not TESTING)
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
-# Authentication sessions intentionally live in the container's bounded /tmp
-# tmpfs instead of the runtime database. This keeps the least-privilege web
-# role away from reusable session material and makes a controller restart
-# invalidate every operator session.
-SESSION_ENGINE = "django.contrib.sessions.backends.file"
+# Keep the application and reusable deployment role backward-compatible with
+# node-local file sessions. The Ubuntu turnkey playbook explicitly selects the
+# database backend because it also provisions the matching PostgreSQL ACL.
+# Signed cookies remain an explicitly selected stateless alternative.
+SESSION_ENGINE = env_session_engine()
 SESSION_FILE_PATH = "/tmp"
+SESSION_COOKIE_AGE = env_int(
+    "DJANGO_SESSION_COOKIE_AGE_SECONDS",
+    3600,
+    minimum=300,
+    maximum=28800,
+)
+# Do not slide the signed cookie's expiry on every request. This preserves an
+# absolute upper bound even for a continuously active operator session.
+SESSION_SAVE_EVERY_REQUEST = False
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "same-origin"
 SECURE_SSL_REDIRECT = env_bool("DJANGO_SECURE_SSL_REDIRECT", False)
