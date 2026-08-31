@@ -9,7 +9,9 @@ param(
 
     [string] $StatePath = (Join-Path $PSScriptRoot '.state/apply-state.json'),
 
-    [switch] $SkipConnect
+    [switch] $SkipConnect,
+
+    [switch] $DeviceAuthentication
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,5 +23,6 @@ Invoke-VivolutionApply `
     -StatePath $StatePath `
     -Acknowledge $Acknowledge `
     -SkipConnect:$SkipConnect `
+    -DeviceAuthentication:$DeviceAuthentication `
     -WhatIf:$WhatIfPreference `
     -Confirm:$false

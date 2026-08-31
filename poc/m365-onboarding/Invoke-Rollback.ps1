@@ -10,7 +10,9 @@ param(
     [Parameter(Mandatory)]
     [string] $Acknowledge,
 
-    [switch] $SkipConnect
+    [switch] $SkipConnect,
+
+    [switch] $DeviceAuthentication
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,5 +24,6 @@ Invoke-VivolutionRollback `
     -StatePath $StatePath `
     -Acknowledge $Acknowledge `
     -SkipConnect:$SkipConnect `
+    -DeviceAuthentication:$DeviceAuthentication `
     -WhatIf:$WhatIfPreference `
     -Confirm:$false

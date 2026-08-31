@@ -40,6 +40,56 @@ class Microsoft365OnboardingStaticTests(unittest.TestCase):
         ):
             self.assertIn(value, MODULE)
 
+    def test_explicit_device_authentication_is_without_wam_and_fail_closed(self):
+        authentication_body = MODULE.split(
+            "function Connect-VivolutionMicrosoftTeams", 1
+        )[
+            1
+        ].split("function Connect-VivolutionTenant", 1)[0]
+        connection_body = MODULE.split("function Connect-VivolutionTenant", 1)[
+            1
+        ].split("function Invoke-VivolutionTenantDiscovery", 1)[0]
+        for value in (
+            "if (-not $DeviceAuthentication)",
+            "Connect-MicrosoftTeams -TenantId",
+            "@('UseDeviceAuthentication', 'DisableWAM')",
+            "-UseDeviceAuthentication",
+            "-DisableWAM",
+            "authentication fallback is refused",
+        ):
+            self.assertIn(value, authentication_body)
+        self.assertLess(
+            authentication_body.index("$connectCommand.Parameters.ContainsKey"),
+            authentication_body.index("-UseDeviceAuthentication"),
+        )
+        self.assertIn(
+            "-DeviceAuthentication:$DeviceAuthentication",
+            connection_body,
+        )
+        self.assertIn(
+            "-SkipConnect and -DeviceAuthentication cannot be combined",
+            connection_body,
+        )
+        for value in (
+            "On macOS and Linux, select the explicit `-DeviceAuthentication` mode",
+            "ordinary browser",
+            "extension, debugging mode, or WAM",
+            "including on Windows",
+            "pwsh -NoLogo -NoProfile -File ./Invoke-Discovery.ps1 -DeviceAuthentication",
+        ):
+            self.assertIn(value, README)
+
+        for name in (
+            "Invoke-Discovery.ps1",
+            "Invoke-Preflight.ps1",
+            "Invoke-Apply.ps1",
+            "Invoke-Verify.ps1",
+            "Invoke-Rollback.ps1",
+        ):
+            wrapper = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIn("[switch] $DeviceAuthentication", wrapper, name)
+            self.assertIn("-DeviceAuthentication:$DeviceAuthentication", wrapper, name)
+
     def test_discovery_is_number_independent_and_read_only(self):
         discovery = (ROOT / "Invoke-Discovery.ps1").read_text(encoding="utf-8")
         discovery_body = MODULE.split(

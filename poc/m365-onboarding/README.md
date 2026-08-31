@@ -87,6 +87,19 @@ Before choosing a Direct Routing number, run the narrower tenant/user discovery:
 ./Invoke-Discovery.ps1
 ```
 
+On macOS and Linux, select the explicit `-DeviceAuthentication` mode. It invokes
+`Connect-MicrosoftTeams` with both `-UseDeviceAuthentication` and `-DisableWAM`.
+Complete the displayed device-code flow in an ordinary browser; no browser
+extension, debugging mode, or WAM/native Windows library is used. The run stops
+rather than falling back if the installed MicrosoftTeams module does not expose
+both parameters. Omitting `-DeviceAuthentication` retains the MicrosoftTeams
+module's default interactive authentication behavior, including on Windows. A
+shell-explicit safe macOS invocation is:
+
+```powershell
+pwsh -NoLogo -NoProfile -File ./Invoke-Discovery.ps1 -DeviceAuthentication
+```
+
 It is locked to `jay@vivolution.ae` and verifies the expected tenant, registered
 domain, enabled non-soft-deleted account with exact `AccountType=User`, Teams
 and PhoneSystem features, TeamsOnly mode, online registrar, and absence of an
@@ -103,8 +116,12 @@ makes no tenant changes.
 ./Invoke-Preflight.ps1 -ConfigPath ./config.psd1
 ```
 
-`-SkipConnect` may be used only when a MicrosoftTeams session already exists;
-the script still obtains and compares the connected tenant ID.
+`-DeviceAuthentication` is available on discovery, preflight, apply,
+verification, and rollback. `-SkipConnect` may be used only when a
+MicrosoftTeams session already exists; the script still obtains and compares
+the connected tenant ID. Combining `-SkipConnect` with `-DeviceAuthentication`
+is refused because the requested authentication mode would otherwise be
+silently ignored.
 
 The original Azure-only CP1 build recorded the subscription's provisional
 guest directory because Vivolution's Microsoft 365 tenant was not yet known.

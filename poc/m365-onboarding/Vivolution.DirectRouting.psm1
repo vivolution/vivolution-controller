@@ -343,10 +343,39 @@ function Get-TenantDomains {
     return @($domains | Sort-Object -Unique)
 }
 
+function Connect-VivolutionMicrosoftTeams {
+    param(
+        [Parameter(Mandatory)] [string] $TenantId,
+        [switch] $DeviceAuthentication
+    )
+
+    if (-not $DeviceAuthentication) {
+        Connect-MicrosoftTeams -TenantId $TenantId -ErrorAction Stop | Out-Null
+        return
+    }
+
+    $connectCommand = Get-Command Connect-MicrosoftTeams -ErrorAction Stop
+    foreach ($parameterName in @('UseDeviceAuthentication', 'DisableWAM')) {
+        if (-not $connectCommand.Parameters.ContainsKey($parameterName)) {
+            throw (
+                'Device-code MicrosoftTeams authentication requires ' +
+                "Connect-MicrosoftTeams parameter '-$parameterName'. " +
+                'Install a current MicrosoftTeams module; authentication fallback is refused.'
+            )
+        }
+    }
+    Connect-MicrosoftTeams `
+        -TenantId $TenantId `
+        -UseDeviceAuthentication `
+        -DisableWAM `
+        -ErrorAction Stop | Out-Null
+}
+
 function Connect-VivolutionTenant {
     param(
         [Parameter(Mandatory)] [hashtable] $Configuration,
         [switch] $SkipConnect,
+        [switch] $DeviceAuthentication,
         [switch] $ReadOnlyContract
     )
 
@@ -356,8 +385,13 @@ function Connect-VivolutionTenant {
     else {
         Assert-TeamsModuleContract
     }
+    if ($SkipConnect -and $DeviceAuthentication) {
+        throw '-SkipConnect and -DeviceAuthentication cannot be combined.'
+    }
     if (-not $SkipConnect) {
-        Connect-MicrosoftTeams -TenantId $Configuration.ExpectedTenantId -ErrorAction Stop | Out-Null
+        Connect-VivolutionMicrosoftTeams `
+            -TenantId $Configuration.ExpectedTenantId `
+            -DeviceAuthentication:$DeviceAuthentication
     }
 
     $tenants = @(Get-CsTenant -ErrorAction Stop)
@@ -390,7 +424,10 @@ function Connect-VivolutionTenant {
 
 function Invoke-VivolutionTenantDiscovery {
     [CmdletBinding()]
-    param([switch] $SkipConnect)
+    param(
+        [switch] $SkipConnect,
+        [switch] $DeviceAuthentication
+    )
 
     $discoveryConfiguration = @{
         ExpectedTenantId = $script:ExpectedTenantId
@@ -399,6 +436,7 @@ function Invoke-VivolutionTenantDiscovery {
     $tenantContext = Connect-VivolutionTenant `
         -Configuration $discoveryConfiguration `
         -SkipConnect:$SkipConnect `
+        -DeviceAuthentication:$DeviceAuthentication `
         -ReadOnlyContract
 
     $users = @(Get-CsOnlineUser -Identity $script:DiscoveryUserUpn -ErrorAction Stop)
@@ -853,13 +891,15 @@ function Invoke-VivolutionPreflight {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [hashtable] $Configuration,
-        [switch] $SkipConnect
+        [switch] $SkipConnect,
+        [switch] $DeviceAuthentication
     )
 
     Assert-VivolutionConfiguration -Configuration $Configuration
     $tenantContext = Connect-VivolutionTenant `
         -Configuration $Configuration `
-        -SkipConnect:$SkipConnect
+        -SkipConnect:$SkipConnect `
+        -DeviceAuthentication:$DeviceAuthentication
     $snapshot = Get-VivolutionSnapshot `
         -Configuration $Configuration `
         -TenantContext $tenantContext
@@ -880,12 +920,14 @@ function Invoke-VivolutionVerification {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [hashtable] $Configuration,
-        [switch] $SkipConnect
+        [switch] $SkipConnect,
+        [switch] $DeviceAuthentication
     )
 
     $preflight = Invoke-VivolutionPreflight `
         -Configuration $Configuration `
-        -SkipConnect:$SkipConnect
+        -SkipConnect:$SkipConnect `
+        -DeviceAuthentication:$DeviceAuthentication
     $snapshot = $preflight.Snapshot
 
     if (-not $snapshot.PstnUsagePresent) {
@@ -1058,7 +1100,8 @@ function Invoke-VivolutionApply {
         [Parameter(Mandatory)] [hashtable] $Configuration,
         [Parameter(Mandatory)] [string] $StatePath,
         [Parameter(Mandatory)] [string] $Acknowledge,
-        [switch] $SkipConnect
+        [switch] $SkipConnect,
+        [switch] $DeviceAuthentication
     )
 
     if (-not [string]::Equals(
@@ -1071,7 +1114,8 @@ function Invoke-VivolutionApply {
 
     $preflight = Invoke-VivolutionPreflight `
         -Configuration $Configuration `
-        -SkipConnect:$SkipConnect
+        -SkipConnect:$SkipConnect `
+        -DeviceAuthentication:$DeviceAuthentication
     $snapshot = $preflight.Snapshot
 
     if (-not $PSCmdlet.ShouldProcess(
@@ -1231,7 +1275,8 @@ function Invoke-VivolutionRollback {
         [Parameter(Mandatory)] [hashtable] $Configuration,
         [Parameter(Mandatory)] [string] $StatePath,
         [Parameter(Mandatory)] [string] $Acknowledge,
-        [switch] $SkipConnect
+        [switch] $SkipConnect,
+        [switch] $DeviceAuthentication
     )
 
     if (-not [string]::Equals(
@@ -1246,7 +1291,8 @@ function Invoke-VivolutionRollback {
 
     $preflight = Invoke-VivolutionPreflight `
         -Configuration $Configuration `
-        -SkipConnect:$SkipConnect
+        -SkipConnect:$SkipConnect `
+        -DeviceAuthentication:$DeviceAuthentication
     $snapshot = $preflight.Snapshot
 
     if ([string] $state.Status -eq 'RolledBack') {
