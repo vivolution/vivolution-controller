@@ -3,3 +3,9 @@
 # recovery service starts the data-plane target only after protected recovery.
 PartOf=vivolution-edge-dataplane.target
 ConditionPathExists=/var/lib/vivolution-edge/runtime/state.json
+{% if item == 'opensips' %}
+# OpenSIPS disables an unavailable RTPengine proxy during module startup. Make
+# the notify-ready media daemon a hard predecessor on every boot.
+Requires=rtpengine-daemon.service
+After=rtpengine-daemon.service
+{% endif %}

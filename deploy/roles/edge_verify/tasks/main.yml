@@ -478,6 +478,8 @@
       - --property=CapabilityBoundingSet
       - --property=AmbientCapabilities
       - --property=ProtectSystem
+      - --property=After
+      - --property=Requires
   register: edge_verify_opensips_unit
   changed_when: false
 
@@ -505,13 +507,17 @@
       - "'CapabilityBoundingSet=' in edge_verify_opensips_unit.stdout_lines"
       - "'AmbientCapabilities=' in edge_verify_opensips_unit.stdout_lines"
       - "'ProtectSystem=strict' in edge_verify_opensips_unit.stdout_lines"
+      - edge_verify_opensips_unit.stdout is search('(?m)^After=.*\\brtpengine-daemon\\.service\\b')
+      - edge_verify_opensips_unit.stdout is search('(?m)^Requires=.*\\brtpengine-daemon\\.service\\b')
       - "'User=rtpengine' in edge_verify_rtpengine_unit.stdout_lines"
       - "'Group=rtpengine' in edge_verify_rtpengine_unit.stdout_lines"
       - "'NoNewPrivileges=yes' in edge_verify_rtpengine_unit.stdout_lines"
       - "'CapabilityBoundingSet=' in edge_verify_rtpengine_unit.stdout_lines"
       - "'AmbientCapabilities=' in edge_verify_rtpengine_unit.stdout_lines"
       - "'ProtectSystem=strict' in edge_verify_rtpengine_unit.stdout_lines"
-    fail_msg: OpenSIPS or RTPengine escaped its dedicated unprivileged systemd sandbox.
+    fail_msg: >-
+      OpenSIPS/RTPengine escaped its sandbox or OpenSIPS can start before its
+      notify-ready RTPengine dependency.
 
 - name: Inspect active listening sockets
   ansible.builtin.command:

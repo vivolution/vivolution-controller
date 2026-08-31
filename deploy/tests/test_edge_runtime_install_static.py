@@ -645,9 +645,17 @@ print(
         self.assertIn("ExecStartPost=/usr/bin/systemctl --no-block start vivolution-edge-dataplane.target", recover)
         self.assertIn("Requires=rtpengine-daemon.service opensips.service", target)
         self.assertIn("PartOf=vivolution-edge-dataplane.target", dropin)
+        self.assertIn("item == 'opensips'", dropin)
+        self.assertIn("Requires=rtpengine-daemon.service", dropin)
+        self.assertIn("After=rtpengine-daemon.service", dropin)
         self.assertIn("enabled: false", tasks)
         self.assertIn("name: vivolution-edge-runtime-recover.service", tasks)
         self.assertNotIn("After=vivolution-edge-runtime-recover.service", dropin)
+
+        verify = self.read("roles/edge_verify/tasks/main.yml")
+        self.assertIn("--property=After", verify)
+        self.assertIn("--property=Requires", verify)
+        self.assertIn("rtpengine-daemon\\\\.service", verify)
 
     def test_edge_verification_requires_recovery_owned_boot_persistence(self) -> None:
         verify = self.read("roles/edge_verify/tasks/main.yml")
