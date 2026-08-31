@@ -40,6 +40,55 @@ class Microsoft365OnboardingStaticTests(unittest.TestCase):
         ):
             self.assertIn(value, MODULE)
 
+    def test_discovery_is_number_independent_and_read_only(self):
+        discovery = (ROOT / "Invoke-Discovery.ps1").read_text(encoding="utf-8")
+        discovery_body = MODULE.split(
+            "function Invoke-VivolutionTenantDiscovery", 1
+        )[1].split("function Get-ManagedObject", 1)[0]
+        connection_body = MODULE.split("function Connect-VivolutionTenant", 1)[
+            1
+        ].split("function Invoke-VivolutionTenantDiscovery", 1)[0]
+        read_only_contract_body = MODULE.split(
+            "function Assert-TeamsReadOnlyModuleContract", 1
+        )[1].split("function Assert-TeamsModuleContract", 1)[0]
+        tenant_domains_body = MODULE.split("function Get-TenantDomains", 1)[1].split(
+            "function Connect-VivolutionTenant", 1
+        )[0]
+        account_gate_body = MODULE.split(
+            "function Assert-InteractiveTeamsUserAccount", 1
+        )[1].split("function Get-VivolutionConfigurationHash", 1)[0]
+        user_ready_body = MODULE.split("function Assert-UserReady", 1)[1].split(
+            "function Assert-NoForeignReferences", 1
+        )[0]
+        for value in (
+            "Invoke-VivolutionTenantDiscovery",
+            "jay@vivolution.ae",
+            "READY_FOR_NUMBER_SELECTION",
+            "EXISTING_NUMBER_REQUIRES_EXACT_REVIEW",
+            "RequiredFeatureTypes = @('PhoneSystem', 'Teams')",
+            "No Direct Routing number has been selected or assigned",
+            "not an evidence-bound CP1 M365 verification receipt",
+        ):
+            self.assertIn(value, MODULE + discovery)
+        self.assertNotIn("TelephoneNumber", discovery)
+        mutation_pattern = re.compile(
+            r"(?:New|Set|Remove|Grant)-Cs(?:Online|Phone)", re.IGNORECASE
+        )
+        for name, body in (
+            ("wrapper", discovery),
+            ("discovery", discovery_body),
+            ("connection", connection_body),
+            ("read-only module contract", read_only_contract_body),
+            ("tenant domains", tenant_domains_body),
+            ("account gate", account_gate_body),
+        ):
+            self.assertNotRegex(body, mutation_pattern, name)
+        self.assertIn("-ReadOnlyContract", discovery_body)
+        self.assertIn("Assert-InteractiveTeamsUserAccount", discovery_body)
+        self.assertIn("Assert-InteractiveTeamsUserAccount", user_ready_body)
+        self.assertIn("'User'", account_gate_body)
+        self.assertIn("SoftDeletionTimestamp", account_gate_body)
+
     def test_mutations_require_exact_acknowledgements(self):
         apply_ack = (
             "APPLY VIVOLUTION DIRECT ROUTING POC TO "
@@ -101,7 +150,11 @@ class Microsoft365OnboardingStaticTests(unittest.TestCase):
         mutation_pattern = re.compile(
             r"(?:New|Set|Remove|Grant)-Cs(?:Online|Phone)", re.IGNORECASE
         )
-        for name in ("Invoke-Preflight.ps1", "Invoke-Verify.ps1"):
+        for name in (
+            "Invoke-Discovery.ps1",
+            "Invoke-Preflight.ps1",
+            "Invoke-Verify.ps1",
+        ):
             content = (ROOT / name).read_text(encoding="utf-8")
             self.assertIsNone(mutation_pattern.search(content), name)
 
@@ -110,6 +163,7 @@ class Microsoft365OnboardingStaticTests(unittest.TestCase):
             "guest directory",
             "registered-domain, SKU, user-license, Teams-homing, and number state remain",
             "jay@vivolution.ae",
+            "PENDING_EVIDENCE_BOUND_CP1_VERIFICATION",
             "Checked against Microsoft Learn on 2026-08-30",
             "-WhatIf",
         ):

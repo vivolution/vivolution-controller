@@ -17,6 +17,9 @@ cp_controller_create_initial_operator: true
 cp_controller_reconcile_vivolution_poc: false
 cp_controller_vivolution_entra_tenant_id: ''
 cp_controller_vivolution_primary_domain: ''
+cp_controller_transition_vivolution_poc_m365_authority: false
+cp_controller_vivolution_previous_entra_tenant_id: ''
+cp_controller_vivolution_m365_transition_acknowledgement: ''
 cp_controller_allow_legacy_rls_rollback: false
 cp_controller_require_signed_rls_cutover: false
 cp_controller_readiness_retries: 30

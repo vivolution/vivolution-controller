@@ -800,6 +800,23 @@
       DNS name. Domain verification remains an external Microsoft 365 gate.
   when: cp_controller_reconcile_vivolution_poc | bool
 
+- name: Validate the one-time Vivolution Microsoft 365 authority transition
+  ansible.builtin.assert:
+    that:
+      - cp_controller_reconcile_vivolution_poc | bool
+      - cp_controller_vivolution_previous_entra_tenant_id == 'efc3bcaa-8879-4366-a452-2b8efa76b16a'
+      - cp_controller_vivolution_entra_tenant_id == '151cd01a-1e81-40a9-b898-d8646e1a8760'
+      - cp_controller_vivolution_primary_domain == 'vivolution.ae'
+      - >-
+        cp_controller_vivolution_m365_transition_acknowledgement ==
+        'TRANSITION VIVOLUTION POC M365 TENANT AUTHORITY TO 151cd01a-1e81-40a9-b898-d8646e1a8760'
+    fail_msg: >-
+      The one-time authority transition is locked to the exact provisional
+      Azure guest directory, discovered Vivolution tenant, primary domain, and
+      explicit acknowledgement. Run it only after the isolated live M365
+      preflight has confirmed that authority.
+  when: cp_controller_transition_vivolution_poc_m365_authority | bool
+
 - name: Run privileged controller preparation with ephemeral credentials
   block:
     - name: Create ephemeral migration environment
@@ -814,7 +831,8 @@
       when: >-
         cp_controller_run_migrations | bool or
         cp_controller_create_initial_operator | bool or
-        cp_controller_reconcile_vivolution_poc | bool
+        cp_controller_reconcile_vivolution_poc | bool or
+        cp_controller_transition_vivolution_poc_m365_authority | bool
 
     - name: Render ephemeral protected migration environment
       ansible.builtin.template:
@@ -828,7 +846,8 @@
       when: >-
         cp_controller_run_migrations | bool or
         cp_controller_create_initial_operator | bool or
-        cp_controller_reconcile_vivolution_poc | bool
+        cp_controller_reconcile_vivolution_poc | bool or
+        cp_controller_transition_vivolution_poc_m365_authority | bool
 
     - name: Apply backward-compatible controller database migrations with schema owner
       ansible.builtin.command:
@@ -899,6 +918,34 @@
         (cp_controller_initial_operator.stdout | default(''))
       no_log: true
       when: cp_controller_create_initial_operator | bool
+
+    - name: Transition bounded POC to preflight-confirmed Vivolution M365 authority
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - --rm
+          - --pull=never
+          - --network=host
+          - "--env-file={{ cp_controller_migrate_environment_file.path }}"
+          - --entrypoint=python
+          - "{{ cp_target_controller_image }}"
+          - manage.py
+          - transition_vivolution_poc_m365_authority
+          - --from-entra-tenant-id
+          - "{{ cp_controller_vivolution_previous_entra_tenant_id }}"
+          - --to-entra-tenant-id
+          - "{{ cp_controller_vivolution_entra_tenant_id }}"
+          - --to-primary-domain
+          - "{{ cp_controller_vivolution_primary_domain }}"
+          - --acknowledge
+          - "{{ cp_controller_vivolution_m365_transition_acknowledgement }}"
+      register: cp_controller_vivolution_m365_authority_transition
+      changed_when: >-
+        'VIVOLUTION_POC_M365_AUTHORITY_TRANSITIONED' in
+        (cp_controller_vivolution_m365_authority_transition.stdout | default(''))
+      no_log: true
+      when: cp_controller_transition_vivolution_poc_m365_authority | bool
 
     - name: Reconcile the bounded Vivolution first-tenant POC inventory
       ansible.builtin.command:

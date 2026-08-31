@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 
 $script:ExpectedTenantId = '151cd01a-1e81-40a9-b898-d8646e1a8760'
 $script:VerifiedDomain = 'vivolution.ae'
+$script:DiscoveryUserUpn = 'jay@vivolution.ae'
 $script:Gateways = @(
     'sbc1.vivolution.ae'
     'sbc2.vivolution.ae'
@@ -101,6 +102,31 @@ function Normalize-LineUri {
         return ''
     }
     return (([string] $Value) -replace '(?i)^tel:', '')
+}
+
+function Assert-InteractiveTeamsUserAccount {
+    param(
+        [Parameter(Mandatory)] [object] $User,
+        [Parameter(Mandatory)] [string] $Upn
+    )
+
+    $accountType = [string] (
+        Get-PropertyValue -InputObject $User -Names @('AccountType')
+    )
+    if (-not [string]::Equals(
+            $accountType,
+            'User',
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "User '$Upn' must have exact AccountType 'User'; found '$accountType'."
+    }
+    $softDeletionTimestamp = Get-PropertyValue `
+        -InputObject $User `
+        -Names @('SoftDeletionTimestamp')
+    if ($null -ne $softDeletionTimestamp) {
+        throw "User '$Upn' is soft-deleted and is not eligible for this POC."
+    }
+    return 'User'
 }
 
 function Get-VivolutionConfigurationHash {
@@ -237,7 +263,7 @@ function Import-VivolutionConfiguration {
     return $configuration
 }
 
-function Assert-TeamsModuleContract {
+function Assert-TeamsReadOnlyModuleContract {
     Import-Module MicrosoftTeams -MinimumVersion 7.0.0 -ErrorAction Stop
 
     $requiredCommands = @(
@@ -245,17 +271,29 @@ function Assert-TeamsModuleContract {
         'Get-CsTenant',
         'Get-CsOnlineUser',
         'Get-CsPhoneNumberAssignment',
+        'Get-CsOnlinePSTNGateway',
+        'Get-CsOnlinePstnUsage',
+        'Get-CsOnlineVoiceRoute',
+        'Get-CsOnlineVoiceRoutingPolicy'
+    )
+    foreach ($command in $requiredCommands) {
+        if ($null -eq (Get-Command $command -ErrorAction SilentlyContinue)) {
+            throw "Required MicrosoftTeams read command '$command' is unavailable."
+        }
+    }
+}
+
+function Assert-TeamsModuleContract {
+    Assert-TeamsReadOnlyModuleContract
+
+    $requiredCommands = @(
         'Set-CsPhoneNumberAssignment',
         'Remove-CsPhoneNumberAssignment',
-        'Get-CsOnlinePSTNGateway',
         'New-CsOnlinePSTNGateway',
         'Remove-CsOnlinePSTNGateway',
-        'Get-CsOnlinePstnUsage',
         'Set-CsOnlinePstnUsage',
-        'Get-CsOnlineVoiceRoute',
         'New-CsOnlineVoiceRoute',
         'Remove-CsOnlineVoiceRoute',
-        'Get-CsOnlineVoiceRoutingPolicy',
         'New-CsOnlineVoiceRoutingPolicy',
         'Grant-CsOnlineVoiceRoutingPolicy',
         'Remove-CsOnlineVoiceRoutingPolicy'
@@ -308,10 +346,16 @@ function Get-TenantDomains {
 function Connect-VivolutionTenant {
     param(
         [Parameter(Mandatory)] [hashtable] $Configuration,
-        [switch] $SkipConnect
+        [switch] $SkipConnect,
+        [switch] $ReadOnlyContract
     )
 
-    Assert-TeamsModuleContract
+    if ($ReadOnlyContract) {
+        Assert-TeamsReadOnlyModuleContract
+    }
+    else {
+        Assert-TeamsModuleContract
+    }
     if (-not $SkipConnect) {
         Connect-MicrosoftTeams -TenantId $Configuration.ExpectedTenantId -ErrorAction Stop | Out-Null
     }
@@ -341,6 +385,113 @@ function Connect-VivolutionTenant {
         Tenant = $tenants[0]
         TenantId = $actualTenantId
         Domains = $domains
+    }
+}
+
+function Invoke-VivolutionTenantDiscovery {
+    [CmdletBinding()]
+    param([switch] $SkipConnect)
+
+    $discoveryConfiguration = @{
+        ExpectedTenantId = $script:ExpectedTenantId
+        VerifiedDomain = $script:VerifiedDomain
+    }
+    $tenantContext = Connect-VivolutionTenant `
+        -Configuration $discoveryConfiguration `
+        -SkipConnect:$SkipConnect `
+        -ReadOnlyContract
+
+    $users = @(Get-CsOnlineUser -Identity $script:DiscoveryUserUpn -ErrorAction Stop)
+    if ($users.Count -ne 1) {
+        throw (
+            "Expected exactly one discovery user '$script:DiscoveryUserUpn'; " +
+            "found $($users.Count)."
+        )
+    }
+    $user = $users[0]
+    $actualUpn = ([string] (
+        Get-PropertyValue -InputObject $user -Names @('UserPrincipalName')
+    )).ToLowerInvariant()
+    if (-not [string]::Equals(
+            $actualUpn,
+            $script:DiscoveryUserUpn,
+            [System.StringComparison]::Ordinal
+        )) {
+        throw "Tenant discovery returned '$actualUpn' for the fixed user."
+    }
+    if ((Get-PropertyValue -InputObject $user -Names @('AccountEnabled')) -ne $true) {
+        throw "Discovery user '$actualUpn' is not enabled."
+    }
+    $accountType = Assert-InteractiveTeamsUserAccount -User $user -Upn $actualUpn
+
+    $featureTypes = @(ConvertTo-StringArray -Value (
+        Get-PropertyValue -InputObject $user -Names @('FeatureTypes')
+    ))
+    foreach ($feature in @('Teams', 'PhoneSystem')) {
+        if (-not (Test-StringInArray -Values $featureTypes -Expected $feature)) {
+            throw "Discovery user '$actualUpn' is missing the '$feature' license feature."
+        }
+    }
+    $registrarPool = [string] (
+        Get-PropertyValue -InputObject $user -Names @('RegistrarPool')
+    )
+    if ($registrarPool -notmatch '(?i)\.infra\.lync\.com$') {
+        throw "Discovery user '$actualUpn' is not homed in an online Teams registrar."
+    }
+    $onPremLineUri = Normalize-LineUri -Value (
+        Get-PropertyValue -InputObject $user -Names @('OnPremLineURI')
+    )
+    if (-not [string]::IsNullOrWhiteSpace($onPremLineUri)) {
+        throw "Discovery user '$actualUpn' has an on-premises LineURI."
+    }
+    $upgradeMode = [string] (
+        Get-PropertyValue -InputObject $user -Names @('TeamsUpgradeEffectiveMode')
+    )
+    if (-not [string]::Equals(
+            $upgradeMode,
+            'TeamsOnly',
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Discovery user '$actualUpn' must use TeamsOnly mode."
+    }
+
+    $lineUri = Normalize-LineUri -Value (
+        Get-PropertyValue -InputObject $user -Names @('LineURI')
+    )
+    $voicePolicy = Normalize-PolicyName -Value (
+        Get-PropertyValue -InputObject $user -Names @('OnlineVoiceRoutingPolicy')
+    )
+    $discoveryStatus = if ([string]::IsNullOrWhiteSpace($lineUri)) {
+        'READY_FOR_NUMBER_SELECTION'
+    }
+    else {
+        'EXISTING_NUMBER_REQUIRES_EXACT_REVIEW'
+    }
+    return [pscustomobject]@{
+        Status = $discoveryStatus
+        ReadOnly = $true
+        TenantId = $tenantContext.TenantId
+        RegisteredDomains = @($tenantContext.Domains)
+        User = [pscustomobject]@{
+            Upn = $actualUpn
+            AccountEnabled = $true
+            AccountType = $accountType
+            SoftDeletionTimestampEmpty = $true
+            RequiredFeatureTypes = @('PhoneSystem', 'Teams')
+            RegistrarPool = $registrarPool
+            TeamsUpgradeEffectiveMode = $upgradeMode
+            OnPremLineUriEmpty = $true
+            CurrentLineUri = $lineUri
+            ExistingVoiceRoutingPolicy = $voicePolicy
+            EnterpriseVoiceEnabled = [bool] (
+                Get-PropertyValue -InputObject $user -Names @('EnterpriseVoiceEnabled')
+            )
+        }
+        Limitations = @(
+            'No Direct Routing number has been selected or assigned by this discovery.',
+            'No gateway, route, policy, license, user, or tenant object was changed.',
+            'This read-only result is not an evidence-bound CP1 M365 verification receipt.'
+        )
     }
 }
 
@@ -471,10 +622,7 @@ function Assert-UserReady {
     if ((Get-PropertyValue -InputObject $User -Names @('AccountEnabled')) -ne $true) {
         throw "User '$upn' is not enabled."
     }
-    $accountType = [string] (Get-PropertyValue -InputObject $User -Names @('AccountType'))
-    if ($accountType -match '(?i)^(Guest|IneligibleUser)$') {
-        throw "User '$upn' has ineligible AccountType '$accountType'."
-    }
+    $null = Assert-InteractiveTeamsUserAccount -User $User -Upn $upn
 
     $featureTypes = Get-PropertyValue -InputObject $User -Names @('FeatureTypes')
     foreach ($feature in @('Teams', 'PhoneSystem')) {
@@ -1185,6 +1333,7 @@ function Invoke-VivolutionRollback {
 
 Export-ModuleMember -Function @(
     'Import-VivolutionConfiguration',
+    'Invoke-VivolutionTenantDiscovery',
     'Invoke-VivolutionPreflight',
     'Invoke-VivolutionVerification',
     'Invoke-VivolutionApply',

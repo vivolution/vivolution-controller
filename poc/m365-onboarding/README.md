@@ -56,9 +56,10 @@ codes so an unavailable first node can advance to the second configured trunk.
    FQDNs deliberately use this domain so a licensed `@vivolution.ae` user can
    satisfy Microsoft's domain-activation requirement without changing UPNs or
    consuming a separate license only for a nested subdomain.
-4. One or two enabled users in that domain with `Teams` and `PhoneSystem`
-   feature types, `TeamsUpgradeEffectiveMode=TeamsOnly`, an `infra.lync.com`
-   registrar, and no on-premises LineURI.
+4. One or two enabled, non-soft-deleted `AccountType=User` accounts in that
+   domain with `Teams` and `PhoneSystem` feature types,
+   `TeamsUpgradeEffectiveMode=TeamsOnly`, an `infra.lync.com` registrar, and no
+   on-premises LineURI.
 5. One distinct test Direct Routing number per configured user, matching the
    fixed `+971` pattern.
 6. Public SBC DNS, certificate, TLS, SIP OPTIONS, and media qualification must
@@ -80,6 +81,19 @@ tenant/gateway/routing value.
 
 ## Read-only preflight
 
+Before choosing a Direct Routing number, run the narrower tenant/user discovery:
+
+```powershell
+./Invoke-Discovery.ps1
+```
+
+It is locked to `jay@vivolution.ae` and verifies the expected tenant, registered
+domain, enabled non-soft-deleted account with exact `AccountType=User`, Teams
+and PhoneSystem features, TeamsOnly mode, online registrar, and absence of an
+on-premises LineURI. It reports any current LineURI and voice-routing policy for
+exact review but does not need a proposed telephone number and contains no
+mutation cmdlet.
+
 The preflight connects to the explicitly named tenant, then verifies the tenant
 ID, exact registered subdomain, user license features/readiness, number
 availability/ownership, and non-divergence of all existing managed objects. It
@@ -91,6 +105,24 @@ makes no tenant changes.
 
 `-SkipConnect` may be used only when a MicrosoftTeams session already exists;
 the script still obtains and compares the connected tenant ID.
+
+The original Azure-only CP1 build recorded the subscription's provisional
+guest directory because Vivolution's Microsoft 365 tenant was not yet known.
+After this live preflight succeeds—and before any Direct Routing release is
+published—the controller deployment may enable the bounded
+`transition_vivolution_poc_m365_authority` transaction. It accepts only the
+fixed provisional UUID, the tenant UUID above, `vivolution.ae`, and its exact
+operator acknowledgement. It requires every CP1 configuration to remain an
+unsigned draft, atomically rebinds the first tenant, disables the provisional
+record, and writes one audit event. A successful rerun is read-only. Do not
+enable that deployment switch from public tenant discovery alone.
+
+The transition deliberately creates the new CP1 tenant record as `PENDING` and
+records `PENDING_EVIDENCE_BOUND_CP1_VERIFICATION`. The interactive read-only
+Microsoft 365 result establishes operator-observed authority, but it is not a
+durable CP1 verification receipt and does not mark the record `VERIFIED`. A
+later evidence-bound verification may promote the same exact record; transition
+reruns accept that monotonic `VERIFIED` state without changing it.
 
 ## Review and apply
 
