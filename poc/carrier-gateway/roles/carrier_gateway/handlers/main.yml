@@ -1,0 +1,22 @@
+---
+- name: Reload rootless carrier gateway user manager
+  ansible.builtin.command:
+    argv: [systemctl, --user, daemon-reload]
+  become: true
+  become_user: "{{ carrier_gateway_runtime_user }}"
+  environment:
+    HOME: "{{ carrier_gateway_rootless_home }}"
+    XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path={{ carrier_gateway_rootless_runtime_dir }}/bus"
+  listen: Restart carrier gateway
+
+- name: Restart rootless carrier gateway service
+  ansible.builtin.command:
+    argv: [systemctl, --user, restart, vivolution-carrier-gateway.service]
+  become: true
+  become_user: "{{ carrier_gateway_runtime_user }}"
+  environment:
+    HOME: "{{ carrier_gateway_rootless_home }}"
+    XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path={{ carrier_gateway_rootless_runtime_dir }}/bus"
+  listen: Restart carrier gateway

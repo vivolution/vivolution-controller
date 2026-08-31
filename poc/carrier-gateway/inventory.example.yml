@@ -1,0 +1,14 @@
+---
+all:
+  children:
+    carrier_gateway_controller:
+      hosts:
+        cp1-carrier:
+          ansible_host: 203.0.113.10
+          ansible_user: cpadmin
+          ansible_ssh_private_key_file: /absolute/path/outside/repo/cp1-ed25519
+  vars:
+    carrier_gateway_install_acknowledgement: INSTALL_DIRECT_PRIVATE_PBX_POC_CARRIER_GATEWAY
+    carrier_gateway_firewall_contract_acknowledged: false
+    carrier_gateway_twilio_enabled: false
+    carrier_gateway_twilio_secrets: {}

@@ -1,0 +1,87 @@
+#!/bin/sh
+set -eu
+umask 077
+
+authorization_root=/var/lib/asterisk/authorization
+pending=${authorization_root}/pending
+lock=${authorization_root}/claim.lock
+
+authorized=0
+max_seconds=0
+request_id=none
+
+emit_result() {
+    printf 'SET VARIABLE VIVO_CALL_AUTHORIZED %s\n' "$authorized"
+    printf 'SET VARIABLE VIVO_CALL_MAX_SECONDS %s\n' "$max_seconds"
+    printf 'SET VARIABLE VIVO_CALL_REQUEST_ID "%s"\n' "$request_id"
+}
+
+# Drain the AGI environment before replying.
+while IFS= read -r agi_line; do
+    [ -n "$agi_line" ] || break
+done
+
+destination=${1:-}
+case "$destination" in
+    +[1-9][0-9]*) ;;
+    *) emit_result; exit 0 ;;
+esac
+
+if ! mkdir "$lock" 2>/dev/null; then
+    emit_result
+    exit 0
+fi
+trap 'rmdir "$lock" 2>/dev/null || true' EXIT HUP INT TERM
+
+if [ ! -f "$pending" ] || [ -L "$pending" ]; then
+    emit_result
+    exit 0
+fi
+if [ "$(stat -c '%u:%g:%a:%h' "$pending")" != '10003:10003:600:1' ]; then
+    emit_result
+    exit 0
+fi
+
+# Values are deliberately constrained to shell-inert alphabets by the
+# authorization role. Duplicate or unknown keys make the record unusable.
+one_value() {
+    key=$1
+    [ "$(grep -c "^${key}=" "$pending")" -eq 1 ] || return 1
+    sed -n "s/^${key}=//p" "$pending"
+}
+
+schema=$(one_value schema) || { emit_result; exit 0; }
+record_request_id=$(one_value request_id) || { emit_result; exit 0; }
+record_destination=$(one_value destination) || { emit_result; exit 0; }
+expires_epoch=$(one_value expires_epoch) || { emit_result; exit 0; }
+record_max_seconds=$(one_value max_call_seconds) || { emit_result; exit 0; }
+max_spend_microusd=$(one_value max_spend_microusd) || { emit_result; exit 0; }
+maximum_calls=$(one_value maximum_calls) || { emit_result; exit 0; }
+
+line_count=$(wc -l < "$pending" | tr -d ' ')
+[ "$schema" = vivolution-carrier-call-v1 ] || { emit_result; exit 0; }
+printf '%s' "$record_request_id" | grep -Eq '^[a-z0-9][a-z0-9-]{7,63}$' || { emit_result; exit 0; }
+printf '%s' "$record_destination" | grep -Eq '^\+[1-9][0-9]{7,14}$' || { emit_result; exit 0; }
+printf '%s' "$expires_epoch" | grep -Eq '^[0-9]{10}$' || { emit_result; exit 0; }
+printf '%s' "$record_max_seconds" | grep -Eq '^[0-9]{1,3}$' || { emit_result; exit 0; }
+printf '%s' "$max_spend_microusd" | grep -Eq '^[0-9]{1,7}$' || { emit_result; exit 0; }
+[ "$maximum_calls" = 1 ] || { emit_result; exit 0; }
+[ "$line_count" -eq 7 ] || { emit_result; exit 0; }
+
+now=$(date +%s)
+if [ "$record_destination" != "$destination" ] ||
+   [ "$expires_epoch" -le "$now" ] ||
+   [ "$expires_epoch" -gt $((now + 600)) ] ||
+   [ "$record_max_seconds" -lt 1 ] ||
+   [ "$record_max_seconds" -gt {{ carrier_gateway_twilio_max_call_seconds }} ] ||
+   [ "$max_spend_microusd" -lt 1 ] ||
+   [ "$max_spend_microusd" -gt {{ (carrier_gateway_twilio_maximum_spend_per_call_usd | float * 1000000) | int }} ]; then
+    emit_result
+    exit 0
+fi
+
+mv "$pending" "${authorization_root}/used/${record_request_id}.claimed"
+authorized=1
+max_seconds=$record_max_seconds
+request_id=$record_request_id
+emit_result

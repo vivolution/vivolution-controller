@@ -1,0 +1,18 @@
+---
+carrier_gateway_root: /opt/vivolution/carrier-gateway
+carrier_gateway_config_root: /etc/vivolution/carrier-gateway
+carrier_gateway_state_root: /var/lib/vivolution/carrier-gateway
+carrier_gateway_runtime_root: /run/vivolution-carrier-gateway
+carrier_gateway_results_root: /var/lib/vivolution/carrier-gateway/results
+carrier_gateway_runtime_user: vivolution-carrier
+carrier_gateway_runtime_uid: 10003
+carrier_gateway_rootless_home: /var/lib/vivolution/carrier-gateway/rootless-home
+carrier_gateway_rootless_runtime_dir: /run/user/10003
+carrier_gateway_rootless_quadlet_root: /var/lib/vivolution/carrier-gateway/rootless-home/.config/containers/systemd
+carrier_gateway_remove_image: false
+carrier_gateway_image_tag: localhost/vivolution/carrier-gateway-asterisk:22.10.1-srtp1-autobind1
+carrier_gateway_remove_call_records: false
+carrier_gateway_remove_call_records_acknowledgement: ''
+carrier_gateway_remove_pki: false
+carrier_gateway_remove_pki_acknowledgement: ''
+carrier_gateway_host_firewall_disabled_acknowledgement: ''

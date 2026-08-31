@@ -55,6 +55,31 @@ class HostFirewallStaticTests(unittest.TestCase):
             tasks,
         )
 
+    def test_carrier_gateway_contract_is_separate_fixed_and_opt_in(self) -> None:
+        defaults = self.read("defaults/main.yml")
+        tasks = self.read("tasks/main.yml")
+        policy = self.read("templates/nftables.conf.j2")
+
+        self.assertIn("cp_carrier_gateway_enabled: false", defaults)
+        self.assertIn("  - 10.20.2.6/32\n  - 10.20.2.7/32", defaults)
+        self.assertIn("cp_carrier_gateway_tcp_port: 5061", defaults)
+        self.assertIn("20000-20255", defaults)
+        self.assertIn("30000-30127", defaults)
+        self.assertIn("when: cp_carrier_gateway_enabled | bool", tasks)
+        self.assertIn(
+            "cp_carrier_gateway_source_ipv4_cidrs == "
+            "['10.20.2.6/32', '10.20.2.7/32']",
+            tasks,
+        )
+        condition = "{% if cp_effective_carrier_gateway_enabled %}"
+        condition_start = policy.index(condition)
+        condition_end = policy.index("{% endif %}", condition_start)
+        rules = policy[condition_start:condition_end]
+        self.assertIn('comment "vivolution-carrier-tls"', rules)
+        self.assertIn('comment "vivolution-carrier-media"', rules)
+        self.assertIn("udp sport {{ cp_carrier_gateway_edge_media_source_port_range }}", rules)
+        self.assertIn("udp dport {{ cp_carrier_gateway_udp_destination_port_range }}", rules)
+
     def test_existing_controller_profiles_do_not_enable_fixture(self) -> None:
         inventories = PROJECT_ROOT / "deploy" / "inventories"
         for profile in ("lab", "rebuild", "azure", "azure-single"):

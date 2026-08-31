@@ -6,14 +6,17 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+from contextlib import contextmanager
 import hashlib
 import ipaddress
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -417,6 +420,10 @@ def compile_bicep_package(path: Path) -> tuple[Dict[str, Any], Dict[str, Any]]:
 Runner = Callable[[Sequence[str]], str]
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _run(argv: Sequence[str]) -> str:
     result = subprocess.run(argv, check=False, capture_output=True, text=True)
     if result.returncode != 0:
@@ -529,7 +536,9 @@ def _replacement_tags(node: str, deadline: str) -> Dict[str, str]:
     }
 
 
-def _validate_budget_and_headroom(budget: Any, cost: Any) -> Dict[str, Any]:
+def _validate_budget_and_headroom(
+    budget: Any, *, observed_at: datetime
+) -> Dict[str, Any]:
     if not isinstance(budget, dict) or budget.get("name") != EXPECTED_BUDGET_NAME:
         raise PreflightError("the exact USD 100 POC budget is absent")
     expected_budget_id = (
@@ -555,10 +564,30 @@ def _validate_budget_and_headroom(budget: Any, cost: Any) -> Dict[str, Any]:
         raise PreflightError("POC budget amount is malformed") from exc
     if (
         amount != EXPECTED_BUDGET_AMOUNT_USD
+        or not amount.is_finite()
         or properties.get("category") != "Cost"
         or properties.get("timeGrain") != "Monthly"
+        or properties.get("filter") not in (None, {})
     ):
-        raise PreflightError("POC budget amount/category/time grain drifted")
+        raise PreflightError(
+            "POC budget amount/category/time grain or unfiltered scope drifted"
+        )
+
+    period = properties.get("timePeriod")
+    if not isinstance(period, dict) or set(period) != {"startDate", "endDate"}:
+        raise PreflightError("POC budget time period is malformed")
+    start = _parse_canonical_utc(period.get("startDate"), "POC budget startDate")
+    end = _parse_canonical_utc(period.get("endDate"), "POC budget endDate")
+    observed_date = observed_at.astimezone(timezone.utc).date()
+    if (
+        start.day != 1
+        or (start.hour, start.minute, start.second, start.microsecond) != (0, 0, 0, 0)
+        or (end.hour, end.minute, end.second, end.microsecond) != (0, 0, 0, 0)
+        or start > observed_at.astimezone(timezone.utc)
+        or end.date() < observed_date
+        or end <= start
+    ):
+        raise PreflightError("POC budget is not active on a first-of-month boundary")
     notifications = properties.get("notifications")
     if not isinstance(notifications, dict) or len(notifications) != 3:
         raise PreflightError("POC budget must retain exactly three notifications")
@@ -585,20 +614,28 @@ def _validate_budget_and_headroom(budget: Any, cost: Any) -> Dict[str, Any]:
     if found != EXPECTED_BUDGET_THRESHOLDS:
         raise PreflightError("POC budget thresholds are not exactly 75/90/100")
 
-    if not isinstance(cost, dict) or cost.get("currency") != "USD":
-        raise PreflightError("month-to-date cost is not an exact USD observation")
+    current_spend = properties.get("currentSpend")
+    if (
+        not isinstance(current_spend, dict)
+        or set(current_spend) != {"amount", "unit"}
+        or current_spend.get("unit") != "USD"
+    ):
+        raise PreflightError("POC resource-group budget currentSpend is malformed")
     try:
-        actual = Decimal(str(cost.get("amountUsd"))).quantize(Decimal("0.01"))
+        actual = Decimal(str(current_spend.get("amount")))
     except InvalidOperation as exc:
-        raise PreflightError("month-to-date cost is malformed") from exc
-    if actual < 0 or actual > amount:
-        raise PreflightError("month-to-date cost is outside the bounded POC budget")
+        raise PreflightError("POC resource-group budget currentSpend is malformed") from exc
+    if not actual.is_finite() or actual < 0 or actual > amount:
+        raise PreflightError(
+            "POC resource-group budget currentSpend is outside the bounded USD budget"
+        )
     remaining = amount - actual
     if remaining < MAXIMUM_INCREMENTAL_REPLACEMENT_COST_USD:
         raise PreflightError("insufficient USD budget headroom for the 72-hour parallel window")
     return {
         "budgetAmountUsd": str(amount.quantize(Decimal("0.01"))),
-        "monthToDateActualUsd": str(actual),
+        "budgetScope": _resource_group_id(),
+        "currentSpendUsd": str(actual.quantize(Decimal("0.01"))),
         "remainingBudgetUsd": str(remaining.quantize(Decimal("0.01"))),
         "maximumIncrementalReplacementCostUsd": str(
             MAXIMUM_INCREMENTAL_REPLACEMENT_COST_USD
@@ -778,6 +815,33 @@ def _validate_node_bindings(
             )
         ):
             raise PreflightError("VM is not the exact healthy running node: {}".format(node))
+        os_disk_name = vm.get("osDiskName")
+        os_disk_id = vm.get("osDiskId")
+        expected_os_disk_name = node + "-osdisk"
+        physical_os_disk_name = (
+            os_disk_id.rsplit("/", 1)[-1]
+            if isinstance(os_disk_id, str)
+            else None
+        )
+        expected_physical_os_disk_pattern = (
+            re.escape(node + "-osdisk")
+            if node == "viv-sbc-poc-cp1" or node in EXPECTED_REPLACEMENT_VM_NAMES
+            else re.escape(node + "-osdisk") + r"(?:_[0-9a-f]{32})?"
+        )
+        if (
+            os_disk_name != expected_os_disk_name
+            or not isinstance(physical_os_disk_name, str)
+            or re.fullmatch(
+                expected_physical_os_disk_pattern,
+                physical_os_disk_name,
+            )
+            is None
+            or not _same_id(
+                os_disk_id,
+                _resource_id("Microsoft.Compute/disks", physical_os_disk_name),
+            )
+        ):
+            raise PreflightError("VM OS-disk identity drifted for {}".format(node))
         if not isinstance(nic, dict) or (
             not _same_id(nic.get("id"), expected_nic_id)
             or nic.get("name") != node + "-nic"
@@ -883,7 +947,9 @@ def _validate_node_bindings(
 
 
 def _validate_what_if(
-    what_if: Any, present_declared: set[str]
+    what_if: Any,
+    present_declared: set[str],
+    validated_existing_ids: set[str],
 ) -> Dict[str, Any]:
     if not isinstance(what_if, dict) or what_if.get("status") != "Succeeded":
         raise PreflightError("provider-level subscription what-if did not succeed")
@@ -901,7 +967,7 @@ def _validate_what_if(
         _resource_id(
             "Microsoft.Compute/availabilitySets", EXPECTED_AVAILABILITY_SET_NAME
         ).lower(),
-    }
+    } | {value.lower() for value in validated_existing_ids}
     nested_deployments = {
         (
             "/subscriptions/{}/providers/Microsoft.Resources/deployments/{}".format(
@@ -947,6 +1013,35 @@ def _validate_what_if(
         "changes": sorted(summarized, key=lambda item: (item["resourceId"], item["changeType"])),
         "sha256": _canonical_digest(what_if),
     }
+
+
+def _validated_existing_what_if_ids(nodes: Any) -> set[str]:
+    """Return only identities already proven exact by node binding validation."""
+    if not isinstance(nodes, list):
+        raise PreflightError("exact VM/NIC binding observations are missing")
+    result = {_resource_group_id().lower()}
+    for record in nodes:
+        if not isinstance(record, dict):
+            raise PreflightError("exact VM/NIC binding observations are malformed")
+        vm = record.get("vm")
+        components = (
+            vm,
+            record.get("nic"),
+            record.get("nsg"),
+            record.get("publicIp"),
+        )
+        if any(not isinstance(component, dict) for component in components):
+            raise PreflightError("exact VM/NIC binding observations are incomplete")
+        for component in components:
+            resource_id = component.get("id")
+            if not isinstance(resource_id, str) or not resource_id:
+                raise PreflightError("validated node component lacks one resource ID")
+            result.add(resource_id.lower())
+        os_disk_id = vm.get("osDiskId")
+        if not isinstance(os_disk_id, str) or not os_disk_id:
+            raise PreflightError("validated VM lacks one OS-disk resource ID")
+        result.add(os_disk_id.lower())
+    return result
 
 
 def validate_live_plan(
@@ -1049,12 +1144,14 @@ def validate_live_plan(
     if {str(value).lower() for value in (edge.get("ipConfigurationIds") or [])} != expected_edge_ipconfigs:
         raise PreflightError("Edge subnet NIC membership is outside the exact safe-resume set")
 
+    node_observations = observations.get("nodes")
     disk_lockdown = _validate_node_bindings(
-        observations.get("nodes"),
+        node_observations,
         present_nodes,
         deadline=deadline,
         allow_replacement_deallocated=allow_replacement_deallocated,
     )
+    validated_existing_ids = _validated_existing_what_if_ids(node_observations)
 
     availability_set = observations.get("availabilitySet")
     expected_as_id = _resource_id(
@@ -1092,9 +1189,13 @@ def validate_live_plan(
         raise PreflightError("availability set drifted from Aligned UAE North FD2/UD5 exact membership")
 
     budget = _validate_budget_and_headroom(
-        observations.get("budget"), observations.get("cost")
+        observations.get("budget"), observed_at=plan_time
     )
-    what_if = _validate_what_if(observations.get("whatIf"), present_declared)
+    what_if = _validate_what_if(
+        observations.get("whatIf"),
+        present_declared,
+        validated_existing_ids,
+    )
     now = observed_at or datetime.now(timezone.utc)
     if now.tzinfo is None:
         raise PreflightError("live plan timestamp must be timezone aware")
@@ -1148,29 +1249,6 @@ def validate_live_plan(
         "planSha256": _canonical_digest(body),
         "status": "DIRECT_REPLACEMENT_LIVE_PLAN_VALID",
     }
-
-
-def _cost_observation(raw: Any) -> Dict[str, str]:
-    properties = raw.get("properties") if isinstance(raw, dict) else None
-    columns = properties.get("columns") if isinstance(properties, dict) else None
-    rows = properties.get("rows") if isinstance(properties, dict) else None
-    if not isinstance(columns, list) or not isinstance(rows, list):
-        raise PreflightError("month-to-date Cost Management response is malformed")
-    names = [item.get("name") if isinstance(item, dict) else None for item in columns]
-    try:
-        cost_index = names.index("Cost")
-        currency_index = names.index("Currency")
-    except ValueError as exc:
-        raise PreflightError("month-to-date Cost Management columns are incomplete") from exc
-    if len(rows) == 0:
-        return {"amountUsd": "0.00", "currency": "USD"}
-    if (
-        len(rows) != 1
-        or not isinstance(rows[0], list)
-        or max(cost_index, currency_index) >= len(rows[0])
-    ):
-        raise PreflightError("month-to-date Cost Management returned ambiguous totals")
-    return {"amountUsd": str(rows[0][cost_index]), "currency": str(rows[0][currency_index])}
 
 
 def _read_node_observation(
@@ -1326,29 +1404,6 @@ def collect_live_observations(path: Path, *, runner: Runner = _run) -> Dict[str,
         "budget",
         runner,
     )
-    cost_url = (
-        "https://management.azure.com/subscriptions/{}/providers/Microsoft.CostManagement/"
-        "query?api-version=2023-11-01"
-    ).format(EXPECTED_SUBSCRIPTION_ID)
-    cost_body = json.dumps(
-        {
-            "type": "ActualCost",
-            "timeframe": "MonthToDate",
-            "dataset": {
-                "granularity": "None",
-                "aggregation": {"totalCost": {"name": "Cost", "function": "Sum"}},
-            },
-        },
-        separators=(",", ":"),
-    )
-    cost_raw = _json_from_runner(
-        [
-            "az", "rest", "--method", "post", "--url", cost_url, "--body", cost_body,
-            "--headers", "Content-Type=application/json", *common,
-        ],
-        "month-to-date cost",
-        runner,
-    )
     what_if = _json_from_runner(
         [
             "az", "deployment", "sub", "what-if", "--name", DEPLOYMENT_NAME,
@@ -1363,7 +1418,6 @@ def collect_live_observations(path: Path, *, runner: Runner = _run) -> Dict[str,
         "account": account,
         "availabilitySet": availability_set,
         "budget": budget,
-        "cost": _cost_observation(cost_raw),
         "providers": providers,
         "resourceGroup": group,
         "resources": resources,
@@ -2179,7 +2233,7 @@ def validate_saved_plan(
         "profile": package_evidence.get("edgeRuntimeProfile"),
     }:
         raise PreflightError("saved plan runtime authority drifted")
-    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(
+    current = (now or _utc_now()).astimezone(timezone.utc).replace(
         microsecond=0
     )
     authorization_expiry = _parse_canonical_utc(
@@ -2349,6 +2403,58 @@ def _run_interactive(
     return ""
 
 
+@contextmanager
+def _materialize_exact_compiled_package(
+    parameter_path: Path,
+    *,
+    expected_parameters_sha256: str,
+    expected_template_sha256: str,
+    compiler: Callable[[Path], tuple[Dict[str, Any], Dict[str, Any]]] = compile_bicep_package,
+):
+    """Yield owner-only ARM JSON whose bytes are bound to the reviewed package."""
+    parameters, template = compiler(parameter_path)
+    if (
+        _canonical_digest(parameters) != expected_parameters_sha256
+        or _canonical_digest(template) != expected_template_sha256
+    ):
+        raise PreflightError(
+            "compiled template or parameter bytes drifted at the mutation boundary"
+        )
+    with tempfile.TemporaryDirectory(prefix="viv-sbc-direct-replacement-") as directory:
+        root = Path(directory)
+        os.chmod(root, 0o700)
+        paths: Dict[str, Path] = {}
+        for label, document in (("parameters", parameters), ("template", template)):
+            path = root / (label + ".json")
+            content = json.dumps(
+                document,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(path, flags, 0o400)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            metadata = path.stat()
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o400
+                or metadata.st_nlink != 1
+                or hashlib.sha256(path.read_bytes()).hexdigest()
+                != hashlib.sha256(content).hexdigest()
+            ):
+                raise PreflightError(
+                    "compiled {} artifact lost its owner-only byte identity".format(label)
+                )
+            paths[label] = path
+        yield paths
+
+
 def _lock_down_replacement_disks(
     observations: Mapping[str, Any],
     *,
@@ -2420,7 +2526,7 @@ def apply_saved_plan(
     scheduler_runner: Runner = _run,
     scheduler_host_name: str | None = None,
 ) -> Dict[str, Any]:
-    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(
+    current = (now or _utc_now()).astimezone(timezone.utc).replace(
         microsecond=0
     )
     approved = validate_saved_plan(
@@ -2464,7 +2570,7 @@ def apply_saved_plan(
         boundary_current = (
             current
             if now is not None
-            else datetime.now(timezone.utc).replace(microsecond=0)
+            else _utc_now().replace(microsecond=0)
         )
         approved = validate_saved_plan(
             saved_plan,
@@ -2506,28 +2612,82 @@ def apply_saved_plan(
             raise PreflightError(
                 "interactive create lacks a bounded authorization completion window"
             )
-        create_argv = [
-            "az", "deployment", "sub", "create",
-            "--name", DEPLOYMENT_NAME,
-            "--location", EXPECTED_LOCATION,
-            "--parameters", str(parameter_path),
-            "--subscription", expected_subscription_id,
-            "--confirm-with-what-if",
-            "--what-if-result-format", "ResourceIdOnly",
-            "--validation-level", "Provider",
-            "--output", "none",
-            "--only-show-errors",
-        ]
-        if mutation_runner is _run_interactive:
-            _run_interactive(
-                create_argv, timeout_seconds=mutation_timeout_seconds
+        with _materialize_exact_compiled_package(
+            parameter_path,
+            expected_parameters_sha256=expected_compiled_parameters_sha256,
+            expected_template_sha256=expected_compiled_template_sha256,
+        ) as artifacts:
+            submission_current = (
+                boundary_current
+                if now is not None
+                else _utc_now().replace(microsecond=0)
             )
-        else:
-            mutation_runner(create_argv)
+            approved = validate_saved_plan(
+                saved_plan,
+                package_evidence,
+                approved_plan_sha256=approved_plan_sha256,
+                expected_compiled_parameters_sha256=expected_compiled_parameters_sha256,
+                expected_compiled_template_sha256=expected_compiled_template_sha256,
+                expected_bicep_version=expected_bicep_version,
+                expected_subscription_id=expected_subscription_id,
+                expected_tenant_id=expected_tenant_id,
+                now=submission_current,
+            )
+            boundary_deadline = _parse_canonical_utc(
+                approved["parallelAcceptance"]["deadlineUtc"],
+                "parallel deadline",
+            )
+            if boundary_deadline - submission_current < timedelta(
+                minutes=MINIMUM_CREATE_BUFFER_MINUTES
+            ):
+                raise PreflightError(
+                    "create submission is inside the deadline safety buffer"
+                )
+            approved_receipt = validate_deadman_scheduler_receipt(
+                scheduler_receipt,
+                approved,
+                now=submission_current,
+                scheduler_runner=scheduler_runner,
+                host_name=scheduler_host_name,
+            )
+            authorization_expiry = _parse_canonical_utc(
+                approved["authorizationExpiresUtc"],
+                "authorizationExpiresUtc",
+            )
+            mutation_cutoff = min(
+                authorization_expiry,
+                boundary_deadline,
+            ) - timedelta(seconds=CREATE_AUTHORIZATION_SAFETY_SECONDS)
+            mutation_timeout_seconds = int(
+                (mutation_cutoff - submission_current).total_seconds()
+            )
+            if mutation_timeout_seconds < 1:
+                raise PreflightError(
+                    "compiled create lacks a bounded authorization completion window"
+                )
+            create_argv = [
+                "az", "deployment", "sub", "create",
+                "--name", DEPLOYMENT_NAME,
+                "--location", EXPECTED_LOCATION,
+                "--template-file", str(artifacts["template"]),
+                "--parameters", "@" + str(artifacts["parameters"]),
+                "--subscription", expected_subscription_id,
+                "--confirm-with-what-if",
+                "--what-if-result-format", "ResourceIdOnly",
+                "--validation-level", "Provider",
+                "--output", "none",
+                "--only-show-errors",
+            ]
+            if mutation_runner is _run_interactive:
+                _run_interactive(
+                    create_argv, timeout_seconds=mutation_timeout_seconds
+                )
+            else:
+                mutation_runner(create_argv)
         completion_current = (
             boundary_current
             if now is not None
-            else datetime.now(timezone.utc).replace(microsecond=0)
+            else _utc_now().replace(microsecond=0)
         )
         create_completed_within_authorization = (
             completion_current <= mutation_cutoff

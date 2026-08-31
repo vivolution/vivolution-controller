@@ -12,13 +12,13 @@ The initial shape is one `Standard_D2as_v5` CP1 with a 64 GiB Standard SSD and t
 - `snet-edge` contains SBC1 at `10.20.2.4` and SBC2 at `10.20.2.5` by default.
 - SBC1 and SBC2 share an aligned availability set with two platform fault domains. This protects the POC from a single host fault; it is not a claim of availability-zone or regional resilience.
 - CP1 permits public TCP 80/443 and TCP 22 only from explicit administrator CIDRs.
-- In `DIRECT_ROUTING` only, SBC1 and SBC2 permit Microsoft TLS signaling on TCP 5061 and media only from the explicit reviewed Microsoft CIDRs. No Microsoft ingress rule exists in `SYNTHETIC_PRIVATE`.
-- In `SYNTHETIC_PRIVATE` only, the private Teams-side simulator may reach TCP 5061 and the media pool for no-PSTN qualification. No synthetic ingress rule exists in `DIRECT_ROUTING`.
+- In both `DIRECT_ROUTING` and `DIRECT_ROUTING_PRIVATE_PBX_POC`, SBC1 and SBC2 permit Microsoft TLS signaling on TCP 5061 and media only from the explicit reviewed Microsoft CIDRs. No Microsoft ingress rule exists in `SYNTHETIC_PRIVATE`.
+- In `SYNTHETIC_PRIVATE` only, the private Teams-side simulator may reach TCP 5061 and the media pool for no-PSTN qualification. No synthetic ingress rule exists in either live Microsoft profile.
 - The single bounded RTPengine UDP media range stays local at `20000-29999`. Microsoft ingress is accepted only from the reviewed Media Processor CIDRs with remote source ports `3478-3481` or `49152-53247`. In `DIRECT_ROUTING`, the reverse NSG allowance starts only from the first-tenant `20000-20255` allocation and reaches only those Microsoft CIDRs and destination ports. These remote Microsoft ranges are never used as RTPengine bind ports.
 - Optional first-tenant PBX TLS 15061 and media rules are created independently per SBC only when that SBC's PBX source list is non-empty. The PBX listener is deliberately distinct from the shared Microsoft listener on 5061.
 - SBC SSH is allowed only from the same explicit administrator CIDRs as CP1. Remove that rule after a separately qualified private management path exists; never copy a private SSH key onto CP1.
 - Explicit priority-4096 deny rules block every other inbound and outbound flow before Azure's built-in NSG rules. There is no public TCP/UDP 5060, database, or agent-management rule.
-- Common outbound rules are limited to Azure DHCP/DNS/WireServer/IMDS, the fixed CP1 HTTPS address, TCP 80/443 for APT/ACME/Azure APIs, and UDP 123 to the two fixed NTP `/32`s. `SYNTHETIC_PRIVATE` then permits signaling and media only to CP1's fixed fixture ports. `DIRECT_ROUTING` replaces those voice rules with Microsoft and authorized-PBX signaling/media rules; the two sets are never active together.
+- Common outbound rules are limited to Azure DHCP/DNS/WireServer/IMDS, the fixed CP1 HTTPS address, TCP 80/443 for APT/ACME/Azure APIs, and UDP 123 to the two fixed NTP `/32`s. `SYNTHETIC_PRIVATE` then permits signaling and media only to CP1's fixed fixture ports. Both live Microsoft profiles replace those voice rules with Microsoft and authorized-PBX signaling/media rules; the two sets are never active together.
 
 Azure Firewall, NAT Gateway, load balancer, managed database, and Log Analytics
 workspace are intentionally absent. Public DNS/RBAC is isolated in the separate
@@ -49,6 +49,11 @@ post-compute template. Outbound access uses each VM's public IP.
   the Edge write boundary.
 - `dns-acme.example.bicepparam` is deliberately non-deployable and must be
   populated only from the reviewed core deployment outputs.
+- `root-direct-dns-acme.bicep` is the separate additive generation-3 root
+  `vivolution.ae` A/delegation/CNAME authority. Its only create path is the
+  fresh, digest-confirmed `deploy_root_direct_dns_acme.py` wrapper documented
+  in `root-direct-dns-acme-README.md`; never run its subscription deployment
+  directly. The legacy `voice.vivolution.ae` authority remains independent.
 
 ## Required inputs
 
@@ -62,7 +67,18 @@ Before deployment, determine all of the following:
 
 The Bicep contract fixes the POC's outer RTPengine cluster pool at `20000-29999` and the first-tenant PBX listener at TCP `15061`; a deployment cannot override either value to collide with a reserved port. The first tenant receives the fixed Edge-local `20000-20255` media allocation. Microsoft Media Processor ingress is directional: remote source ports `3478-3481` and `49152-53247` reach only the reviewed local cluster pool. In `DIRECT_ROUTING`, the explicit reverse allowance starts only from the narrower tenant allocation and reaches those same remote destination ranges on the reviewed Microsoft CIDRs. PBX media uses a separate, per-node canonical destination range: ingress accepts that range only as the PBX's remote source ports into `20000-20255`, while egress starts in `20000-20255` and reaches signed/validated PBX CIDRs only on the configured PBX-side destination range. The reviewed Direct template uses UDP `30000-30127`; synthetic nodes must use the exact fixture range UDP `21000-21127`. The host firewall, desired-state manifest, node facts, and NSG must agree exactly on both directional ranges.
 
-In `SYNTHETIC_PRIVATE`, the mandatory no-PSTN CP1 fixture is private-only. Its NSG accepts TLS from the Edge subnet solely on TCP `16061` and `25061`, PBX fixture media on UDP `21000-21127`, and Teams-side fixture media on UDP `22000-22063`. These ports are never exposed from the Internet and remain subject to the CP1 host firewall and each fixture unit's systemd IP policy. `DIRECT_ROUTING` requires this fixture switch off and the synthetic source list empty.
+In `SYNTHETIC_PRIVATE`, the mandatory no-PSTN CP1 fixture is private-only. Its NSG accepts TLS from the Edge subnet solely on TCP `16061` and `25061`, PBX fixture media on UDP `21000-21127`, and Teams-side fixture media on UDP `22000-22063`. These ports are never exposed from the Internet and remain subject to the CP1 host firewall and each fixture unit's systemd IP policy. Production `DIRECT_ROUTING` requires this fixture switch off and the synthetic source list empty.
+
+`DIRECT_ROUTING_PRIVATE_PBX_POC` is a distinct generation-3 test profile. Its
+parameter contract requires `enableSyntheticVoiceFixture=true` only to retain
+the CP1-hosted voice-service deployment boundary; it still requires an empty
+synthetic Teams source list and does not authorize fixture client credentials.
+Both SBC PBX source arrays must equal only `10.20.1.4/32`, and both PBX media
+ranges must equal UDP `30000-30127`. CP1 then admits from `snet-edge` only TCP
+5061 and source UDP `20000-20255` to destination UDP `30000-30127`. Each SBC
+admits Microsoft live traffic, its exact CP1 PBX leg on listener 15061, and the
+corresponding bounded outbound flows. Production `DIRECT_ROUTING` remains
+globally routable and unchanged.
 
 The private address parameters are not automatically checked for subnet membership or overlap. If subnet prefixes are changed, update all three static private addresses as one reviewed change.
 
@@ -136,7 +152,11 @@ VM/disk sizes, disabled Trusted Launch, changed Microsoft Media Processor port
 ranges, or another SSH key. `SYNTHETIC_PRIVATE` requires all voice peers to be
 the fixed CP1 `/32`; `DIRECT_ROUTING` instead requires the fixture off, no
 synthetic source, and non-empty globally routable PBX CIDRs no broader than
-`/24` for both SBCs.
+`/24` for both SBCs. `DIRECT_ROUTING_PRIVATE_PBX_POC` instead requires the
+voice-service switch on, an empty synthetic Teams list, exact CP1
+`10.20.1.4/32` PBX sources for both SBCs, and exact UDP `30000-30127` PBX media
+ranges. Its successful preflight evidence reports
+`PUBLIC_MICROSOFT_DIRECT_ROUTING_WITH_FIXED_PRIVATE_CP1_PBX_NO_PRODUCTION_CLAIM`.
 The focused negative tests are under `tests/`.
 
 Only after reviewing the selected subscription, resource group, parameters, and complete What-If should an authorized operator run:
@@ -318,6 +338,17 @@ instantly invalidate a token issued earlier or eliminate Azure RBAC propagation
 latency. The lock-to-Contributor-removal interval is therefore a bounded POC
 migration risk that must run in a controlled window; it is not represented as
 an atomic production migration.
+
+## Generation-3 root DNS/ACME authority
+
+The exact plan/create, read-only reconciliation, crash-resumable partial-state
+handling, and bounded teardown commands for `sbc1.vivolution.ae`,
+`sbc2.vivolution.ae`, and `carrier.vivolution.ae` are in
+`root-direct-dns-acme-README.md`. The create planner binds the compiled Bicep
+template and protected parameters, provider What-If, vacant initial names,
+root/voice ETags and fingerprints, unfiltered descendant/Group RBAC, and the
+CP1/g3 VM-to-static-PIP identities. This authority must be reconciled before
+the independent g3 qualifier gate can pass.
 
 ## Bounded DNS/ACME teardown
 

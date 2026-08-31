@@ -1,0 +1,26 @@
+#!/bin/bash
+set -euo pipefail
+umask 027
+
+if [[ ${EUID} -ne 0 ]]; then
+    printf 'test runner must run as root\n' >&2
+    exit 2
+fi
+if [[ ${1:-} != '--acknowledge' || ${2:-} != 'NON_BILLABLE_EDGE_SIGNALING_ONLY' ]]; then
+    printf 'exact non-billable acknowledgement is required\n' >&2
+    exit 2
+fi
+case ${3:-} in
+    sbc1) extension=9301 ;;
+    sbc2) extension=9302 ;;
+    failover) extension=9300 ;;
+    *) printf 'target must be sbc1, sbc2, or failover\n' >&2; exit 2 ;;
+esac
+
+# The only reachable destination is the deliberately invalid local test E.164.
+# No carrier endpoint name appears in this runner.
+runuser -u {{ carrier_gateway_runtime_user | quote }} -- env \
+    HOME={{ carrier_gateway_rootless_home | quote }} \
+    XDG_RUNTIME_DIR={{ carrier_gateway_rootless_runtime_dir | quote }} \
+    podman exec vivolution-carrier-gateway /usr/sbin/asterisk -rx \
+    "channel originate Local/${extension}@carrier-local-test application Wait 1"

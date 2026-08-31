@@ -1,0 +1,7 @@
+---
+carrier_gateway_rollback_acknowledgement: ''
+carrier_gateway_config_root: /etc/vivolution/carrier-gateway
+carrier_gateway_state_root: /var/lib/vivolution/carrier-gateway
+carrier_gateway_runtime_user: vivolution-carrier
+carrier_gateway_rootless_home: /var/lib/vivolution/carrier-gateway/rootless-home
+carrier_gateway_rootless_runtime_dir: /run/user/10003

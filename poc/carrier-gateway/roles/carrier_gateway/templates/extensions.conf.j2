@@ -1,0 +1,75 @@
+[general]
+static=yes
+writeprotect=yes
+clearglobalvars=no
+
+[from-edge]
+; Deterministic non-billable endpoints used for the Teams/Edge -> PBX leg.
+exten => {{ carrier_gateway_tone_test_e164 }},1,NoOp(Vivolution non-billable tone test)
+ same => n,Set(CDR(accountcode)=vivo-carrier-test-in)
+ same => n,Set(CDR(userfield)=tone)
+ same => n,Answer()
+ same => n,Milliwatt()
+ same => n,Hangup()
+
+exten => {{ carrier_gateway_echo_test_e164 }},1,NoOp(Vivolution non-billable echo test)
+ same => n,Set(CDR(accountcode)=vivo-carrier-test-in)
+ same => n,Set(CDR(userfield)=echo)
+ same => n,Answer()
+ same => n,Echo()
+ same => n,Hangup()
+
+; Emergency and service numbers are blocked before every carrier route.
+{% for emergency in ['112', '911', '999', '998', '997', '996', '995', '994', '993', '992', '991'] %}
+exten => {{ emergency }},1,Hangup(21)
+exten => +971{{ emergency }},1,Hangup(21)
+{% endfor %}
+
+{% if carrier_gateway_twilio_enabled | bool %}
+; A prefix match alone never authorizes spend. The AGI must atomically consume
+; one unexpired, exact-destination authorization before Dial is reachable.
+{% for prefix in carrier_gateway_twilio_destination_prefixes %}
+exten => _{{ prefix }}X!,1,NoOp(Vivolution one-shot Twilio outbound candidate)
+ same => n,Set(CDR(accountcode)=vivo-carrier-twilio-out)
+ same => n,AGI(vivolution-twilio-authorize.agi,${EXTEN})
+ same => n,GotoIf($["${VIVO_CALL_AUTHORIZED}"="1"]?authorized:blocked)
+ same => n(authorized),Set(CDR(userfield)=${VIVO_CALL_REQUEST_ID})
+ same => n,Set(CALLERID(num)={{ carrier_gateway_twilio_permitted_caller_id }})
+ same => n,Set(TIMEOUT(absolute)=${VIVO_CALL_MAX_SECONDS})
+ same => n,Dial(PJSIP/${EXTEN}@twilio,${VIVO_CALL_MAX_SECONDS})
+ same => n,Hangup()
+ same => n(blocked),Hangup(21)
+{% endfor %}
+{% endif %}
+
+exten => _X!,1,Hangup(21)
+exten => _+X!,1,Hangup(21)
+
+[carrier-local-test]
+; Outbound qualification is deliberately non-PSTN. 9301/9302 prove exact
+; Edge selection; 9300 uses ordered SBC1 then SBC2 failover. Microsoft may
+; reject the deliberately invalid E.164 value, but Twilio is never selected.
+exten => 9301,1,Set(CDR(accountcode)=vivo-carrier-test-out)
+ same => n,Set(CDR(userfield)=sbc1)
+ same => n,Dial(PJSIP/{{ carrier_gateway_tone_test_e164 }}@sbc1,10)
+ same => n,Hangup()
+
+exten => 9302,1,Set(CDR(accountcode)=vivo-carrier-test-out)
+ same => n,Set(CDR(userfield)=sbc2)
+ same => n,Dial(PJSIP/{{ carrier_gateway_tone_test_e164 }}@sbc2,10)
+ same => n,Hangup()
+
+exten => 9300,1,Set(CDR(accountcode)=vivo-carrier-test-out)
+ same => n,Set(CDR(userfield)=sbc1-then-sbc2)
+ same => n,Dial(PJSIP/{{ carrier_gateway_tone_test_e164 }}@sbc1,5)
+ same => n,GotoIf($["${DIALSTATUS}"="ANSWER"]?done)
+ same => n,Dial(PJSIP/{{ carrier_gateway_tone_test_e164 }}@sbc2,5)
+ same => n(done),Hangup()
+
+[reject-all]
+exten => _X!,1,Hangup(21)
+exten => _+X!,1,Hangup(21)
+
+[default]
+exten => _X!,1,Hangup(21)
+exten => _+X!,1,Hangup(21)

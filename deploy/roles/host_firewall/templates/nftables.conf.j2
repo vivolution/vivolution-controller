@@ -7,6 +7,7 @@ table inet vivolution_filter {
 {% set cp_effective_ssh_source_ipv4_cidrs = cp_firewall_ssh_source_ipv4_cidrs | default([]) %}
 {% set cp_effective_dhcp_server_ipv4 = cp_firewall_dhcp_server_ipv4 | default('') %}
 {% set cp_effective_voice_fixture_enabled = cp_voice_fixture_enabled | default(false) | bool %}
+{% set cp_effective_carrier_gateway_enabled = cp_carrier_gateway_enabled | default(false) | bool %}
 {% if cp_effective_ssh_source_ipv4_cidrs | length > 0 %}
     set ssh_source_ipv4 {
         type ipv4_addr
@@ -33,6 +34,10 @@ table inet vivolution_filter {
 {% if cp_effective_voice_fixture_enabled %}
         ip saddr {{ cp_voice_fixture_source_ipv4_cidr }} tcp dport { {{ cp_voice_fixture_tcp_ports | join(', ') }} } ct state new accept
         ip saddr {{ cp_voice_fixture_source_ipv4_cidr }} udp dport { {{ cp_voice_fixture_udp_port_ranges | join(', ') }} } ct state new accept
+{% endif %}
+{% if cp_effective_carrier_gateway_enabled %}
+        ip saddr { {{ cp_carrier_gateway_source_ipv4_cidrs | join(', ') }} } tcp dport {{ cp_carrier_gateway_tcp_port }} ct state new accept comment "vivolution-carrier-tls"
+        ip saddr { {{ cp_carrier_gateway_source_ipv4_cidrs | join(', ') }} } udp sport {{ cp_carrier_gateway_edge_media_source_port_range }} udp dport {{ cp_carrier_gateway_udp_destination_port_range }} accept comment "vivolution-carrier-media"
 {% endif %}
     }
 

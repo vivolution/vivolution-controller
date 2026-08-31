@@ -283,7 +283,8 @@ the certificate validator.
 
 `playbooks/install-edge.yml` and `playbooks/activate-edge.yml` accept
 `SYNTHETIC_PRIVATE` on any positive immutable node generation, or
-`DIRECT_ROUTING` generation 2 and later. A reimaged/re-enrolled synthetic
+`DIRECT_ROUTING` generation 2 and later, or the explicitly POC-only
+`DIRECT_ROUTING_PRIVATE_PBX_POC` on generation 3 and later. A reimaged/re-enrolled synthetic
 replacement advances its generation instead of replaying or rewriting the
 retired node identity. The synthetic branch always requires the same fixed CP1
 fixture files, source, and media boundary. The Direct Routing branch requires
@@ -291,6 +292,61 @@ no fixture credential; it requires a
 controller-side PBX CA bundle pinned by SHA-256, real globally routable PBX
 source CIDRs no broader than `/24`, and separate exact install and activation
 acknowledgements.
+
+The private-PBX POC branch is a separate fail-closed contract, not a way to
+weaken `DIRECT_ROUTING`. For both SBCs its protected inventory must set:
+
+```yaml
+edge_runtime_profile: DIRECT_ROUTING_PRIVATE_PBX_POC
+edge_generation: 3
+edge_synthetic_teams_source_ipv4_cidrs: []
+edge_control_plane_ipv4_cidrs: [10.20.1.4/32]
+edge_pbx_source_ipv4_cidrs: [10.20.1.4/32]
+edge_pbx_media_destination_port_start: 30000
+edge_pbx_media_destination_port_end: 30127
+edge_direct_private_pbx_poc_install_acknowledgement: INSTALL_DIRECT_ROUTING_PRIVATE_PBX_POC_REPLACEMENT_GENERATION
+edge_direct_private_pbx_poc_activation_acknowledgement: ACTIVATE_DIRECT_ROUTING_PRIVATE_PBX_POC_REPLACEMENT_GENERATION
+```
+
+`edge_direct_pbx_ca_bundle_src` must be an absolute protected controller path
+to the exact carrier/PBX CA bundle and
+`edge_direct_pbx_ca_bundle_sha256` its reviewed lowercase SHA-256. Node facts
+must carry the actual generation-3 private/public addresses and FQDNs from the
+replacement deployment, the real M365 tenant UUID, fixed listener 15061,
+tenant media 20000-20255, and the current reviewed Microsoft CIDRs. The signed
+envelope must come from
+`first-tenant-direct-routing-private-pbx-poc-profile.template.json`, use the
+matching trusted node facts, and have an unexpired activation window.
+
+Preflight and the privileged runtime require the exact root gateway identity
+`sbc1.vivolution.ae` or `sbc2.vivolution.ae` for this profile; legacy
+`sbcN.voice.vivolution.ae` identities are rejected. RTPengine uses separate
+named private and public realms on the Azure private NIC. OpenSIPS selects and
+reverses those realms per offer/answer direction, so CP1 receives private SDP
+and Microsoft receives public SDP.
+
+The live Microsoft gateways are the root names `sbc1.vivolution.ae` and
+`sbc2.vivolution.ae`. The existing `voice.vivolution.ae` DNS/ACME package does
+not create or authorize certificates for those names. A separate, reviewed
+root DNS/ACME staging workflow must publish their exact A records, delegate
+least-privilege certificate renewal, and install certificates whose SANs and
+keys pass the Edge validator before this profile is installed or activated.
+That workflow is `infra/azure-poc/deploy_root_direct_dns_acme.py`; its
+owner-only ten-minute plan is the only create authority, and its companion
+reconcile/teardown CLIs accept only the exact complete or crash-recovery
+partial state. The infrastructure qualifier keeps the g2 Edge NSGs at their
+17-rule synthetic contract while independently requiring the six-rule CP1
+synthetic base plus the two exact g3 carrier overlay rules.
+This profile creates no DNS record, ACME authority, or Microsoft gateway.
+
+Install and activate use the normal playbooks and exact protected extra-vars;
+recovery must repeat the same profile, sequence, and manifest digest. The
+workflow never installs fixture client credentials and refuses a target that
+retains them. Before a live PSTN acceptance claim, separately prove CP1
+carrier certificate/SNI and route readiness, Microsoft gateway/domain and user
+policy propagation, Twilio trunk authorization and permitted caller ID, then
+complete a billable Teams-to-PSTN call through each SBC. Inbound PSTN remains
+intentionally unavailable without a DID.
 
 Activation crosses an exact six-file root-owned inbox boundary, including the
 original `signed-envelope.json`. The privileged runtime reads the fixed

@@ -1,0 +1,23 @@
+---
+- name: Qualify the bounded Vivolution carrier gateway
+  hosts: carrier_gateway_controller
+  become: true
+  gather_facts: false
+  serial: 1
+  tasks:
+    - name: Run the installed fail-closed readiness verifier
+      ansible.builtin.command:
+        argv:
+          - /usr/local/libexec/vivolution-carrier-gateway-readiness
+      register: carrier_gateway_qualification
+      changed_when: false
+
+    - name: Require the exact readiness result
+      ansible.builtin.assert:
+        that:
+          - >-
+            carrier_gateway_qualification.stdout is search(
+              '^READY carrier-gateway profile=direct-private-pbx-poc '
+              ~ 'listener=10.20.1.4:5061 edges=10.20.2.6,10.20.2.7 '
+              ~ 'twilio=(disabled|armed-no-call-authority)$')
+        fail_msg: Carrier gateway readiness did not satisfy the bounded POC contract.

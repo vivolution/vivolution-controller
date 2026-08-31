@@ -1,0 +1,14 @@
+[Slice]
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8
+IPAddressAllow={{ carrier_gateway_controller_ipv4 }}/32
+IPAddressAllow={{ carrier_gateway_sbc1_ipv4 }}/32
+IPAddressAllow={{ carrier_gateway_sbc2_ipv4 }}/32
+{% if carrier_gateway_twilio_enabled | bool %}
+{% for prefix in carrier_gateway_twilio_destination_ipv4_cidrs %}
+IPAddressAllow={{ prefix }}
+{% endfor %}
+{% endif %}
+SocketBindDeny=any
+SocketBindAllow=ipv4:tcp:{{ carrier_gateway_tls_port }}
+SocketBindAllow=ipv4:udp:{{ carrier_gateway_rtp_start }}-{{ carrier_gateway_rtp_end }}

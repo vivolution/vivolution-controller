@@ -1,0 +1,128 @@
+[global]
+type=global
+user_agent=Vivolution-Carrier-Gateway-POC/0.1
+max_forwards=20
+
+[carrier-live-mutual-tls]
+type=transport
+protocol=tls
+bind={{ carrier_gateway_controller_ipv4 }}:{{ carrier_gateway_tls_port }}
+method=tlsv1_2
+cert_file=/run/carrier-pki/carrier.fullchain.pem
+priv_key_file=/run/carrier-pki/carrier.key
+ca_list_file=/run/public-ca/ca-certificates.crt
+verify_client=yes
+require_client_cert=yes
+verify_server=yes
+allow_reload=no
+local_net=10.20.0.0/16
+
+[edge-inbound]
+type=endpoint
+transport=carrier-live-mutual-tls
+context=from-edge
+disallow=all
+allow=ulaw
+allow=alaw
+direct_media=no
+rtp_symmetric=no
+force_rport=no
+rewrite_contact=no
+timers=yes
+trust_id_inbound=yes
+send_pai=yes
+media_encryption=sdes
+media_encryption_optimistic=no
+
+[edge-source-sbc1]
+type=identify
+endpoint=edge-inbound
+match={{ carrier_gateway_sbc1_ipv4 }}
+
+[edge-source-sbc2]
+type=identify
+endpoint=edge-inbound
+match={{ carrier_gateway_sbc2_ipv4 }}
+
+[sbc1-aor]
+type=aor
+contact=sips:{{ carrier_gateway_sbc1_server_name }}:{{ carrier_gateway_edge_listener_port }}
+qualify_frequency=30
+qualify_timeout=3.0
+
+[sbc1]
+type=endpoint
+transport=carrier-live-mutual-tls
+aors=sbc1-aor
+context=reject-all
+disallow=all
+allow=ulaw
+allow=alaw
+direct_media=no
+rtp_symmetric=no
+force_rport=no
+rewrite_contact=no
+timers=yes
+from_domain={{ carrier_gateway_server_name }}
+send_pai=yes
+media_encryption=sdes
+media_encryption_optimistic=no
+
+[sbc2-aor]
+type=aor
+contact=sips:{{ carrier_gateway_sbc2_server_name }}:{{ carrier_gateway_edge_listener_port }}
+qualify_frequency=30
+qualify_timeout=3.0
+
+[sbc2]
+type=endpoint
+transport=carrier-live-mutual-tls
+aors=sbc2-aor
+context=reject-all
+disallow=all
+allow=ulaw
+allow=alaw
+direct_media=no
+rtp_symmetric=no
+force_rport=no
+rewrite_contact=no
+timers=yes
+from_domain={{ carrier_gateway_server_name }}
+send_pai=yes
+media_encryption=sdes
+media_encryption_optimistic=no
+
+{% if carrier_gateway_twilio_enabled | bool %}
+[twilio-auth]
+type=auth
+auth_type=userpass
+username={{ carrier_gateway_twilio_secrets.username }}
+password={{ carrier_gateway_twilio_secrets.password }}
+
+[twilio-aor]
+type=aor
+contact=sips:{{ carrier_gateway_twilio_termination_fqdn }}:5061
+qualify_frequency=30
+qualify_timeout=3.0
+
+[twilio]
+type=endpoint
+transport=carrier-live-mutual-tls
+aors=twilio-aor
+outbound_auth=twilio-auth
+context=reject-all
+disallow=all
+allow=ulaw
+allow=alaw
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+timers=yes
+from_user={{ carrier_gateway_twilio_permitted_caller_id | regex_replace('^\\+', '') }}
+from_domain={{ carrier_gateway_twilio_termination_fqdn }}
+send_pai=yes
+trust_id_outbound=yes
+media_encryption=sdes
+media_encryption_optimistic=no
+{% endif %}

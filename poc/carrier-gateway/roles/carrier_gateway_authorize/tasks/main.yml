@@ -1,0 +1,124 @@
+---
+- name: Require the exact one-call authorization acknowledgement
+  ansible.builtin.assert:
+    that:
+      - >-
+        carrier_gateway_twilio_authorize_acknowledgement ==
+        'AUTHORIZE_EXACTLY_ONE_BILLABLE_PSTN_CALL'
+      - >-
+        carrier_gateway_twilio_authorization_request_id is match(
+          '^[a-z0-9][a-z0-9-]{7,63}$')
+      - >-
+        carrier_gateway_twilio_authorization_destination_e164 is match(
+          '^\\+[1-9][0-9]{7,14}$')
+      - carrier_gateway_twilio_geo_allowlist == ['AE']
+      - carrier_gateway_twilio_destination_prefixes | length > 0
+      - carrier_gateway_twilio_authorization_max_call_seconds | int >= 1
+      - >-
+        carrier_gateway_twilio_authorization_max_call_seconds | int <=
+        carrier_gateway_twilio_max_call_seconds | int
+      - carrier_gateway_twilio_authorization_max_spend_usd | float > 0
+      - >-
+        carrier_gateway_twilio_authorization_max_spend_usd | float <=
+        carrier_gateway_twilio_maximum_spend_per_call_usd | float
+      - >-
+        carrier_gateway_twilio_authorization_max_spend_usd | float >=
+        (((carrier_gateway_twilio_authorization_max_call_seconds | int + 59) // 60) *
+         carrier_gateway_twilio_cost_per_minute_ceiling_usd | float)
+      - >-
+        carrier_gateway_twilio_authorization_expires_epoch | int >=
+        ansible_date_time.epoch | int + 60
+      - >-
+        carrier_gateway_twilio_authorization_expires_epoch | int <=
+        ansible_date_time.epoch | int + 600
+    fail_msg: One-call Twilio authorization is missing or exceeds the POC bounds.
+  no_log: true
+
+- name: Require destination inside the reviewed exact-prefix authority
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import json, sys
+        destination = sys.argv[1]
+        prefixes = json.loads(sys.argv[2])
+        raise SystemExit(0 if sum(destination.startswith(p) for p in prefixes) == 1 else 2)
+      - "{{ carrier_gateway_twilio_authorization_destination_e164 }}"
+      - "{{ carrier_gateway_twilio_destination_prefixes | to_json }}"
+  changed_when: false
+  no_log: true
+
+- name: Read the installed Twilio feature state
+  ansible.builtin.slurp:
+    src: /etc/vivolution/carrier-gateway/twilio-enabled
+  register: carrier_gateway_authorize_twilio_state
+  no_log: true
+
+- name: Require installed Twilio trunk authority without an active call authority
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_authorize_twilio_state.content | b64decode == 'true\n'
+    fail_msg: Twilio trunking is not explicitly enabled on this carrier gateway.
+  no_log: true
+
+- name: Inspect authorization directories and collision paths
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ carrier_gateway_state_root }}/authorization"
+    - "{{ carrier_gateway_state_root }}/authorization/pending"
+    - >-
+      {{ carrier_gateway_state_root }}/authorization/used/{{
+         carrier_gateway_twilio_authorization_request_id }}.claimed
+    - >-
+      {{ carrier_gateway_state_root }}/authorization/rejected/{{
+         carrier_gateway_twilio_authorization_request_id }}.rejected
+  register: carrier_gateway_authorization_paths
+  no_log: true
+
+- name: Require exact authorization directory and fresh identities
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_authorization_paths.results[0].stat.exists
+      - carrier_gateway_authorization_paths.results[0].stat.isdir | default(false)
+      - not (carrier_gateway_authorization_paths.results[0].stat.islnk | default(false))
+      - carrier_gateway_authorization_paths.results[0].stat.uid | int == 10003
+      - carrier_gateway_authorization_paths.results[0].stat.gid | int == 10003
+      - carrier_gateway_authorization_paths.results[0].stat.mode == '0700'
+      - not (carrier_gateway_authorization_paths.results[1].stat.exists | default(false))
+      - not (carrier_gateway_authorization_paths.results[2].stat.exists | default(false))
+      - not (carrier_gateway_authorization_paths.results[3].stat.exists | default(false))
+    fail_msg: A pending or previously consumed authorization prevents a new one.
+  no_log: true
+
+- name: Calculate the integer spend evidence bound
+  ansible.builtin.set_fact:
+    carrier_gateway_authorization_max_spend_microusd: >-
+      {{ (carrier_gateway_twilio_authorization_max_spend_usd | float * 1000000) | round(0, 'floor') | int }}
+  no_log: true
+
+- name: Atomically create one short-lived exact-destination authorization
+  ansible.builtin.copy:
+    content: |
+      schema=vivolution-carrier-call-v1
+      request_id={{ carrier_gateway_twilio_authorization_request_id }}
+      destination={{ carrier_gateway_twilio_authorization_destination_e164 }}
+      expires_epoch={{ carrier_gateway_twilio_authorization_expires_epoch | int }}
+      max_call_seconds={{ carrier_gateway_twilio_authorization_max_call_seconds | int }}
+      max_spend_microusd={{ carrier_gateway_authorization_max_spend_microusd }}
+      maximum_calls=1
+    dest: "{{ carrier_gateway_state_root }}/authorization/pending"
+    owner: '10003'
+    group: '10003'
+    mode: '0600'
+    force: false
+  no_log: true
+
+- name: Report armed state without destination or credential data
+  ansible.builtin.debug:
+    msg: >-
+      AUTHORIZED_ONE_CALL request_id={{ carrier_gateway_twilio_authorization_request_id }}
+      expires_epoch={{ carrier_gateway_twilio_authorization_expires_epoch | int }}
+      maximum_calls=1 max_seconds={{ carrier_gateway_twilio_authorization_max_call_seconds | int }}

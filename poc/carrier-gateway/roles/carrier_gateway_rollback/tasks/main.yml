@@ -1,0 +1,303 @@
+---
+- name: Require exact carrier rollback acknowledgement
+  ansible.builtin.assert:
+    that:
+      - >-
+        carrier_gateway_rollback_acknowledgement ==
+        'ROLLBACK_CARRIER_GATEWAY_TO_PROTECTED_PREVIOUS_CONFIG'
+    fail_msg: Refusing carrier rollback without its exact acknowledgement.
+
+- name: Inspect pending and committed rollback authorities
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar"
+    - "{{ carrier_gateway_state_root }}/rollback/previous-config.tar"
+  register: carrier_gateway_rollback_archives
+  changed_when: false
+
+- name: Select the interrupted snapshot before the last-known-good snapshot
+  ansible.builtin.set_fact:
+    carrier_gateway_selected_rollback_archive: >-
+      {{ (carrier_gateway_rollback_archives.results[0].stat.exists | default(false)) |
+         ternary(carrier_gateway_rollback_archives.results[0].item,
+                 carrier_gateway_rollback_archives.results[1].item) }}
+  no_log: true
+
+- name: Require one protected regular rollback authority
+  ansible.builtin.assert:
+    that:
+      - >-
+        (carrier_gateway_rollback_archives.results[0].stat.exists | default(false)) or
+        (carrier_gateway_rollback_archives.results[1].stat.exists | default(false))
+      - >-
+        ((carrier_gateway_rollback_archives.results[0].stat.exists | default(false)) and
+         (carrier_gateway_rollback_archives.results[0].stat.isreg | default(false)) and
+         not (carrier_gateway_rollback_archives.results[0].stat.islnk | default(false)) and
+         carrier_gateway_rollback_archives.results[0].stat.nlink | int == 1 and
+         carrier_gateway_rollback_archives.results[0].stat.uid | int == 0 and
+         carrier_gateway_rollback_archives.results[0].stat.gid | int == 0 and
+         carrier_gateway_rollback_archives.results[0].stat.mode == '0400') or
+        ((not (carrier_gateway_rollback_archives.results[0].stat.exists | default(false))) and
+         (carrier_gateway_rollback_archives.results[1].stat.isreg | default(false)) and
+         not (carrier_gateway_rollback_archives.results[1].stat.islnk | default(false)) and
+         carrier_gateway_rollback_archives.results[1].stat.nlink | int == 1 and
+         carrier_gateway_rollback_archives.results[1].stat.uid | int == 0 and
+         carrier_gateway_rollback_archives.results[1].stat.gid | int == 0 and
+         carrier_gateway_rollback_archives.results[1].stat.mode == '0400')
+    fail_msg: No exact protected carrier rollback archive is available.
+  no_log: true
+
+- name: Validate bounded archive members before extraction
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import pathlib, sys, tarfile
+        archive = pathlib.Path(sys.argv[1])
+        if archive.stat().st_size > 2 * 1024 * 1024:
+            raise SystemExit(2)
+        required = {
+            'asterisk/asterisk.conf', 'asterisk/cdr.conf',
+            'asterisk/cdr_custom.conf', 'asterisk/extensions.conf',
+            'asterisk/http.conf', 'asterisk/logger.conf',
+            'asterisk/manager.conf', 'asterisk/modules.conf',
+            'asterisk/pjsip.conf', 'asterisk/rtp.conf',
+            'agi/vivolution-twilio-authorize.agi',
+            'asterisk-image-id', 'twilio-enabled',
+        }
+        allowed_dirs = {'asterisk', 'agi'}
+        with tarfile.open(archive, 'r:') as bundle:
+            members = bundle.getmembers()
+            names = {member.name.rstrip('/') for member in members}
+            if not required.issubset(names):
+                raise SystemExit(2)
+            for member in members:
+                name = member.name.rstrip('/')
+                if name in allowed_dirs:
+                    if not member.isdir():
+                        raise SystemExit(2)
+                elif name in required:
+                    if not member.isfile() or member.size > 512 * 1024:
+                        raise SystemExit(2)
+                else:
+                    raise SystemExit(2)
+      - "{{ carrier_gateway_selected_rollback_archive }}"
+  changed_when: false
+  no_log: true
+
+- name: Refuse ambiguous rollback workspaces
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ carrier_gateway_state_root }}/rollback/staging"
+    - "{{ carrier_gateway_state_root }}/rollback/failed-current"
+  register: carrier_gateway_rollback_workspaces
+  changed_when: false
+
+- name: Require both rollback workspaces absent
+  ansible.builtin.assert:
+    that:
+      - not (carrier_gateway_rollback_workspaces.results[0].stat.exists | default(false))
+      - not (carrier_gateway_rollback_workspaces.results[1].stat.exists | default(false))
+    fail_msg: Ambiguous carrier rollback workspace requires manual inspection.
+
+- name: Restore the protected carrier configuration transactionally
+  block:
+    - name: Stop rootless carrier service before configuration swap
+      ansible.builtin.command:
+        argv: [systemctl, --user, stop, vivolution-carrier-gateway.service]
+      become: true
+      become_user: "{{ carrier_gateway_runtime_user }}"
+      environment:
+        HOME: "{{ carrier_gateway_rootless_home }}"
+        XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path={{ carrier_gateway_rootless_runtime_dir }}/bus"
+      changed_when: false
+
+    - name: Create root-only rollback staging
+      ansible.builtin.file:
+        path: "{{ carrier_gateway_state_root }}/rollback/staging"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Extract only validated rollback members
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --extract
+          - --file
+          - "{{ carrier_gateway_selected_rollback_archive }}"
+          - --directory
+          - "{{ carrier_gateway_state_root }}/rollback/staging"
+          - --no-same-owner
+          - --no-same-permissions
+      no_log: true
+
+    - name: Move current carrier configuration into protected recovery workspace
+      ansible.builtin.command:
+        argv:
+          - mv
+          - --no-target-directory
+          - "{{ carrier_gateway_config_root }}"
+          - "{{ carrier_gateway_state_root }}/rollback/failed-current"
+      no_log: true
+
+    - name: Create replacement carrier configuration root
+      ansible.builtin.file:
+        path: "{{ carrier_gateway_config_root }}"
+        state: directory
+        owner: root
+        group: '10003'
+        mode: '0750'
+
+    - name: Preserve current public PKI across rollback
+      ansible.builtin.command:
+        argv:
+          - mv
+          - --no-target-directory
+          - "{{ carrier_gateway_state_root }}/rollback/failed-current/pki"
+          - "{{ carrier_gateway_config_root }}/pki"
+      no_log: true
+
+    - name: Install the staged previous carrier configuration
+      ansible.builtin.command:
+        argv:
+          - mv
+          - "{{ item }}"
+          - "{{ carrier_gateway_config_root }}/"
+      loop:
+        - "{{ carrier_gateway_state_root }}/rollback/staging/asterisk"
+        - "{{ carrier_gateway_state_root }}/rollback/staging/agi"
+        - "{{ carrier_gateway_state_root }}/rollback/staging/asterisk-image-id"
+        - "{{ carrier_gateway_state_root }}/rollback/staging/twilio-enabled"
+      no_log: true
+
+    - name: Reapply protected ownership to restored configuration
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ carrier_gateway_config_root }}/asterisk", owner: root, group: '10003', mode: '0750' }
+        - { path: "{{ carrier_gateway_config_root }}/agi", owner: root, group: '10003', mode: '0750' }
+        - { path: "{{ carrier_gateway_config_root }}/asterisk-image-id", owner: root, group: root, mode: '0444' }
+        - { path: "{{ carrier_gateway_config_root }}/twilio-enabled", owner: root, group: root, mode: '0444' }
+      no_log: true
+
+    - name: Reapply protected modes to restored files
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - |
+            import os, pathlib, sys
+            root = pathlib.Path(sys.argv[1])
+            for path in (root / 'asterisk').iterdir():
+                if not path.is_file() or path.is_symlink(): raise SystemExit(2)
+                os.chown(path, 0, 10003); os.chmod(path, 0o440)
+            agi = root / 'agi' / 'vivolution-twilio-authorize.agi'
+            if not agi.is_file() or agi.is_symlink(): raise SystemExit(2)
+            os.chown(agi, 0, 10003); os.chmod(agi, 0o550)
+          - "{{ carrier_gateway_config_root }}"
+      no_log: true
+
+    - name: Restart rootless carrier service on restored configuration
+      ansible.builtin.command:
+        argv: [systemctl, --user, restart, vivolution-carrier-gateway.service]
+      become: true
+      become_user: "{{ carrier_gateway_runtime_user }}"
+      environment:
+        HOME: "{{ carrier_gateway_rootless_home }}"
+        XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path={{ carrier_gateway_rootless_runtime_dir }}/bus"
+      changed_when: false
+
+    - name: Require restored carrier readiness
+      ansible.builtin.command:
+        argv: [/usr/local/libexec/vivolution-carrier-gateway-readiness]
+      changed_when: false
+
+    - name: Remove failed and staging configuration after accepted rollback
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ carrier_gateway_state_root }}/rollback/failed-current"
+        - "{{ carrier_gateway_state_root }}/rollback/staging"
+        - "{{ carrier_gateway_selected_rollback_archive }}"
+      no_log: true
+  rescue:
+    - name: Stop carrier service after rejected rollback
+      ansible.builtin.command:
+        argv: [systemctl, --user, stop, vivolution-carrier-gateway.service]
+      become: true
+      become_user: "{{ carrier_gateway_runtime_user }}"
+      environment:
+        HOME: "{{ carrier_gateway_rootless_home }}"
+        XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path={{ carrier_gateway_rootless_runtime_dir }}/bus"
+      failed_when: false
+      changed_when: false
+
+    - name: Inspect rollback recovery paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ carrier_gateway_state_root }}/rollback/failed-current"
+        - "{{ carrier_gateway_config_root }}/pki"
+      register: carrier_gateway_rollback_recovery_paths
+      no_log: true
+
+    - name: Return current PKI to the pre-rollback workspace
+      ansible.builtin.command:
+        argv:
+          - mv
+          - --no-target-directory
+          - "{{ carrier_gateway_config_root }}/pki"
+          - "{{ carrier_gateway_state_root }}/rollback/failed-current/pki"
+      when:
+        - carrier_gateway_rollback_recovery_paths.results[0].stat.exists | default(false)
+        - carrier_gateway_rollback_recovery_paths.results[1].stat.exists | default(false)
+      failed_when: false
+      no_log: true
+
+    - name: Remove rejected restored configuration
+      ansible.builtin.file:
+        path: "{{ carrier_gateway_config_root }}"
+        state: absent
+      when: carrier_gateway_rollback_recovery_paths.results[0].stat.exists | default(false)
+      no_log: true
+
+    - name: Restore the exact pre-rollback configuration
+      ansible.builtin.command:
+        argv:
+          - mv
+          - --no-target-directory
+          - "{{ carrier_gateway_state_root }}/rollback/failed-current"
+          - "{{ carrier_gateway_config_root }}"
+      failed_when: false
+      no_log: true
+
+    - name: Restart the exact pre-rollback configuration
+      ansible.builtin.command:
+        argv: [systemctl, --user, restart, vivolution-carrier-gateway.service]
+      become: true
+      become_user: "{{ carrier_gateway_runtime_user }}"
+      environment:
+        HOME: "{{ carrier_gateway_rootless_home }}"
+        XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path={{ carrier_gateway_rootless_runtime_dir }}/bus"
+      failed_when: false
+      changed_when: false
+
+    - name: Fail after restoring pre-rollback state
+      ansible.builtin.fail:
+        msg: Carrier rollback was rejected; the exact pre-rollback configuration was restored.

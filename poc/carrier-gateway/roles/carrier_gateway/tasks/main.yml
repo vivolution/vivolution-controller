@@ -1,0 +1,796 @@
+---
+- name: Require the exact bounded carrier-gateway acknowledgement
+  ansible.builtin.assert:
+    that:
+      - >-
+        carrier_gateway_install_acknowledgement ==
+        'INSTALL_DIRECT_PRIVATE_PBX_POC_CARRIER_GATEWAY'
+      - carrier_gateway_firewall_contract_acknowledged | bool
+    fail_msg: >-
+      Refusing carrier-gateway installation without the exact POC and reviewed
+      host-firewall acknowledgements.
+
+- name: Require the immutable generation-3 carrier allocation
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_controller_ipv4 == '10.20.1.4'
+      - carrier_gateway_controller_interface == 'eth0'
+      - carrier_gateway_sbc1_ipv4 == '10.20.2.6'
+      - carrier_gateway_sbc2_ipv4 == '10.20.2.7'
+      - carrier_gateway_sbc1_server_name == 'sbc1.vivolution.ae'
+      - carrier_gateway_sbc2_server_name == 'sbc2.vivolution.ae'
+      - carrier_gateway_server_name == 'carrier.vivolution.ae'
+      - carrier_gateway_edge_listener_port | int == 15061
+      - carrier_gateway_tls_port | int == 5061
+      - carrier_gateway_rtp_start | int == 30000
+      - carrier_gateway_rtp_end | int == 30127
+      - carrier_gateway_edge_rtp_start | int == 20000
+      - carrier_gateway_edge_rtp_end | int == 20255
+      - carrier_gateway_tone_test_e164 == '+9710000002001'
+      - carrier_gateway_echo_test_e164 == '+9710000002002'
+      - carrier_gateway_asterisk_version == '22.10.1'
+      - >-
+        carrier_gateway_asterisk_source_sha256 ==
+        '373c98f4d4a1b923b42def0aee03f4e36aca9d1c244a8eeda646da8a97f89663'
+      - carrier_gateway_pjproject_version == '2.17'
+      - >-
+        carrier_gateway_pjproject_source_sha256 ==
+        '04b2eb1f0f01aa0ad1945b167171843448a51aa6b7c3e806496d434f13a112b7'
+      - >-
+        carrier_gateway_image_tag ==
+        'localhost/vivolution/carrier-gateway-asterisk:22.10.1-srtp1-autobind1'
+      - carrier_gateway_tls_port | int not in [22, 80, 443, 5432, 6432, 8000, 15061, 16061, 25061]
+      - carrier_gateway_rtp_start | int > carrier_gateway_edge_rtp_end | int
+    fail_msg: A carrier-gateway identity, port, version, or digest drifted.
+
+- name: Require the fixed Debian 13 AMD64 CP1 host
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Debian'
+      - ansible_facts['distribution_major_version'] == '13'
+      - ansible_facts['architecture'] == 'x86_64'
+      - ansible_facts['service_mgr'] == 'systemd'
+      - carrier_gateway_controller_ipv4 in ansible_facts['all_ipv4_addresses']
+    fail_msg: The carrier gateway is restricted to the fixed Debian 13 AMD64 CP1.
+
+- name: Reject every Twilio input while Twilio is disabled
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_twilio_enable_acknowledgement == ''
+      - carrier_gateway_twilio_termination_fqdn == ''
+      - carrier_gateway_twilio_destination_ipv4_cidrs == []
+      - carrier_gateway_twilio_destination_prefixes == []
+      - carrier_gateway_twilio_geo_allowlist == []
+      - carrier_gateway_twilio_permitted_caller_id == ''
+      - carrier_gateway_twilio_secrets == {}
+    fail_msg: Twilio is disabled, so every Twilio authority and secret must be absent.
+  when: not (carrier_gateway_twilio_enabled | bool)
+  no_log: true
+
+- name: Validate the explicit Twilio POC authority
+  ansible.builtin.assert:
+    that:
+      - >-
+        carrier_gateway_twilio_enable_acknowledgement ==
+        'ENABLE_ONE_SHOT_TWILIO_OUTBOUND_POC'
+      - >-
+        carrier_gateway_twilio_termination_fqdn is match(
+          '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.pstn\\.twilio\\.com$')
+      - carrier_gateway_twilio_destination_ipv4_cidrs | length > 0
+      - carrier_gateway_twilio_destination_ipv4_cidrs | length <= 16
+      - >-
+        carrier_gateway_twilio_destination_ipv4_cidrs |
+        select('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/32$') |
+        list | length == carrier_gateway_twilio_destination_ipv4_cidrs | length
+      - carrier_gateway_twilio_destination_prefixes | length > 0
+      - carrier_gateway_twilio_destination_prefixes | length <= 8
+      - >-
+        carrier_gateway_twilio_destination_prefixes |
+        select('match', '^\\+[1-9][0-9]{0,10}$') |
+        list | length == carrier_gateway_twilio_destination_prefixes | length
+      - carrier_gateway_twilio_geo_allowlist == ['AE']
+      - >-
+        carrier_gateway_twilio_destination_prefixes |
+        reject('match', '^\\+971') | list | length == 0
+      - carrier_gateway_twilio_permitted_caller_id is match('^\\+[1-9][0-9]{7,14}$')
+      - carrier_gateway_twilio_secrets is mapping
+      - carrier_gateway_twilio_secrets.keys() | sort == ['password', 'username']
+      - >-
+        carrier_gateway_twilio_secrets.username is match(
+          '^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$')
+      - >-
+        carrier_gateway_twilio_secrets.password is match(
+          '^[A-Za-z0-9_-]{32,128}$')
+      - carrier_gateway_twilio_max_call_seconds | int >= 1
+      - carrier_gateway_twilio_max_call_seconds | int <= 120
+      - carrier_gateway_twilio_maximum_calls_per_authorization | int == 1
+      - carrier_gateway_twilio_cost_per_minute_ceiling_usd | float > 0
+      - carrier_gateway_twilio_cost_per_minute_ceiling_usd | float <= 1.00
+      - carrier_gateway_twilio_maximum_spend_per_call_usd | float > 0
+      - carrier_gateway_twilio_maximum_spend_per_call_usd | float <= 2.00
+    fail_msg: The optional Twilio authority is incomplete or broader than the POC bound.
+  when: carrier_gateway_twilio_enabled | bool
+  no_log: true
+
+- name: Validate Twilio destination IPv4 values semantically
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import ipaddress, json, sys
+        values = json.loads(sys.argv[1])
+        nets = [ipaddress.ip_network(value, strict=True) for value in values]
+        ok = all(net.version == 4 and net.prefixlen == 32 and net.is_global for net in nets)
+        raise SystemExit(0 if ok and len(set(nets)) == len(nets) else 2)
+      - "{{ carrier_gateway_twilio_destination_ipv4_cidrs | to_json }}"
+  when: carrier_gateway_twilio_enabled | bool
+  changed_when: false
+
+- name: Resolve the Twilio termination target through the host authority
+  ansible.builtin.command:
+    argv:
+      - getent
+      - ahostsv4
+      - "{{ carrier_gateway_twilio_termination_fqdn }}"
+  when: carrier_gateway_twilio_enabled | bool
+  register: carrier_gateway_twilio_resolution
+  changed_when: false
+
+- name: Require exact Twilio DNS and cgroup destination agreement
+  ansible.builtin.assert:
+    that:
+      - >-
+        carrier_gateway_twilio_resolution.stdout_lines |
+        map('split') | map('first') | unique | sort ==
+        carrier_gateway_twilio_destination_ipv4_cidrs |
+        map('regex_replace', '/32$', '') | unique | sort
+    fail_msg: Twilio DNS does not exactly match its reviewed cgroup IPv4 authority.
+  when: carrier_gateway_twilio_enabled | bool
+
+- name: Require unified cgroup v2
+  ansible.builtin.stat:
+    path: /sys/fs/cgroup/cgroup.controllers
+  register: carrier_gateway_cgroup_v2
+
+- name: Reject a host without cgroup v2
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_cgroup_v2.stat.exists
+      - carrier_gateway_cgroup_v2.stat.isreg | default(false)
+    fail_msg: Carrier runtime IP and socket policy requires unified cgroup v2.
+
+- name: Install bounded carrier-gateway host dependencies
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - iproute2
+      - jq
+      - nftables
+      - openssl
+      - podman
+      - fuse-overlayfs
+      - slirp4netns
+      - uidmap
+      - util-linux
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 120
+
+- name: Prove systemd socket-bind denial is enforced
+  ansible.builtin.command:
+    argv:
+      - systemd-run
+      - --wait
+      - --collect
+      - --pipe
+      - --quiet
+      - --service-type=exec
+      - --unit=vivolution-carrier-bind-policy-probe
+      - --property=SocketBindDeny=any
+      - /usr/bin/python3
+      - -c
+      - |
+        import errno, socket
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(('10.20.1.4', 0))
+        except OSError as error:
+            raise SystemExit(0 if error.errno in (errno.EACCES, errno.EPERM) else 2)
+        raise SystemExit(1)
+  changed_when: false
+
+- name: Create the carrier state parent before the rootless home
+  ansible.builtin.file:
+    path: "{{ carrier_gateway_state_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create the dedicated rootless carrier group
+  ansible.builtin.group:
+    name: "{{ carrier_gateway_runtime_user }}"
+    gid: "{{ carrier_gateway_runtime_gid }}"
+    system: false
+    state: present
+
+- name: Create the dedicated rootless carrier user
+  ansible.builtin.user:
+    name: "{{ carrier_gateway_runtime_user }}"
+    uid: "{{ carrier_gateway_runtime_uid }}"
+    group: "{{ carrier_gateway_runtime_user }}"
+    home: "{{ carrier_gateway_rootless_home }}"
+    shell: /usr/sbin/nologin
+    system: false
+    create_home: true
+    state: present
+
+- name: Require rootless subordinate UID and GID allocations
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import pathlib, sys
+        user = sys.argv[1]
+        for path in ('/etc/subuid', '/etc/subgid'):
+            values = [line.split(':') for line in pathlib.Path(path).read_text().splitlines()]
+            matches = [parts for parts in values if len(parts) == 3 and parts[0] == user]
+            if len(matches) != 1 or int(matches[0][2]) < 65536:
+                raise SystemExit(2)
+      - "{{ carrier_gateway_runtime_user }}"
+  changed_when: false
+
+- name: Create the dedicated carrier user-slice policy directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/user-10003.slice.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install the root-enforced carrier user-slice network policy
+  ansible.builtin.template:
+    src: 10-vivolution-carrier-gateway-policy.conf.j2
+    dest: /etc/systemd/system/user-10003.slice.d/10-vivolution-carrier-gateway-policy.conf
+    owner: root
+    group: root
+    mode: '0644'
+  register: carrier_gateway_slice_policy
+
+- name: Reload system manager before starting the dedicated user slice
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Restart the dedicated user slice after policy changes
+  ansible.builtin.systemd_service:
+    name: "user@{{ carrier_gateway_runtime_uid }}.service"
+    state: stopped
+  when: carrier_gateway_slice_policy.changed | bool
+  failed_when: false
+
+- name: Enable the dedicated rootless user manager across reboot
+  ansible.builtin.command:
+    argv: [loginctl, enable-linger, "{{ carrier_gateway_runtime_user }}"]
+  changed_when: false
+
+- name: Start the dedicated rootless user manager
+  ansible.builtin.systemd_service:
+    name: "user@{{ carrier_gateway_runtime_uid }}.service"
+    state: started
+
+- name: Create protected carrier-gateway directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /usr/local/libexec, owner: root, group: root, mode: '0755' }
+    - { path: /usr/local/sbin, owner: root, group: root, mode: '0755' }
+    - { path: /etc/containers/systemd, owner: root, group: root, mode: '0755' }
+    - { path: "{{ carrier_gateway_root }}", owner: root, group: '10003', mode: '0750' }
+    - { path: "{{ carrier_gateway_root }}/build", owner: root, group: '10003', mode: '0750' }
+    - { path: "{{ carrier_gateway_config_root }}", owner: root, group: '10003', mode: '0750' }
+    - { path: "{{ carrier_gateway_config_root }}/asterisk", owner: root, group: '10003', mode: '0750' }
+    - { path: "{{ carrier_gateway_config_root }}/agi", owner: root, group: '10003', mode: '0750' }
+    - { path: "{{ carrier_gateway_pki_root }}", owner: root, group: '10003', mode: '0750' }
+    - { path: "{{ carrier_gateway_state_root }}", owner: root, group: '10003', mode: '0750' }
+    - { path: "{{ carrier_gateway_rootless_home }}", owner: '10003', group: '10003', mode: '0700' }
+    - { path: "{{ carrier_gateway_rootless_home }}/.config", owner: '10003', group: '10003', mode: '0700' }
+    - { path: "{{ carrier_gateway_rootless_home }}/.config/containers", owner: '10003', group: '10003', mode: '0700' }
+    - { path: "{{ carrier_gateway_rootless_quadlet_root }}", owner: '10003', group: '10003', mode: '0700' }
+    - { path: "{{ carrier_gateway_state_root }}/asterisk-log", owner: '10003', group: '10003', mode: '0750' }
+    - { path: "{{ carrier_gateway_state_root }}/asterisk-log/cdr-custom", owner: '10003', group: '10003', mode: '0750' }
+    - { path: "{{ carrier_gateway_state_root }}/authorization", owner: '10003', group: '10003', mode: '0700' }
+    - { path: "{{ carrier_gateway_state_root }}/authorization/used", owner: '10003', group: '10003', mode: '0700' }
+    - { path: "{{ carrier_gateway_state_root }}/authorization/rejected", owner: '10003', group: '10003', mode: '0700' }
+    - { path: "{{ carrier_gateway_results_root }}", owner: root, group: root, mode: '0750' }
+    - { path: "{{ carrier_gateway_state_root }}/rollback", owner: root, group: root, mode: '0700' }
+
+- name: Inspect the live public certificate material without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ carrier_gateway_certificate_path }}"
+    - "{{ carrier_gateway_private_key_path }}"
+    - "{{ carrier_gateway_public_ca_bundle_path }}"
+  register: carrier_gateway_pki_status
+  changed_when: false
+
+- name: Require protected single-link public PKI material
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg | default(false)
+      - not (item.stat.islnk | default(false))
+      - item.stat.nlink | int == 1
+      - item.stat.uid | int == 0
+      - item.stat.gid | int in [0, 10003]
+      - item.stat.mode in ['0440', '0444', '0644']
+    fail_msg: Public/live certificate material is absent, linked, or insufficiently protected.
+  loop: "{{ carrier_gateway_pki_status.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Require group-readable but non-public carrier certificate and key
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_pki_status.results[0].stat.gid | int == 10003
+      - carrier_gateway_pki_status.results[0].stat.mode == '0440'
+      - carrier_gateway_pki_status.results[1].stat.gid | int == 10003
+      - carrier_gateway_pki_status.results[1].stat.mode == '0440'
+    fail_msg: Carrier certificate and key must be root:10003 0440 for the non-root container.
+  no_log: true
+
+- name: Verify exact live certificate identity, lifetime, and public trust
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  loop:
+    - [openssl, x509, -in, "{{ carrier_gateway_certificate_path }}", -noout, -checkend, "{{ carrier_gateway_minimum_certificate_seconds }}"]
+    - [openssl, verify, -purpose, sslserver, -verify_hostname, "{{ carrier_gateway_server_name }}", -CAfile, "{{ carrier_gateway_public_ca_bundle_path }}", -untrusted, "{{ carrier_gateway_certificate_path }}", "{{ carrier_gateway_certificate_path }}"]
+    - [openssl, x509, -in, "{{ carrier_gateway_certificate_path }}", -noout, -ext, subjectAltName]
+  register: carrier_gateway_certificate_validation
+  changed_when: false
+  no_log: true
+
+- name: Require carrier.vivolution.ae as the sole certificate DNS identity
+  ansible.builtin.assert:
+    that:
+      - >-
+        carrier_gateway_certificate_validation.results[2].stdout_lines |
+        map('trim') | select('match', '^DNS:') | list ==
+        ['DNS:carrier.vivolution.ae']
+    fail_msg: Carrier certificate SAN identity is not exactly carrier.vivolution.ae.
+
+- name: Read the carrier certificate public identity
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -in
+      - "{{ carrier_gateway_certificate_path }}"
+      - -pubkey
+      - -noout
+  register: carrier_gateway_certificate_public_identity
+  changed_when: false
+  no_log: true
+
+- name: Derive the carrier private-key public identity
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - pkey
+      - -in
+      - "{{ carrier_gateway_private_key_path }}"
+      - -pubout
+  register: carrier_gateway_key_public_identity
+  changed_when: false
+  no_log: true
+
+- name: Require matching certificate and private-key public identities
+  ansible.builtin.assert:
+    that:
+      - >-
+        carrier_gateway_certificate_public_identity.stdout | trim ==
+        carrier_gateway_key_public_identity.stdout | trim
+    fail_msg: Carrier certificate and private key do not match.
+  no_log: true
+
+- name: Install exact private Edge host-authority verifier
+  ansible.builtin.copy:
+    src: bin/verify_edge_hosts.py
+    dest: /usr/local/libexec/vivolution-carrier-verify-edge-hosts
+    owner: root
+    group: root
+    mode: '0550'
+
+- name: Require no conflicting root Edge host authority
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/vivolution-carrier-verify-edge-hosts, pre, /etc/hosts]
+  changed_when: false
+
+- name: Install the two exact generation-3 private Edge mappings
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    create: false
+    marker: '# {mark} VIVOLUTION CARRIER GATEWAY PRIVATE EDGE DNS'
+    block: |
+      10.20.2.6 sbc1.vivolution.ae
+      10.20.2.7 sbc2.vivolution.ae
+    owner: root
+    group: root
+    mode: '0644'
+    validate: /usr/local/libexec/vivolution-carrier-verify-edge-hosts post %s
+
+- name: Prove exact private Edge host authority
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/vivolution-carrier-verify-edge-hosts, post, /etc/hosts]
+  changed_when: false
+
+- name: Install the pinned carrier Asterisk build context
+  ansible.builtin.copy:
+    src: asterisk/
+    dest: "{{ carrier_gateway_root }}/build/asterisk/"
+    owner: root
+    group: root
+    mode: preserve
+    directory_mode: '0755'
+
+- name: Inspect current carrier configuration for a protected rollback snapshot
+  ansible.builtin.stat:
+    path: "{{ carrier_gateway_config_root }}/asterisk/pjsip.conf"
+    follow: false
+  register: carrier_gateway_current_configuration
+  changed_when: false
+
+- name: Inspect interrupted configuration transaction state
+  ansible.builtin.stat:
+    path: "{{ carrier_gateway_state_root }}/rollback/pending-config.tar"
+    follow: false
+  register: carrier_gateway_pending_configuration
+  changed_when: false
+
+- name: Refuse to overwrite an interrupted rollback authority
+  ansible.builtin.assert:
+    that:
+      - not (carrier_gateway_pending_configuration.stat.exists | default(false))
+    fail_msg: >-
+      A protected pending carrier rollback snapshot exists. Run rollback.yml
+      before attempting another installation.
+
+- name: Remove only an abandoned next rollback snapshot
+  ansible.builtin.file:
+    path: "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next"
+    state: absent
+  when: carrier_gateway_current_configuration.stat.exists | default(false)
+
+- name: Create a protected exact previous-configuration snapshot
+  ansible.builtin.command:
+    argv:
+      - tar
+      - --create
+      - --file
+      - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next"
+      - --directory
+      - "{{ carrier_gateway_config_root }}"
+      - asterisk
+      - agi
+      - asterisk-image-id
+      - twilio-enabled
+  when: carrier_gateway_current_configuration.stat.exists | default(false)
+  no_log: true
+
+- name: Protect the next rollback snapshot
+  ansible.builtin.file:
+    path: "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next"
+    state: file
+    owner: root
+    group: root
+    mode: '0400'
+  when: carrier_gateway_current_configuration.stat.exists | default(false)
+  no_log: true
+
+- name: Atomically publish the previous-configuration snapshot
+  ansible.builtin.command:
+    argv:
+      - mv
+      - --force
+      - --no-target-directory
+      - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next"
+      - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar"
+  when: carrier_gateway_current_configuration.stat.exists | default(false)
+  no_log: true
+
+- name: Install immutable carrier Asterisk configuration
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ carrier_gateway_config_root }}/asterisk/{{ item }}"
+    owner: root
+    group: '10003'
+    mode: '0440'
+  loop:
+    - asterisk.conf
+    - cdr.conf
+    - cdr_custom.conf
+    - extensions.conf
+    - http.conf
+    - logger.conf
+    - manager.conf
+    - modules.conf
+    - pjsip.conf
+    - rtp.conf
+  notify: Restart carrier gateway
+  no_log: true
+
+- name: Install the one-shot Twilio AGI gate
+  ansible.builtin.template:
+    src: vivolution-twilio-authorize.agi.j2
+    dest: "{{ carrier_gateway_config_root }}/agi/vivolution-twilio-authorize.agi"
+    owner: root
+    group: '10003'
+    mode: '0550'
+  notify: Restart carrier gateway
+
+- name: Install CDR evidence normalizer
+  ansible.builtin.copy:
+    src: bin/carrier_cdr_evidence.py
+    dest: /usr/local/libexec/vivolution-carrier-cdr-evidence
+    owner: root
+    group: root
+    mode: '0550'
+
+- name: Require active exact carrier host-firewall authority
+  ansible.builtin.command:
+    argv: [nft, list, chain, inet, vivolution_filter, input]
+  register: carrier_gateway_nft_input
+  changed_when: false
+
+- name: Require exact nftables rules before exposing the service
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_nft_input.stdout is search('vivolution-carrier-tls')
+      - carrier_gateway_nft_input.stdout is search('vivolution-carrier-media')
+      - carrier_gateway_nft_input.stdout is search('10\\.20\\.2\\.6')
+      - carrier_gateway_nft_input.stdout is search('10\\.20\\.2\\.7')
+      - carrier_gateway_nft_input.stdout is search('tcp dport 5061')
+      - carrier_gateway_nft_input.stdout is search('udp sport 20000-20255 udp dport 30000-30127')
+    fail_msg: The CP1 nftables carrier ingress contract is not active and exact.
+
+- name: Inspect the pinned base image
+  ansible.builtin.command:
+    argv: [podman, image, exists, "{{ carrier_gateway_base_image }}"]
+  register: carrier_gateway_base_image_status
+  changed_when: false
+  failed_when: false
+
+- name: Pull the missing base image by immutable digest
+  ansible.builtin.command:
+    argv: [podman, pull, "{{ carrier_gateway_base_image }}"]
+  when: carrier_gateway_base_image_status.rc != 0
+  register: carrier_gateway_base_image_pull
+  retries: 3
+  delay: 5
+  until: carrier_gateway_base_image_pull is succeeded
+
+- name: Inspect the rootless runtime carrier image tag
+  ansible.builtin.command:
+    argv: [podman, image, exists, "{{ carrier_gateway_image_tag }}"]
+  register: carrier_gateway_image_status
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ carrier_gateway_runtime_user }}"
+  environment:
+    HOME: "{{ carrier_gateway_rootless_home }}"
+    XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+
+- name: Inspect the root build-store carrier image tag
+  ansible.builtin.command:
+    argv: [podman, image, exists, "{{ carrier_gateway_image_tag }}"]
+  register: carrier_gateway_build_image_status
+  changed_when: false
+  failed_when: false
+  when: carrier_gateway_image_status.rc != 0
+
+- name: Build the pinned Asterisk SRTP image once per immutable revision tag
+  ansible.builtin.command:
+    argv:
+      - podman
+      - build
+      - --network=slirp4netns:allow_host_loopback=false,enable_ipv6=false
+      - --pull=never
+      - --build-arg
+      - "BASE_IMAGE={{ carrier_gateway_base_image }}"
+      - --build-arg
+      - "ASTERISK_VERSION={{ carrier_gateway_asterisk_version }}"
+      - --build-arg
+      - "ASTERISK_SOURCE_SHA256={{ carrier_gateway_asterisk_source_sha256 }}"
+      - --build-arg
+      - "PJPROJECT_VERSION={{ carrier_gateway_pjproject_version }}"
+      - --build-arg
+      - "PJPROJECT_SOURCE_SHA256={{ carrier_gateway_pjproject_source_sha256 }}"
+      - --tag
+      - "{{ carrier_gateway_image_tag }}"
+      - "{{ carrier_gateway_root }}/build/asterisk"
+  when:
+    - carrier_gateway_image_status.rc != 0
+    - carrier_gateway_build_image_status.rc != 0
+
+- name: Remove only a stale bounded image-transfer archive
+  ansible.builtin.file:
+    path: "{{ carrier_gateway_root }}/carrier-image.oci"
+    state: absent
+  when: carrier_gateway_image_status.rc != 0
+
+- name: Export the immutable build image for the rootless store
+  ansible.builtin.command:
+    argv:
+      - podman
+      - save
+      - --format
+      - oci-archive
+      - --output
+      - "{{ carrier_gateway_root }}/carrier-image.oci"
+      - "{{ carrier_gateway_image_tag }}"
+  when: carrier_gateway_image_status.rc != 0
+
+- name: Protect the bounded image-transfer archive for rootless import
+  ansible.builtin.file:
+    path: "{{ carrier_gateway_root }}/carrier-image.oci"
+    state: file
+    owner: '10003'
+    group: '10003'
+    mode: '0400'
+  when: carrier_gateway_image_status.rc != 0
+
+- name: Import the immutable image into the rootless runtime store
+  ansible.builtin.command:
+    argv: [podman, load, --input, "{{ carrier_gateway_root }}/carrier-image.oci"]
+  when: carrier_gateway_image_status.rc != 0
+  become: true
+  become_user: "{{ carrier_gateway_runtime_user }}"
+  environment:
+    HOME: "{{ carrier_gateway_rootless_home }}"
+    XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+  notify: Restart carrier gateway
+
+- name: Remove the completed image-transfer archive
+  ansible.builtin.file:
+    path: "{{ carrier_gateway_root }}/carrier-image.oci"
+    state: absent
+  when: carrier_gateway_image_status.rc != 0
+
+- name: Resolve carrier image to an immutable content ID
+  ansible.builtin.command:
+    argv: [podman, image, inspect, --format, '{{ "{{.Id}}" }}', "{{ carrier_gateway_image_tag }}"]
+  register: carrier_gateway_image_id_result
+  changed_when: false
+  become: true
+  become_user: "{{ carrier_gateway_runtime_user }}"
+  environment:
+    HOME: "{{ carrier_gateway_rootless_home }}"
+    XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+
+- name: Require and remember the exact image ID
+  ansible.builtin.assert:
+    that:
+      - (carrier_gateway_image_id_result.stdout | trim) is match('^(sha256:)?[0-9a-f]{64}$')
+    fail_msg: Carrier image did not resolve to one immutable SHA-256 content ID.
+
+- name: Canonicalize the carrier image ID
+  ansible.builtin.set_fact:
+    carrier_gateway_image_id: >-
+      sha256:{{ carrier_gateway_image_id_result.stdout | trim | regex_replace('^sha256:', '') }}
+
+- name: Verify the immutable image version and SRTP runtime linkage
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  loop:
+    - [podman, run, --rm, --network=none, --read-only, --cap-drop=all, "{{ carrier_gateway_image_id }}", -V]
+    - [podman, run, --rm, --network=none, --read-only, --cap-drop=all, --entrypoint, /usr/bin/ldd, "{{ carrier_gateway_image_id }}", /usr/lib/asterisk/modules/res_srtp.so]
+  register: carrier_gateway_image_verification
+  changed_when: false
+  become: true
+  become_user: "{{ carrier_gateway_runtime_user }}"
+  environment:
+    HOME: "{{ carrier_gateway_rootless_home }}"
+    XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+
+- name: Require Asterisk 22.10.1 and libsrtp runtime closure
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_asterisk_version in (carrier_gateway_image_verification.results[0].stdout + carrier_gateway_image_verification.results[0].stderr)
+      - >-
+        (carrier_gateway_image_verification.results[1].stdout +
+         carrier_gateway_image_verification.results[1].stderr) is search('libsrtp2?\\.so')
+    fail_msg: The immutable image lacks its exact Asterisk or SRTP runtime.
+
+- name: Record the immutable carrier image ID and Twilio feature state
+  ansible.builtin.copy:
+    content: "{{ item.content }}\n"
+    dest: "{{ carrier_gateway_config_root }}/{{ item.name }}"
+    owner: root
+    group: root
+    mode: '0444'
+  loop:
+    - { name: asterisk-image-id, content: "{{ carrier_gateway_image_id }}" }
+    - { name: twilio-enabled, content: "{{ carrier_gateway_twilio_enabled | bool | ternary('true', 'false') }}" }
+
+- name: Install reboot-safe runtime directory policy
+  ansible.builtin.template:
+    src: vivolution-carrier-gateway-tmpfiles.conf.j2
+    dest: /etc/tmpfiles.d/vivolution-carrier-gateway.conf
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Reconcile protected runtime directories
+  ansible.builtin.command:
+    argv: [systemd-tmpfiles, --create, /etc/tmpfiles.d/vivolution-carrier-gateway.conf]
+  changed_when: false
+
+- name: Install the hardened carrier Quadlet
+  ansible.builtin.template:
+    src: vivolution-carrier-gateway.container.j2
+    dest: "{{ carrier_gateway_rootless_quadlet_root }}/vivolution-carrier-gateway.container"
+    owner: '10003'
+    group: '10003'
+    mode: '0644'
+  notify: Restart carrier gateway
+
+- name: Install readiness and non-billable signaling runners
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: '0550'
+  loop:
+    - { src: vivolution-carrier-gateway-readiness.j2, dest: /usr/local/libexec/vivolution-carrier-gateway-readiness }
+    - { src: vivolution-carrier-gateway-test.j2, dest: /usr/local/sbin/vivolution-carrier-gateway-test }
+
+- name: Apply carrier-gateway service changes before readiness
+  ansible.builtin.meta: flush_handlers
+
+- name: Require rootless carrier gateway active and reboot-persistent
+  ansible.builtin.command:
+    argv: [systemctl, --user, enable, --now, vivolution-carrier-gateway.service]
+  become: true
+  become_user: "{{ carrier_gateway_runtime_user }}"
+  environment:
+    HOME: "{{ carrier_gateway_rootless_home }}"
+    XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path={{ carrier_gateway_rootless_runtime_dir }}/bus"
+  changed_when: false
+
+- name: Verify local carrier-gateway readiness
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/vivolution-carrier-gateway-readiness]
+  register: carrier_gateway_readiness
+  changed_when: false
+
+- name: Require the exact bounded readiness result
+  ansible.builtin.assert:
+    that:
+      - >-
+        carrier_gateway_readiness.stdout is search(
+          '^READY carrier-gateway profile=direct-private-pbx-poc '
+          ~ 'listener=10.20.1.4:5061 edges=10.20.2.6,10.20.2.7 '
+          ~ 'twilio=(disabled|armed-no-call-authority)$')
+    fail_msg: The carrier gateway did not reach its bounded readiness contract.
+
+- name: Publish the last-known-good rollback snapshot after exact readiness
+  ansible.builtin.command:
+    argv:
+      - mv
+      - --force
+      - --no-target-directory
+      - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar"
+      - "{{ carrier_gateway_state_root }}/rollback/previous-config.tar"
+  when: carrier_gateway_current_configuration.stat.exists | default(false)
+  no_log: true

@@ -1,0 +1,151 @@
+# syntax=docker/dockerfile:1
+ARG BASE_IMAGE=docker.io/library/debian@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+FROM ${BASE_IMAGE} AS builder
+
+ARG ASTERISK_VERSION=22.10.1
+ARG ASTERISK_SOURCE_SHA256=373c98f4d4a1b923b42def0aee03f4e36aca9d1c244a8eeda646da8a97f89663
+ARG PJPROJECT_VERSION=2.17
+ARG PJPROJECT_SOURCE_SHA256=04b2eb1f0f01aa0ad1945b167171843448a51aa6b7c3e806496d434f13a112b7
+
+COPY pjsip-tls-listener-bind-fail-closed.patch /tmp/pjsip-tls-listener-bind-fail-closed.patch
+COPY pjproject-tls-kernel-autobind.patch /tmp/pjproject-tls-kernel-autobind.patch
+COPY pjproject-dns-kernel-autobind.patch /tmp/pjproject-dns-kernel-autobind.patch
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install --yes --no-install-recommends \
+        autoconf \
+        automake \
+        bison \
+        build-essential \
+        bzip2 \
+        ca-certificates \
+        curl \
+        file \
+        flex \
+        libedit-dev \
+        libjansson-dev \
+        libncurses-dev \
+        libnewt-dev \
+        libsrtp2-dev \
+        libsqlite3-dev \
+        libssl-dev \
+        libtool \
+        liburiparser-dev \
+        libxml2-dev \
+        patch \
+        pkg-config \
+        uuid-dev; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src
+
+RUN set -eux; \
+    curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+        --output asterisk.tar.gz \
+        "https://github.com/asterisk/asterisk/archive/refs/tags/${ASTERISK_VERSION}.tar.gz"; \
+    printf '%s  %s\n' "${ASTERISK_SOURCE_SHA256}" asterisk.tar.gz \
+        | sha256sum --check --strict; \
+    curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+        --output "pjproject-${PJPROJECT_VERSION}.tar.bz2" \
+        "https://raw.githubusercontent.com/asterisk/third-party/master/pjproject/${PJPROJECT_VERSION}/pjproject-${PJPROJECT_VERSION}.tar.bz2"; \
+    printf '%s  %s\n' "${PJPROJECT_SOURCE_SHA256}" "pjproject-${PJPROJECT_VERSION}.tar.bz2" \
+        | sha256sum --check --strict; \
+    tar --extract --gzip --file asterisk.tar.gz; \
+    mkdir --parents cache; \
+    cp "pjproject-${PJPROJECT_VERSION}.tar.bz2" cache/
+
+WORKDIR /usr/src/asterisk-${ASTERISK_VERSION}
+
+RUN set -eux; \
+    export EXTERNALS_CACHE_DIR=/usr/src/cache; \
+    CFLAGS='-DVIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT=1 -DVIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT=1' ./configure \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --localstatedir=/var \
+        --with-crypto \
+        --with-jansson \
+        --with-pjproject-bundled \
+        --with-srtp \
+        --with-ssl; \
+    patch --batch --forward --strip=1 --directory=third-party/pjproject/source \
+        < /tmp/pjsip-tls-listener-bind-fail-closed.patch; \
+    patch --batch --forward --strip=1 --directory=third-party/pjproject/source \
+        < /tmp/pjproject-tls-kernel-autobind.patch; \
+    patch --batch --forward --strip=1 --directory=third-party/pjproject/source \
+        < /tmp/pjproject-dns-kernel-autobind.patch; \
+    grep --fixed-strings --quiet 'if (status != PJ_SUCCESS && status != PJ_EPENDING)' \
+        third-party/pjproject/source/pjsip/src/pjsip/sip_transport_tls.c; \
+    grep --fixed-strings --quiet 'VIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT == 1' \
+        third-party/pjproject/source/pjlib/src/pj/ssl_sock_imp_common.c; \
+    grep --fixed-strings --quiet 'VIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT == 1' \
+        third-party/pjproject/source/pjlib-util/src/pjlib-util/resolver.c; \
+    grep --fixed-strings --quiet 'resv->udp6_sock = PJ_INVALID_SOCKET;' \
+        third-party/pjproject/source/pjlib-util/src/pjlib-util/resolver.c; \
+    grep --fixed-strings --quiet -- '-DVIVOLUTION_PJ_TLS_KERNEL_AUTOBIND_ZERO_PORT=1' \
+        third-party/pjproject/source/build.mak; \
+    grep --fixed-strings --quiet -- '-DVIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT=1' \
+        third-party/pjproject/source/build.mak; \
+    make menuselect.makeopts; \
+    menuselect/menuselect \
+        --disable BUILD_NATIVE \
+        --disable-category MENUSELECT_CORE_SOUNDS \
+        --disable-category MENUSELECT_MOH \
+        --disable-category MENUSELECT_EXTRA_SOUNDS \
+        --enable res_srtp \
+        menuselect.makeopts; \
+    grep -Eq '(^|[[:space:]])res_srtp([[:space:]]|$)' menuselect.makeopts; \
+    make --jobs=2 DOWNLOAD=:; \
+    make DESTDIR=/out DOWNLOAD=: install; \
+    test -x /out/usr/sbin/asterisk; \
+    test -f /out/usr/lib/asterisk/modules/chan_pjsip.so; \
+    test -f /out/usr/lib/asterisk/modules/res_pjsip.so; \
+    test -f /out/usr/lib/asterisk/modules/res_rtp_asterisk.so; \
+    test -f /out/usr/lib/asterisk/modules/res_srtp.so; \
+    test -f /out/usr/lib/asterisk/modules/app_echo.so; \
+    test -f /out/usr/lib/asterisk/modules/app_milliwatt.so; \
+    ldd /out/usr/lib/asterisk/modules/res_srtp.so | grep -Eq 'libsrtp2?\.so'; \
+    test -s /out/var/lib/asterisk/documentation/core-en_US.xml; \
+    find /out/usr -type f -perm /111 -exec strip --strip-unneeded '{}' + 2>/dev/null || true; \
+    { ldd /out/usr/sbin/asterisk; \
+      find /out/usr/lib/asterisk/modules -type f -name '*.so' -exec ldd '{}' ';'; \
+    } | awk '/=> \/|^\// { for (i=1;i<=NF;i++) if ($i ~ /^\//) print $i }' \
+      | sort --unique > /tmp/runtime-libraries; \
+    mkdir --parents /runtime-libs; \
+    while IFS= read -r library; do cp --parents --dereference "$library" /runtime-libs; done \
+        < /tmp/runtime-libraries
+
+FROM ${BASE_IMAGE}
+
+ARG ASTERISK_UID=10003
+ARG ASTERISK_GID=10003
+ARG ASTERISK_VERSION=22.10.1
+
+RUN set -eux; \
+    groupadd --gid "${ASTERISK_GID}" carrier-gateway; \
+    useradd --uid "${ASTERISK_UID}" --gid "${ASTERISK_GID}" \
+        --home-dir /var/lib/asterisk --no-create-home --shell /usr/sbin/nologin carrier-gateway; \
+    mkdir --parents \
+        /etc/asterisk \
+        /var/lib/asterisk/authorization/used \
+        /var/lib/asterisk/authorization/rejected \
+        /var/log/asterisk/cdr-custom \
+        /var/run/asterisk \
+        /var/spool/asterisk; \
+    chown --recursive 10003:10003 \
+        /var/lib/asterisk /var/log/asterisk /var/run/asterisk /var/spool/asterisk
+
+COPY --from=builder /out/usr/ /usr/
+COPY --from=builder /runtime-libs/ /
+COPY --from=builder /out/var/lib/asterisk/documentation/ /usr/share/asterisk/documentation/
+
+USER 10003:10003
+EXPOSE 5061/tcp 30000-30127/udp
+
+LABEL org.opencontainers.image.title="Vivolution bounded carrier gateway" \
+      org.opencontainers.image.version="${ASTERISK_VERSION}" \
+      ae.vivolution.gateway.scope="direct-private-pbx-poc" \
+      ae.vivolution.gateway.pstn-default="disabled"
+
+ENTRYPOINT ["/usr/sbin/asterisk"]
+CMD ["-f", "-C", "/etc/asterisk/asterisk.conf"]

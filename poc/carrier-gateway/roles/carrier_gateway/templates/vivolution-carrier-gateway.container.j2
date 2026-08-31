@@ -1,0 +1,49 @@
+[Unit]
+Description=Vivolution bounded CP1 carrier gateway
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Container]
+Image={{ carrier_gateway_image_id }}
+Pull=never
+ContainerName=vivolution-carrier-gateway
+Network=host
+AddHost={{ carrier_gateway_sbc1_server_name }}:{{ carrier_gateway_sbc1_ipv4 }}
+AddHost={{ carrier_gateway_sbc2_server_name }}:{{ carrier_gateway_sbc2_ipv4 }}
+{% if carrier_gateway_twilio_enabled | bool %}
+{% for prefix in carrier_gateway_twilio_destination_ipv4_cidrs %}
+AddHost={{ carrier_gateway_twilio_termination_fqdn }}:{{ prefix | regex_replace('/32$', '') }}
+{% endfor %}
+{% endif %}
+User=10003:10003
+UserNS=keep-id
+Volume={{ carrier_gateway_config_root }}/asterisk:/etc/asterisk:ro
+Volume={{ carrier_gateway_config_root }}/agi/vivolution-twilio-authorize.agi:/usr/local/libexec/vivolution-twilio-authorize.agi:ro
+Volume={{ carrier_gateway_pki_root }}:/run/carrier-pki:ro
+Volume={{ carrier_gateway_public_ca_bundle_path }}:/run/public-ca/ca-certificates.crt:ro
+Volume={{ carrier_gateway_state_root }}/asterisk-log:/var/log/asterisk:rw
+Volume={{ carrier_gateway_state_root }}/authorization:/var/lib/asterisk/authorization:rw
+Volume={{ carrier_gateway_runtime_root }}/lib:/var/lib/asterisk:rw
+Volume={{ carrier_gateway_runtime_root }}/run:/var/run/asterisk:rw
+Volume={{ carrier_gateway_runtime_root }}/spool:/var/spool/asterisk:rw
+ReadOnly=true
+Tmpfs=/tmp:rw,size=16m,mode=1777
+DropCapability=all
+NoNewPrivileges=true
+Exec=-f -C /etc/asterisk/asterisk.conf
+
+[Service]
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=90
+TimeoutStopSec=20
+MemoryMax=512M
+CPUQuota=75%
+TasksMax=256
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET
+PrivateTmp=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,26 @@
+--- a/pjlib-util/src/pjlib-util/resolver.c
++++ b/pjlib-util/src/pjlib-util/resolver.c
+@@ -277,7 +277,12 @@
+     if (status != PJ_SUCCESS)
+         return status;
+-
+-    /* Bind to any address/port */
+-    status = pj_sock_bind_in(resv->udp_sock, 0, 0);
++
++    /* Bind upstream, or defer the zero-port bind to the first sendto(). */
++#if defined(VIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT) && \
++    VIVOLUTION_PJ_DNS_KERNEL_AUTOBIND_ZERO_PORT == 1
++    status = PJ_SUCCESS;
++#else
++    status = pj_sock_bind_in(resv->udp_sock, 0, 0);
++#endif
+     if (status != PJ_SUCCESS)
+         return status;
+@@ -401,4 +406,7 @@
+     resv = PJ_POOL_ZALLOC_T(pool, struct pj_dns_resolver);
+     resv->pool = pool;
+     resv->udp_sock = PJ_INVALID_SOCKET;
++#if PJ_HAS_IPV6
++    resv->udp6_sock = PJ_INVALID_SOCKET;
++#endif
+     pj_strdup2_with_null(pool, &resv->name, name);

@@ -11,6 +11,18 @@
       21000-21127/22000-22063.
   when: cp_voice_fixture_enabled | bool
 
+- name: Validate bounded carrier-gateway firewall contract
+  ansible.builtin.assert:
+    that:
+      - cp_carrier_gateway_source_ipv4_cidrs == ['10.20.2.6/32', '10.20.2.7/32']
+      - cp_carrier_gateway_tcp_port | int == 5061
+      - cp_carrier_gateway_edge_media_source_port_range == '20000-20255'
+      - cp_carrier_gateway_udp_destination_port_range == '30000-30127'
+    fail_msg: >-
+      Carrier gateway ingress is fixed to generation-3 Edge IPs, TCP 5061,
+      Edge media sources 20000-20255, and CP1 destinations 30000-30127.
+  when: cp_carrier_gateway_enabled | bool
+
 - name: Install controller nftables policy
   ansible.builtin.template:
     src: nftables.conf.j2

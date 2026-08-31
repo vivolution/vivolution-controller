@@ -1,0 +1,133 @@
+#!/bin/bash
+set -euo pipefail
+umask 027
+
+if [[ ${EUID} -ne 0 ]]; then
+    printf 'readiness must run as root\n' >&2
+    exit 2
+fi
+
+unit=vivolution-carrier-gateway.service
+runtime_user={{ carrier_gateway_runtime_user | quote }}
+runtime_dir={{ carrier_gateway_rootless_runtime_dir | quote }}
+runtime_home={{ carrier_gateway_rootless_home | quote }}
+controller={{ carrier_gateway_controller_ipv4 | quote }}
+certificate={{ carrier_gateway_certificate_path | quote }}
+private_key={{ carrier_gateway_private_key_path | quote }}
+public_ca={{ carrier_gateway_public_ca_bundle_path | quote }}
+image_file={{ (carrier_gateway_config_root + '/asterisk-image-id') | quote }}
+
+rootless() {
+    runuser -u "$runtime_user" -- env \
+        HOME="$runtime_home" \
+        XDG_RUNTIME_DIR="$runtime_dir" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=${runtime_dir}/bus" \
+        "$@"
+}
+
+rootless systemctl --user is-active --quiet "$unit"
+rootless systemctl --user is-enabled --quiet "$unit"
+
+socket_allow=$(systemctl show user-10003.slice --property=SocketBindAllow --value)
+socket_deny=$(systemctl show user-10003.slice --property=SocketBindDeny --value)
+[[ $socket_deny == any || $socket_deny == *0-65535* ]]
+mapfile -t normalized_socket_allow < <(
+    tr ' ' '\n' <<<"$socket_allow" |
+        sed -E 's/^ipv4:tcp:?/tcp:/; s/^ipv4:udp:?/udp:/' |
+        sed '/^$/d' | LC_ALL=C sort
+)
+[[ $(printf '%s\n' "${normalized_socket_allow[@]}" | wc -l) -eq 2 ]]
+[[ ${normalized_socket_allow[0]} == 'tcp:5061' ]]
+[[ ${normalized_socket_allow[1]} == 'udp:30000-30127' ]]
+
+ip_deny=$(systemctl show user-10003.slice --property=IPAddressDeny --value)
+[[ $ip_deny == any || $ip_deny == *0.0.0.0/0* ]]
+ip_allow=$(systemctl show user-10003.slice --property=IPAddressAllow --value)
+mapfile -t actual_ip_allow < <(tr ' ' '\n' <<<"$ip_allow" | sed '/^$/d' | LC_ALL=C sort)
+mapfile -t expected_ip_allow < <(printf '%s\n' \
+    '127.0.0.0/8' \
+    '{{ carrier_gateway_controller_ipv4 }}/32' \
+    '{{ carrier_gateway_sbc1_ipv4 }}/32' \
+    '{{ carrier_gateway_sbc2_ipv4 }}/32' \
+{% if carrier_gateway_twilio_enabled | bool %}
+{% for prefix in carrier_gateway_twilio_destination_ipv4_cidrs %}
+    '{{ prefix }}' \
+{% endfor %}
+{% endif %}
+    | LC_ALL=C sort)
+[[ $(printf '%s\n' "${actual_ip_allow[@]}" | wc -l) -eq \
+   $(printf '%s\n' "${expected_ip_allow[@]}" | wc -l) ]]
+for index in "${!expected_ip_allow[@]}"; do
+    [[ ${actual_ip_allow[$index]} == "${expected_ip_allow[$index]}" ]]
+done
+
+ss -H -lnt4 | awk '{print $4}' | grep -Fxq "${controller}:5061"
+if ss -H -lnt4 | awk '{print $4}' | grep -Eq '(^|:)15061$'; then
+    printf 'carrier gateway must not bind the Edge-owned 15061 listener\n' >&2
+    exit 3
+fi
+
+tls_result=$(timeout 5 openssl s_client \
+    -connect "${controller}:5061" \
+    -servername {{ carrier_gateway_server_name | quote }} \
+    -cert "$certificate" \
+    -key "$private_key" \
+    -CAfile "$public_ca" \
+    -verify_hostname {{ carrier_gateway_server_name | quote }} \
+    -verify_return_error \
+    -tls1_2 \
+    -brief </dev/null 2>&1)
+grep -Fq 'Verification: OK' <<<"$tls_result"
+
+image_id=$(<"$image_file")
+[[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]]
+inspect=$(rootless podman inspect vivolution-carrier-gateway)
+jq -e --arg image "$image_id" '
+    length == 1 and
+    .[0].Image == $image and
+    .[0].Config.User == "10003:10003" and
+    .[0].HostConfig.ReadonlyRootfs == true and
+    (.[0].EffectiveCaps // []) == []
+' <<<"$inspect" >/dev/null
+
+rootless podman exec vivolution-carrier-gateway \
+    /usr/sbin/asterisk -rx 'core show version' | grep -Fq {{ carrier_gateway_asterisk_version | quote }}
+rootless podman exec vivolution-carrier-gateway \
+    /usr/sbin/asterisk -rx 'module show like res_srtp.so' | grep -Eq '^res_srtp\.so[[:space:]]'
+rootless podman exec vivolution-carrier-gateway \
+    /usr/sbin/asterisk -rx 'dialplan show {{ carrier_gateway_tone_test_e164 }}@from-edge' \
+    | grep -Fq 'Milliwatt'
+rootless podman exec vivolution-carrier-gateway \
+    /usr/sbin/asterisk -rx 'dialplan show {{ carrier_gateway_echo_test_e164 }}@from-edge' \
+    | grep -Fq 'Echo'
+
+{% if carrier_gateway_twilio_enabled | bool %}
+mapfile -t actual_twilio_hosts < <(
+    rootless podman exec vivolution-carrier-gateway getent ahostsv4 \
+        {{ carrier_gateway_twilio_termination_fqdn | quote }} |
+        awk '{print $1}' | LC_ALL=C sort -u
+)
+mapfile -t expected_twilio_hosts < <(printf '%s\n' \
+{% for prefix in carrier_gateway_twilio_destination_ipv4_cidrs %}
+    '{{ prefix | regex_replace('/32$', '') }}' \
+{% endfor %}
+    | LC_ALL=C sort -u)
+[[ $(printf '%s\n' "${actual_twilio_hosts[@]}" | wc -l) -eq \
+   $(printf '%s\n' "${expected_twilio_hosts[@]}" | wc -l) ]]
+for index in "${!expected_twilio_hosts[@]}"; do
+    [[ ${actual_twilio_hosts[$index]} == "${expected_twilio_hosts[$index]}" ]]
+done
+if [[ -e {{ (carrier_gateway_state_root + '/authorization/pending') | quote }} ]]; then
+    printf 'readiness refuses a pre-existing billable-call authority\n' >&2
+    exit 4
+fi
+twilio_state=armed-no-call-authority
+{% else %}
+if grep -Eq '\[twilio(-auth|-aor)?\]' {{ (carrier_gateway_config_root + '/asterisk/pjsip.conf') | quote }}; then
+    printf 'Twilio objects exist while the feature is disabled\n' >&2
+    exit 4
+fi
+twilio_state=disabled
+{% endif %}
+
+printf 'READY carrier-gateway profile=direct-private-pbx-poc listener=10.20.1.4:5061 edges=10.20.2.6,10.20.2.7 twilio=%s\n' "$twilio_state"

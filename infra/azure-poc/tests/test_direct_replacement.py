@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import copy
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import json
@@ -47,6 +48,14 @@ PUBLIC_IPS = {
 }
 DEADMAN_JOB_ID = "11111111-1111-4111-8111-111111111111"
 SCHEDULER_HOST = "Jays-MacBook-Pro.local"
+
+
+@contextmanager
+def exact_compiled_artifacts(*_args, **_kwargs):
+    yield {
+        "parameters": Path("/protected/direct-replacement.parameters.json"),
+        "template": Path("/protected/direct-replacement.template.json"),
+    }
 
 
 def parameter_document():
@@ -201,6 +210,54 @@ def live_observations(present_nodes=(), *, locked_nodes=None):
                     "type": "Microsoft.Compute/disks",
                 }
             )
+            changes.append(
+                {
+                    "changeType": "Ignore",
+                    "resourceId": rid(
+                        "Microsoft.Compute/disks", node + "-osdisk"
+                    ),
+                }
+            )
+
+    changes.extend(
+        [
+            {
+                "changeType": "Ignore",
+                "resourceId": "/subscriptions/{}/resourceGroups/{}".format(
+                    preflight.EXPECTED_SUBSCRIPTION_ID,
+                    preflight.EXPECTED_RESOURCE_GROUP,
+                ),
+            },
+            {
+                "changeType": "Ignore",
+                "resourceId": rid(
+                    "Microsoft.Compute/availabilitySets",
+                    preflight.EXPECTED_AVAILABILITY_SET_NAME,
+                ),
+            },
+            {
+                "changeType": "Ignore",
+                "resourceId": rid(
+                    "Microsoft.Network/virtualNetworks",
+                    preflight.EXPECTED_VNET_NAME,
+                ),
+            },
+        ]
+    )
+    for node in ("viv-sbc-poc-cp1", *preflight.EXPECTED_SYNTHETIC_VM_NAMES):
+        for resource_type, suffix in (
+            ("Microsoft.Compute/virtualMachines", ""),
+            ("Microsoft.Compute/disks", "-osdisk"),
+            ("Microsoft.Network/networkInterfaces", "-nic"),
+            ("Microsoft.Network/networkSecurityGroups", "-nsg"),
+            ("Microsoft.Network/publicIPAddresses", "-pip"),
+        ):
+            changes.append(
+                {
+                    "changeType": "Ignore",
+                    "resourceId": rid(resource_type, node + suffix),
+                }
+            )
 
     subnet_common = {
         "addressPrefixes": None,
@@ -276,12 +333,16 @@ def live_observations(present_nodes=(), *, locked_nodes=None):
             "properties": {
                 "amount": 100,
                 "category": "Cost",
+                "currentSpend": {"amount": 20.25, "unit": "USD"},
                 "notifications": budget_notifications,
                 "timeGrain": "Monthly",
+                "timePeriod": {
+                    "endDate": "2027-08-01T00:00:00Z",
+                    "startDate": "2026-08-01T00:00:00Z",
+                },
             },
             "type": "Microsoft.Consumption/budgets",
         },
-        "cost": {"amountUsd": "20.25", "currency": "USD"},
         "providers": [
             {"namespace": namespace, "registrationState": "Registered"}
             for namespace in preflight.EXPECTED_PROVIDER_NAMESPACES
@@ -600,6 +661,8 @@ class DirectReplacementLivePlanTests(unittest.TestCase):
         self.assertEqual(plan["compiledParametersSha256"], "a" * 64)
         self.assertEqual(plan["authority"]["providerValidationLevel"], "Provider")
         self.assertEqual(plan["budget"]["remainingBudgetUsd"], "79.75")
+        self.assertEqual(plan["budget"]["currentSpendUsd"], "20.25")
+        self.assertEqual(plan["budget"]["budgetScope"], preflight._resource_group_id())
         self.assertEqual(plan["parallelAcceptance"]["maximumHours"], 72)
         self.assertEqual(
             plan["runtimeAuthority"],
@@ -771,12 +834,91 @@ class DirectReplacementLivePlanTests(unittest.TestCase):
         disk_policy["nodes"][3]["disk"]["networkAccessPolicy"] = "AllowPrivate"
         cases.append(disk_policy)
         insufficient_headroom = live_observations()
-        insufficient_headroom["cost"]["amountUsd"] = "95.00"
+        insufficient_headroom["budget"]["properties"]["currentSpend"][
+            "amount"
+        ] = "95.00"
         cases.append(insufficient_headroom)
         for observations in cases:
             with self.subTest(observations=observations):
                 with self.assertRaises(preflight.PreflightError):
                     self.validate(observations)
+
+    def test_budget_current_spend_and_time_window_fail_closed(self):
+        cases = []
+        missing = live_observations()
+        del missing["budget"]["properties"]["currentSpend"]
+        cases.append(missing)
+        for value in (
+            {"amount": 0},
+            {"amount": 0, "unit": "AED"},
+            {"amount": 0, "unit": "USD", "unexpected": True},
+            {"amount": "malformed", "unit": "USD"},
+            {"amount": "NaN", "unit": "USD"},
+            {"amount": "Infinity", "unit": "USD"},
+            {"amount": "-0.01", "unit": "USD"},
+        ):
+            observations = live_observations()
+            observations["budget"]["properties"]["currentSpend"] = value
+            cases.append(observations)
+        missing_period = live_observations()
+        del missing_period["budget"]["properties"]["timePeriod"]
+        cases.append(missing_period)
+        narrowed_filter = live_observations()
+        narrowed_filter["budget"]["properties"]["filter"] = {
+            "dimensions": {
+                "name": "ResourceType",
+                "operator": "In",
+                "values": ["Microsoft.Compute/virtualMachines"],
+            }
+        }
+        cases.append(narrowed_filter)
+        expired_period = live_observations()
+        expired_period["budget"]["properties"]["timePeriod"][
+            "endDate"
+        ] = "2026-08-30T00:00:00Z"
+        cases.append(expired_period)
+        non_midnight_start = live_observations()
+        non_midnight_start["budget"]["properties"]["timePeriod"][
+            "startDate"
+        ] = "2026-08-01T00:00:01Z"
+        cases.append(non_midnight_start)
+        non_midnight_end = live_observations()
+        non_midnight_end["budget"]["properties"]["timePeriod"][
+            "endDate"
+        ] = "2027-08-01T12:00:00Z"
+        cases.append(non_midnight_end)
+        future_start = live_observations()
+        future_start["budget"]["properties"]["timePeriod"][
+            "startDate"
+        ] = "2026-09-01T00:00:00Z"
+        cases.append(future_start)
+        for observations in cases:
+            with self.subTest(observations=observations):
+                with self.assertRaises(preflight.PreflightError):
+                    self.validate(observations)
+
+        inclusive_end_date = live_observations()
+        inclusive_end_date["budget"]["properties"]["timePeriod"][
+            "endDate"
+        ] = "2026-08-31T00:00:00Z"
+        self.validate(inclusive_end_date)
+        with self.assertRaises(preflight.PreflightError):
+            preflight.validate_live_plan(
+                inclusive_end_date,
+                self.package_evidence,
+                observed_at=datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc),
+            )
+
+        exact_headroom = live_observations()
+        exact_headroom["budget"]["properties"]["currentSpend"]["amount"] = "92.20"
+        self.assertEqual(
+            self.validate(exact_headroom)["budget"]["remainingBudgetUsd"],
+            "7.80",
+        )
+        below_headroom = live_observations()
+        below_headroom["budget"]["properties"]["currentSpend"]["amount"] = "92.21"
+        with self.assertRaises(preflight.PreflightError):
+            self.validate(below_headroom)
 
     def test_modify_delete_collision_and_incomplete_what_if_are_rejected(self):
         for mutation in ("Modify", "Delete", "Unsupported"):
@@ -787,7 +929,12 @@ class DirectReplacementLivePlanTests(unittest.TestCase):
                     self.validate(observations)
 
         missing_create = live_observations()
-        missing_create["whatIf"]["changes"].pop()
+        missing_create["whatIf"]["changes"] = [
+            change
+            for change in missing_create["whatIf"]["changes"]
+            if change["resourceId"]
+            != rid("Microsoft.Network/publicIPAddresses", "viv-sbc-dr-sbc2-g3-pip")
+        ]
         with self.assertRaises(preflight.PreflightError):
             self.validate(missing_create)
 
@@ -800,6 +947,126 @@ class DirectReplacementLivePlanTests(unittest.TestCase):
         )
         with self.assertRaises(preflight.PreflightError):
             self.validate(outside)
+
+        unknown_ignore = live_observations()
+        unknown_ignore["whatIf"]["changes"].append(
+            {
+                "changeType": "Ignore",
+                "resourceId": rid(
+                    "Microsoft.Storage/storageAccounts", "unreviewed-existing"
+                ),
+            }
+        )
+        with self.assertRaises(preflight.PreflightError):
+            self.validate(unknown_ignore)
+
+        modified_existing = live_observations()
+        cp1_vm_id = rid(
+            "Microsoft.Compute/virtualMachines", "viv-sbc-poc-cp1"
+        ).lower()
+        next(
+            change
+            for change in modified_existing["whatIf"]["changes"]
+            if change["resourceId"].lower() == cp1_vm_id
+        )["changeType"] = "Modify"
+        with self.assertRaises(preflight.PreflightError):
+            self.validate(modified_existing)
+
+    def test_live_randomized_predecessor_disk_ignore_is_exactly_lineage_bound(self):
+        observations = live_observations()
+        node = preflight.EXPECTED_SYNTHETIC_VM_NAMES[0]
+        suffix_name = node + "-osdisk_" + "a" * 32
+        record = next(item for item in observations["nodes"] if item["name"] == node)
+        record["vm"]["osDiskId"] = rid("Microsoft.Compute/disks", suffix_name)
+        disk_change = next(
+            change
+            for change in observations["whatIf"]["changes"]
+            if change["resourceId"].lower()
+            == rid("Microsoft.Compute/disks", node + "-osdisk").lower()
+        )
+        disk_change["resourceId"] = rid("Microsoft.Compute/disks", suffix_name)
+        self.validate(observations)
+
+        record["vm"]["osDiskName"] = suffix_name
+        with self.assertRaises(preflight.PreflightError):
+            self.validate(observations)
+        record["vm"]["osDiskName"] = node + "-osdisk"
+
+        record["vm"]["osDiskId"] = rid(
+            "Microsoft.Compute/disks", "unrelated-disk"
+        )
+        with self.assertRaises(preflight.PreflightError):
+            self.validate(observations)
+
+    def test_mutation_artifacts_recompile_exact_bytes_and_fail_closed_on_drift(self):
+        parameters = {"parameters": {"value": {"value": "exact"}}}
+        template = {"resources": [{"type": "Exact"}]}
+        parameter_digest = preflight._canonical_digest(parameters)
+        template_digest = preflight._canonical_digest(template)
+        retained_paths = None
+        with preflight._materialize_exact_compiled_package(
+            PARAMETERS_PATH,
+            expected_parameters_sha256=parameter_digest,
+            expected_template_sha256=template_digest,
+            compiler=lambda _path: (parameters, template),
+        ) as artifacts:
+            retained_paths = dict(artifacts)
+            for label, document in (("parameters", parameters), ("template", template)):
+                path = artifacts[label]
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o400)
+                self.assertEqual(path.stat().st_nlink, 1)
+                self.assertEqual(json.loads(path.read_text()), document)
+        self.assertIsNotNone(retained_paths)
+        self.assertTrue(all(not path.exists() for path in retained_paths.values()))
+
+        with self.assertRaisesRegex(preflight.PreflightError, "mutation boundary"):
+            with preflight._materialize_exact_compiled_package(
+                PARAMETERS_PATH,
+                expected_parameters_sha256="0" * 64,
+                expected_template_sha256=template_digest,
+                compiler=lambda _path: (parameters, template),
+            ):
+                self.fail("digest drift must be rejected before yielding artifacts")
+
+    def test_apply_rechecks_expiry_after_compilation_before_create(self):
+        saved = self.validate(live_observations())
+        receipt_time = datetime(2026, 8, 31, 1, 5, tzinfo=timezone.utc)
+        receipt, scheduler_runner = self.scheduler_authority(saved, receipt_time)
+        mutations = []
+        with mock.patch.object(
+            preflight,
+            "collect_live_observations",
+            return_value=live_observations(),
+        ), mock.patch.object(
+            preflight,
+            "_materialize_exact_compiled_package",
+            side_effect=exact_compiled_artifacts,
+        ), mock.patch.object(
+            preflight,
+            "_utc_now",
+            side_effect=[
+                datetime(2026, 8, 31, 1, 5, tzinfo=timezone.utc),
+                datetime(2026, 8, 31, 1, 6, tzinfo=timezone.utc),
+                datetime(2026, 8, 31, 1, 18, tzinfo=timezone.utc),
+            ],
+        ):
+            with self.assertRaisesRegex(preflight.PreflightError, "authorization has expired"):
+                preflight.apply_saved_plan(
+                    PARAMETERS_PATH,
+                    self.package_evidence,
+                    saved,
+                    receipt,
+                    approved_plan_sha256=saved["planSha256"],
+                    expected_compiled_parameters_sha256="a" * 64,
+                    expected_compiled_template_sha256=preflight.EXPECTED_COMPILED_TEMPLATE_SHA256,
+                    expected_bicep_version=preflight.EXPECTED_BICEP_VERSION,
+                    expected_subscription_id=preflight.EXPECTED_SUBSCRIPTION_ID,
+                    expected_tenant_id=preflight.EXPECTED_TENANT_ID,
+                    mutation_runner=lambda argv: mutations.append(list(argv)) or "",
+                    scheduler_runner=scheduler_runner,
+                    scheduler_host_name=SCHEDULER_HOST,
+                )
+        self.assertEqual(mutations, [])
 
     def test_colliding_or_orphaned_partial_resources_are_rejected(self):
         collision = live_observations()
@@ -865,6 +1132,10 @@ class DirectReplacementLivePlanTests(unittest.TestCase):
             preflight,
             "collect_live_observations",
             side_effect=[live_observations(), pending, locked],
+        ), mock.patch.object(
+            preflight,
+            "_materialize_exact_compiled_package",
+            side_effect=exact_compiled_artifacts,
         ):
             result = preflight.apply_saved_plan(
                 PARAMETERS_PATH,
@@ -890,6 +1161,15 @@ class DirectReplacementLivePlanTests(unittest.TestCase):
         create = [command for command in commands if command[1:4] == ["deployment", "sub", "create"]]
         self.assertEqual(len(create), 1)
         self.assertIn("--confirm-with-what-if", create[0])
+        self.assertNotIn(str(PARAMETERS_PATH), create[0])
+        self.assertEqual(
+            create[0][create[0].index("--template-file") + 1],
+            "/protected/direct-replacement.template.json",
+        )
+        self.assertEqual(
+            create[0][create[0].index("--parameters") + 1],
+            "@/protected/direct-replacement.parameters.json",
+        )
         self.assertEqual(
             create[0][create[0].index("--validation-level") + 1], "Provider"
         )
@@ -1485,6 +1765,14 @@ class DirectReplacementWorkflowStaticTests(unittest.TestCase):
     def test_readme_keeps_production_direct_routing_global_only(self):
         self.assertIn("profile `DIRECT_ROUTING_PRIVATE_PBX_POC`", self.readme)
         self.assertIn("Production `DIRECT_ROUTING` remains global-PBX only", self.readme)
+
+    def test_live_budget_uses_resource_group_current_spend_without_cost_query(self):
+        self.assertIn('properties.get("currentSpend")', self.preflight_source)
+        self.assertNotIn("Microsoft.CostManagement", self.preflight_source)
+        self.assertNotIn("MonthToDate", self.preflight_source)
+        self.assertNotIn("_cost_observation", self.preflight_source)
+        self.assertIn("resource-group-scoped USD 100 monthly budget", self.readme)
+        self.assertIn("does not claim subscription-wide cost", self.readme)
 
     def test_cli_modes_accept_only_their_exact_authority_option_set(self):
         base = [

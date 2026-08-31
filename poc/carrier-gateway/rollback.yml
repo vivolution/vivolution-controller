@@ -1,0 +1,8 @@
+---
+- name: Roll back the carrier gateway to its protected previous configuration
+  hosts: carrier_gateway_controller
+  become: true
+  gather_facts: false
+  serial: 1
+  roles:
+    - role: carrier_gateway_rollback

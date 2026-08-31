@@ -10,3 +10,13 @@ cp_voice_fixture_tcp_ports:
 cp_voice_fixture_udp_port_ranges:
   - 21000-21127
   - 22000-22063
+
+# The live carrier gateway is a separate opt-in contract. It never reuses or
+# widens the synthetic no-PSTN fixture listeners.
+cp_carrier_gateway_enabled: false
+cp_carrier_gateway_source_ipv4_cidrs:
+  - 10.20.2.6/32
+  - 10.20.2.7/32
+cp_carrier_gateway_tcp_port: 5061
+cp_carrier_gateway_edge_media_source_port_range: 20000-20255
+cp_carrier_gateway_udp_destination_port_range: 30000-30127

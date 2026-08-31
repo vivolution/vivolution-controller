@@ -83,6 +83,35 @@
               - cp_azure_poc_tenant_media_port_range is defined
               - cp_azure_poc_pbx_tls_listener_port is defined
               - cp_azure_poc_edge_runtime_profile is defined
+              - cp_azure_poc_direct_replacement_runtime_profile is defined
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_dns_resource_group is defined
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_dns_parent_zone is defined
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_certificate_fqdns is defined
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_acme_child_zones is defined
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_replacement_vm_names is defined
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_replacement_public_ip_names is defined
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_acme_role_definition_guid is defined
             fail_msg: >-
               The three-node POC topology requires every Edge identity,
               subnet, source allow-list, and bounded signaling/media range to
@@ -180,16 +209,51 @@
               - cp_azure_poc_synthetic_teams_source_prefixes is sequence
               - cp_azure_poc_synthetic_teams_source_prefixes is not string
               - >-
-                (cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' and
-                 cp_azure_poc_synthetic_teams_source_prefixes == ['10.20.1.4/32']) or
-                (cp_azure_poc_edge_runtime_profile == 'DIRECT_ROUTING' and
-                 cp_azure_poc_synthetic_teams_source_prefixes | length == 0)
+                cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' and
+                cp_azure_poc_synthetic_teams_source_prefixes == ['10.20.1.4/32']
               - cp_azure_poc_rtp_media_port_range == '20000-29999'
               - cp_azure_poc_tenant_media_port_range == '20000-20255'
               - cp_azure_poc_pbx_tls_listener_port | int == 15061
               - >-
-                cp_azure_poc_edge_runtime_profile in
-                ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING']
+                cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile in
+                ['NOT_DEPLOYED', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_dns_resource_group == 'DNS_Zones'
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_dns_parent_zone == 'vivolution.ae'
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_certificate_fqdns ==
+                ['sbc1.vivolution.ae', 'sbc2.vivolution.ae',
+                 'carrier.vivolution.ae']
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_acme_child_zones ==
+                ['acme-sbc1.vivolution.ae', 'acme-sbc2.vivolution.ae',
+                 'acme-carrier.vivolution.ae']
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_replacement_vm_names ==
+                ['viv-sbc-dr-sbc1-g3', 'viv-sbc-dr-sbc2-g3']
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_replacement_public_ip_names ==
+                ['viv-sbc-dr-sbc1-g3-pip', 'viv-sbc-dr-sbc2-g3-pip']
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_direct_acme_role_definition_guid ==
+                'c5498bfb-a31f-40dd-b636-0f53e530ed53'
             fail_msg: >-
               The three-node POC inventory diverges from the fixed Bicep
               naming, subnet, or bounded media contract.
@@ -244,16 +308,9 @@
                 item.pbx_source_prefixes | unique | length ==
                 item.pbx_source_prefixes | length
               - >-
-                (cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' and
-                 item.pbx_source_prefixes == ['10.20.1.4/32'] and
-                 item.pbx_media_destination_port_start | int == 21000 and
-                 item.pbx_media_destination_port_end | int == 21127) or
-                (cp_azure_poc_edge_runtime_profile == 'DIRECT_ROUTING' and
-                 '10.20.1.4/32' not in item.pbx_source_prefixes and
-                 item.pbx_media_destination_port_end | int -
-                 item.pbx_media_destination_port_start | int + 1 >= 100 and
-                 not (item.pbx_media_destination_port_start | int == 21000 and
-                      item.pbx_media_destination_port_end | int == 21127))
+                item.pbx_source_prefixes == ['10.20.1.4/32'] and
+                item.pbx_media_destination_port_start | int == 21000 and
+                item.pbx_media_destination_port_end | int == 21127
             fail_msg: >-
               A POC Edge node does not match its fixed VM, disk, NIC, NSG,
               public-IP, private-IP, size, or PBX-source identity.
@@ -263,28 +320,6 @@
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
           vars:
             cp_azure_ipv4_pattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})$'
-
-        - name: Require globally routable bounded PBX CIDRs for Direct Routing
-          ansible.builtin.command:
-            argv:
-              - "{{ ansible_playbook_python }}"
-              - -c
-              - >-
-                import ipaddress, json, sys;
-                groups = json.loads(sys.argv[1]);
-                networks = [ipaddress.ip_network(cidr, strict=True)
-                for group in groups for cidr in group];
-                sys.exit(0 if networks and all(network.version == 4 and
-                network.prefixlen >= 24 and network.network_address.is_global
-                for network in networks) else 1)
-              - >-
-                {{ cp_azure_poc_edge_nodes |
-                   map(attribute='pbx_source_prefixes') | list | to_json }}
-          changed_when: false
-          check_mode: false
-          when:
-            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
-            - cp_azure_poc_edge_runtime_profile == 'DIRECT_ROUTING'
 
         - name: Validate every approved SSH source as one IPv4 host
           ansible.builtin.assert:
@@ -605,27 +640,90 @@
                  list | sort(attribute='name') }}
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
-        - name: Require exactly the fourteen-resource POC base and three managed OS disks
+        - name: Extend the exact POC resource contract for selected generation-3 nodes
+          ansible.builtin.set_fact:
+            cp_azure_poc_expected_direct_replacement_declared_resources: >-
+              {{
+                [
+                  {'name': cp_azure_poc_direct_replacement_vm_names[0],
+                   'type': 'Microsoft.Compute/virtualMachines',
+                   'location': cp_azure_location},
+                  {'name': cp_azure_poc_direct_replacement_vm_names[0] ~ '-nic',
+                   'type': 'Microsoft.Network/networkInterfaces',
+                   'location': cp_azure_location},
+                  {'name': cp_azure_poc_direct_replacement_vm_names[0] ~ '-nsg',
+                   'type': 'Microsoft.Network/networkSecurityGroups',
+                   'location': cp_azure_location},
+                  {'name': cp_azure_poc_direct_replacement_public_ip_names[0],
+                   'type': 'Microsoft.Network/publicIPAddresses',
+                   'location': cp_azure_location},
+                  {'name': cp_azure_poc_direct_replacement_vm_names[1],
+                   'type': 'Microsoft.Compute/virtualMachines',
+                   'location': cp_azure_location},
+                  {'name': cp_azure_poc_direct_replacement_vm_names[1] ~ '-nic',
+                   'type': 'Microsoft.Network/networkInterfaces',
+                   'location': cp_azure_location},
+                  {'name': cp_azure_poc_direct_replacement_vm_names[1] ~ '-nsg',
+                   'type': 'Microsoft.Network/networkSecurityGroups',
+                   'location': cp_azure_location},
+                  {'name': cp_azure_poc_direct_replacement_public_ip_names[1],
+                   'type': 'Microsoft.Network/publicIPAddresses',
+                   'location': cp_azure_location}
+                ]
+                if cp_azure_poc_direct_replacement_runtime_profile ==
+                   'DIRECT_ROUTING_PRIVATE_PBX_POC'
+                else []
+              }}
+            cp_azure_poc_expected_direct_replacement_disk_resources: >-
+              {{
+                [
+                  {'name': cp_azure_poc_direct_replacement_vm_names[0] ~ '-osdisk',
+                   'type': 'Microsoft.Compute/disks',
+                   'location': cp_azure_location},
+                  {'name': cp_azure_poc_direct_replacement_vm_names[1] ~ '-osdisk',
+                   'type': 'Microsoft.Compute/disks',
+                   'location': cp_azure_location}
+                ]
+                if cp_azure_poc_direct_replacement_runtime_profile ==
+                   'DIRECT_ROUTING_PRIVATE_PBX_POC'
+                else []
+              }}
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Require the exact selected-generation POC resource set
           ansible.builtin.assert:
             that:
-              - cp_azure_poc_declared_resources | length == 14
-              - cp_azure_poc_disk_resources | length == 3
-              - cp_azure_resources | length == 17
+              - >-
+                cp_azure_poc_declared_resources | length ==
+                14 + (cp_azure_poc_expected_direct_replacement_declared_resources | length)
+              - >-
+                cp_azure_poc_disk_resources | length ==
+                3 + (cp_azure_poc_expected_direct_replacement_disk_resources | length)
+              - >-
+                cp_azure_resources | length ==
+                17 + (cp_azure_poc_expected_direct_replacement_declared_resources | length) +
+                (cp_azure_poc_expected_direct_replacement_disk_resources | length)
               - >-
                 cp_azure_poc_declared_resources ==
-                (cp_azure_poc_expected_declared_resources | sort(attribute='name'))
+                ((cp_azure_poc_expected_declared_resources +
+                  cp_azure_poc_expected_direct_replacement_declared_resources) |
+                 sort(attribute='name'))
               - >-
                 cp_azure_poc_disk_resources ==
-                (cp_azure_poc_expected_disk_resources | sort(attribute='name'))
+                ((cp_azure_poc_expected_disk_resources +
+                  cp_azure_poc_expected_direct_replacement_disk_resources) |
+                 sort(attribute='name'))
               - >-
                 cp_azure_resources ==
                 ((cp_azure_poc_expected_declared_resources +
-                  cp_azure_poc_expected_disk_resources) | sort(attribute='name'))
+                  cp_azure_poc_expected_direct_replacement_declared_resources +
+                  cp_azure_poc_expected_disk_resources +
+                  cp_azure_poc_expected_direct_replacement_disk_resources) |
+                 sort(attribute='name'))
             fail_msg: >-
-              The POC resource group is not exactly the fourteen declared
-              CP1/SBC1/SBC2 resources plus their three provider-created
-              managed OS disks; an expected resource is absent or an
-              undeclared resource or managed service is present.
+              The POC resource group is not exactly the fourteen-resource
+              synthetic base plus the independently selected eight g3
+              resources and their exact provider-created managed OS disks.
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
         - name: Read the exact Azure virtual machine security and storage profile
@@ -645,6 +743,7 @@
                 {id:id,name:name,location:location,vmSize:hardwareProfile.vmSize,
                 availabilitySetId:availabilitySet.id,identityType:identity.type,
                 securityType:securityProfile.securityType,
+                identityPrincipalId:identity.principalId,
                 secureBootEnabled:securityProfile.uefiSettings.secureBootEnabled,
                 vTpmEnabled:securityProfile.uefiSettings.vTpmEnabled,
                 imagePublisher:storageProfile.imageReference.publisher,
@@ -693,6 +792,11 @@
               - >-
                 cp_azure_infrastructure_topology_selected == 'legacy-single-node' or
                 cp_azure_vm.identityType == 'SystemAssigned'
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile | default('NOT_DEPLOYED') !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_vm.identityPrincipalId is
+                match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
               - cp_azure_vm.securityType == 'TrustedLaunch'
               - cp_azure_vm.secureBootEnabled | bool
               - cp_azure_vm.vTpmEnabled | bool
@@ -1059,15 +1163,38 @@
         - name: Select the POC Edge subnet and expected NIC bindings
           ansible.builtin.set_fact:
             cp_azure_poc_edge_subnet: "{{ cp_azure_vnet.subnets[1] }}"
-            cp_azure_poc_expected_edge_ip_configuration_ids:
-              - >-
-                /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
-                }}/providers/Microsoft.Network/networkInterfaces/{{ cp_azure_poc_edge_nodes[0].nic_name
-                }}/ipConfigurations/ipconfig1
-              - >-
-                /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
-                }}/providers/Microsoft.Network/networkInterfaces/{{ cp_azure_poc_edge_nodes[1].nic_name
-                }}/ipConfigurations/ipconfig1
+            cp_azure_poc_expected_edge_ip_configuration_ids: >-
+              {{
+                [
+                  '/subscriptions/' ~ cp_azure_subscription_id ~
+                  '/resourceGroups/' ~ cp_azure_resource_group ~
+                  '/providers/Microsoft.Network/networkInterfaces/' ~
+                  cp_azure_poc_edge_nodes[0].nic_name ~
+                  '/ipConfigurations/ipconfig1',
+                  '/subscriptions/' ~ cp_azure_subscription_id ~
+                  '/resourceGroups/' ~ cp_azure_resource_group ~
+                  '/providers/Microsoft.Network/networkInterfaces/' ~
+                  cp_azure_poc_edge_nodes[1].nic_name ~
+                  '/ipConfigurations/ipconfig1'
+                ] +
+                (
+                  [
+                    '/subscriptions/' ~ cp_azure_subscription_id ~
+                    '/resourceGroups/' ~ cp_azure_resource_group ~
+                    '/providers/Microsoft.Network/networkInterfaces/' ~
+                    cp_azure_poc_direct_replacement_vm_names[0] ~
+                    '-nic/ipConfigurations/ipconfig1',
+                    '/subscriptions/' ~ cp_azure_subscription_id ~
+                    '/resourceGroups/' ~ cp_azure_resource_group ~
+                    '/providers/Microsoft.Network/networkInterfaces/' ~
+                    cp_azure_poc_direct_replacement_vm_names[1] ~
+                    '-nic/ipConfigurations/ipconfig1'
+                  ]
+                  if cp_azure_poc_direct_replacement_runtime_profile ==
+                     'DIRECT_ROUTING_PRIVATE_PBX_POC'
+                  else []
+                )
+              }}
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
         - name: Require the exact isolated POC Edge subnet
@@ -1084,7 +1211,10 @@
               - cp_azure_poc_edge_subnet.addressPrefixes is none
               - cp_azure_poc_edge_subnet.defaultOutboundAccess == false
               - cp_azure_poc_edge_subnet.delegations | length == 0
-              - cp_azure_poc_edge_subnet.ipConfigurationIds | length == 2
+              - >-
+                cp_azure_poc_edge_subnet.ipConfigurationIds | length ==
+                (4 if cp_azure_poc_direct_replacement_runtime_profile ==
+                      'DIRECT_ROUTING_PRIVATE_PBX_POC' else 2)
               - >-
                 cp_azure_poc_edge_subnet.ipConfigurationIds | map('lower') | sort ==
                 cp_azure_poc_expected_edge_ip_configuration_ids |
@@ -1245,7 +1375,7 @@
             fail_msg: Azure does not deny every undeclared inbound flow after the approved rules.
           when: cp_azure_infrastructure_topology_selected == 'legacy-single-node'
 
-        - name: Build the complete profile-aware POC controller NSG rule contract
+        - name: Build the synthetic controller and generation-3 overlay NSG contract
           ansible.builtin.set_fact:
             cp_azure_poc_controller_nsg_rule_superset:
               - name: AllowAdminSsh
@@ -1322,6 +1452,38 @@
                   - '21000-21127'
                   - '22000-22063'
                 provisioningState: Succeeded
+              - name: AllowGeneration3CarrierSignaling
+                priority: 320
+                protocol: Tcp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: null
+                sourcePrefixes:
+                  - 10.20.2.6/32
+                  - 10.20.2.7/32
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: 10.20.1.4/32
+                destinationPrefixes: []
+                destinationPortRange: '5061'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowGeneration3CarrierMedia
+                priority: 330
+                protocol: Udp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: null
+                sourcePrefixes:
+                  - 10.20.2.6/32
+                  - 10.20.2.7/32
+                sourcePortRange: "{{ cp_azure_poc_tenant_media_port_range }}"
+                sourcePortRanges: []
+                destinationPrefix: 10.20.1.4/32
+                destinationPrefixes: []
+                destinationPortRange: '30000-30127'
+                destinationPortRanges: []
+                provisioningState: Succeeded
               - name: DenyAllInbound
                 priority: 4096
                 protocol: '*'
@@ -1338,17 +1500,18 @@
                 provisioningState: Succeeded
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
-        - name: Select the exact POC controller NSG rules for the active profile
+        - name: Select the exact POC controller NSG rules for both generations
           ansible.builtin.set_fact:
             cp_azure_poc_expected_controller_nsg_rules: >-
               {{
-                cp_azure_poc_controller_nsg_rule_superset
-                if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE'
-                else
-                cp_azure_poc_controller_nsg_rule_superset |
-                rejectattr('name', 'equalto', 'AllowEdgeToFixtureSignaling') |
-                rejectattr('name', 'equalto', 'AllowEdgeToFixtureMedia') |
-                list
+                (
+                  cp_azure_poc_controller_nsg_rule_superset |
+                  rejectattr('name', 'equalto', 'AllowGeneration3CarrierSignaling') |
+                  rejectattr('name', 'equalto', 'AllowGeneration3CarrierMedia') |
+                  list
+                )
+                if cp_azure_poc_direct_replacement_runtime_profile == 'NOT_DEPLOYED'
+                else cp_azure_poc_controller_nsg_rule_superset
               }}
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
@@ -1357,11 +1520,12 @@
             that:
               - >-
                 cp_azure_nsg_rules | length ==
-                (6 if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' else 4)
+                (8 if cp_azure_poc_direct_replacement_runtime_profile ==
+                      'DIRECT_ROUTING_PRIVATE_PBX_POC' else 6)
               - cp_azure_nsg_rules == cp_azure_poc_expected_controller_nsg_rules
             fail_msg: >-
-              The POC controller NSG is not the exact approved SSH, public
-              HTTP/HTTPS, profile-specific private fixture, and deny-all policy.
+              The POC controller NSG is not the exact six-rule synthetic base
+              plus the independently selected two-rule generation-3 overlay.
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
         - name: Read the exact POC Edge availability set
@@ -1398,16 +1562,37 @@
             cp_azure_poc_expected_availability_set_id: >-
               /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
               }}/providers/Microsoft.Compute/availabilitySets/{{ cp_azure_poc_edge_availability_set_name }}
-            cp_azure_poc_expected_edge_vm_ids:
-              - >-
-                /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
-                }}/providers/Microsoft.Compute/virtualMachines/{{ cp_azure_poc_edge_nodes[0].vm_name }}
-              - >-
-                /subscriptions/{{ cp_azure_subscription_id }}/resourceGroups/{{ cp_azure_resource_group
-                }}/providers/Microsoft.Compute/virtualMachines/{{ cp_azure_poc_edge_nodes[1].vm_name }}
+            cp_azure_poc_expected_edge_vm_ids: >-
+              {{
+                [
+                  '/subscriptions/' ~ cp_azure_subscription_id ~
+                  '/resourceGroups/' ~ cp_azure_resource_group ~
+                  '/providers/Microsoft.Compute/virtualMachines/' ~
+                  cp_azure_poc_edge_nodes[0].vm_name,
+                  '/subscriptions/' ~ cp_azure_subscription_id ~
+                  '/resourceGroups/' ~ cp_azure_resource_group ~
+                  '/providers/Microsoft.Compute/virtualMachines/' ~
+                  cp_azure_poc_edge_nodes[1].vm_name
+                ] +
+                (
+                  [
+                    '/subscriptions/' ~ cp_azure_subscription_id ~
+                    '/resourceGroups/' ~ cp_azure_resource_group ~
+                    '/providers/Microsoft.Compute/virtualMachines/' ~
+                    cp_azure_poc_direct_replacement_vm_names[0],
+                    '/subscriptions/' ~ cp_azure_subscription_id ~
+                    '/resourceGroups/' ~ cp_azure_resource_group ~
+                    '/providers/Microsoft.Compute/virtualMachines/' ~
+                    cp_azure_poc_direct_replacement_vm_names[1]
+                  ]
+                  if cp_azure_poc_direct_replacement_runtime_profile ==
+                     'DIRECT_ROUTING_PRIVATE_PBX_POC'
+                  else []
+                )
+              }}
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
-        - name: Require the exact two-node POC Edge availability set
+        - name: Require the exact selected-generation POC Edge availability set
           ansible.builtin.assert:
             that:
               - >-
@@ -1420,13 +1605,16 @@
               - cp_azure_poc_availability_set.sku == 'Aligned'
               - cp_azure_poc_availability_set.faultDomains | int == 2
               - cp_azure_poc_availability_set.updateDomains | int == 5
-              - cp_azure_poc_availability_set.vmIds | length == 2
+              - >-
+                cp_azure_poc_availability_set.vmIds | length ==
+                (4 if cp_azure_poc_direct_replacement_runtime_profile ==
+                      'DIRECT_ROUTING_PRIVATE_PBX_POC' else 2)
               - >-
                 cp_azure_poc_availability_set.vmIds | map('lower') | sort ==
                 cp_azure_poc_expected_edge_vm_ids | map('lower') | sort
             fail_msg: >-
-              The POC Edge availability set does not contain exactly SBC1 and
-              SBC2 across the approved fault/update-domain contract.
+              The POC Edge availability set does not contain exactly the two
+              synthetic rollback nodes plus both selected generation-3 nodes.
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
         - name: Read each exact POC Edge virtual machine
@@ -1531,7 +1719,126 @@
                  selectattr('vmName', 'equalto', item.item.vm_name) |
                  list | first }}
 
-        - name: Read the exact reconciled POC ACME DNS authority contract
+        - name: Build the exact generation-3 Direct DNS identity inputs
+          ansible.builtin.set_fact:
+            cp_azure_poc_direct_replacement_bindings:
+              - role: sbc1
+                vm_name: "{{ cp_azure_poc_direct_replacement_vm_names[0] }}"
+                public_ip_name: >-
+                  {{ cp_azure_poc_direct_replacement_public_ip_names[0] }}
+              - role: sbc2
+                vm_name: "{{ cp_azure_poc_direct_replacement_vm_names[1] }}"
+                public_ip_name: >-
+                  {{ cp_azure_poc_direct_replacement_public_ip_names[1] }}
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
+            - >-
+              cp_azure_poc_direct_replacement_runtime_profile ==
+              'DIRECT_ROUTING_PRIVATE_PBX_POC'
+
+        - name: Read each exact generation-3 Direct replacement identity
+          ansible.builtin.command:
+            argv:
+              - az
+              - vm
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ item.vm_name }}"
+              - --query
+              - >-
+                {id:id,name:name,identityType:identity.type,
+                identityPrincipalId:identity.principalId,
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          loop: "{{ cp_azure_poc_direct_replacement_bindings | default([]) }}"
+          loop_control:
+            label: "{{ item.role }}"
+          register: cp_azure_poc_direct_replacement_vms_raw
+          changed_when: false
+          check_mode: false
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
+            - >-
+              cp_azure_poc_direct_replacement_runtime_profile ==
+              'DIRECT_ROUTING_PRIVATE_PBX_POC'
+
+        - name: Read each exact generation-3 Direct replacement public IPv4
+          ansible.builtin.command:
+            argv:
+              - az
+              - network
+              - public-ip
+              - show
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --name
+              - "{{ item.public_ip_name }}"
+              - --query
+              - >-
+                {id:id,name:name,ipAddress:ipAddress,
+                allocation:publicIPAllocationMethod,version:publicIPAddressVersion,
+                sku:sku.name,tier:sku.tier,provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          loop: "{{ cp_azure_poc_direct_replacement_bindings | default([]) }}"
+          loop_control:
+            label: "{{ item.role }}"
+          register: cp_azure_poc_direct_replacement_pips_raw
+          changed_when: false
+          check_mode: false
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
+            - >-
+              cp_azure_poc_direct_replacement_runtime_profile ==
+              'DIRECT_ROUTING_PRIVATE_PBX_POC'
+
+        - name: Require exact generation-3 Direct identities and static public IPv4s
+          ansible.builtin.assert:
+            that:
+              - cp_azure_poc_direct_replacement_vms_raw.results | length == 2
+              - cp_azure_poc_direct_replacement_pips_raw.results | length == 2
+              - vm.name == item.0.vm_name
+              - vm.identityType == 'SystemAssigned'
+              - >-
+                vm.identityPrincipalId is
+                match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+              - vm.provisioningState == 'Succeeded'
+              - pip.name == item.0.public_ip_name
+              - pip.ipAddress is match(cp_azure_ipv4_pattern)
+              - pip.allocation == 'Static'
+              - pip.version == 'IPv4'
+              - pip.sku == 'Standard'
+              - pip.tier == 'Regional'
+              - pip.provisioningState == 'Succeeded'
+            fail_msg: >-
+              The generation-3 Direct replacement identity or reviewed static
+              public IPv4 evidence drifted before root DNS qualification.
+          loop: >-
+            {{ cp_azure_poc_direct_replacement_bindings |
+               zip(cp_azure_poc_direct_replacement_vms_raw.results,
+                   cp_azure_poc_direct_replacement_pips_raw.results) | list }}
+          loop_control:
+            label: "{{ item.0.role }}"
+          vars:
+            vm: "{{ item.1.stdout | from_json }}"
+            pip: "{{ item.2.stdout | from_json }}"
+            cp_azure_ipv4_pattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})$'
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
+            - >-
+              cp_azure_poc_direct_replacement_runtime_profile ==
+              'DIRECT_ROUTING_PRIVATE_PBX_POC'
+
+        - name: Read the exact reconciled legacy voice POC ACME DNS authority contract
           ansible.builtin.command:
             argv:
               - "{{ ansible_playbook_python }}"
@@ -1552,13 +1859,15 @@
           register: cp_azure_poc_dns_acme_authority_raw
           changed_when: false
           check_mode: false
-          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
-        - name: Parse the sanitized POC ACME DNS authority evidence
+        - name: Parse the sanitized legacy voice POC ACME DNS authority evidence
           ansible.builtin.set_fact:
             cp_azure_poc_dns_acme_authority: >-
               {{ cp_azure_poc_dns_acme_authority_raw.stdout | from_json }}
-          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
         - name: Require narrow lock-free ACME authority and absent challenge records
           ansible.builtin.assert:
@@ -1596,7 +1905,153 @@
               POC ACME authority is not reconciled: final qualification
               requires no zone locks, only one exact TXT-only custom-role
               assignment per node, and no _acme-challenge TXT record set.
-          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
+        - name: Read the exact root Direct DNS and ACME authority contract
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - >-
+                {{ playbook_dir }}/../../infra/azure-poc/reconcile_root_direct_dns_acme_authority.py
+              - --expected-subscription-id
+              - "{{ cp_azure_subscription_id }}"
+              - --expected-tenant-id
+              - "{{ cp_azure_tenant_id }}"
+              - --expected-carrier-public-ipv4
+              - "{{ cp_azure_public_ip }}"
+              - --expected-sbc1-public-ipv4
+              - >-
+                {{ (cp_azure_poc_direct_replacement_pips_raw.results[0].stdout |
+                    from_json).ipAddress }}
+              - --expected-sbc2-public-ipv4
+              - >-
+                {{ (cp_azure_poc_direct_replacement_pips_raw.results[1].stdout |
+                    from_json).ipAddress }}
+              - --expected-cp1-principal-id
+              - "{{ cp_azure_vm.identityPrincipalId }}"
+              - --expected-sbc1-principal-id
+              - >-
+                {{ (cp_azure_poc_direct_replacement_vms_raw.results[0].stdout |
+                    from_json).identityPrincipalId }}
+              - --expected-sbc2-principal-id
+              - >-
+                {{ (cp_azure_poc_direct_replacement_vms_raw.results[1].stdout |
+                    from_json).identityPrincipalId }}
+          environment: *azure_cli_environment
+          register: cp_azure_poc_root_direct_dns_acme_raw
+          changed_when: false
+          check_mode: false
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
+            - >-
+              cp_azure_poc_direct_replacement_runtime_profile ==
+              'DIRECT_ROUTING_PRIVATE_PBX_POC'
+
+        - name: Parse sanitized root Direct DNS and ACME authority evidence
+          ansible.builtin.set_fact:
+            cp_azure_poc_root_direct_dns_acme: >-
+              {{ cp_azure_poc_root_direct_dns_acme_raw.stdout | from_json }}
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
+            - >-
+              cp_azure_poc_direct_replacement_runtime_profile ==
+              'DIRECT_ROUTING_PRIVATE_PBX_POC'
+
+        - name: Require exact root Direct DNS ACME authority and certificate names
+          ansible.builtin.assert:
+            that:
+              - >-
+                cp_azure_poc_root_direct_dns_acme.keys() | list | sort ==
+                ['actions', 'authority', 'observed', 'planSha256',
+                 'preserved', 'scope', 'status'] | sort
+              - >-
+                cp_azure_poc_root_direct_dns_acme.status ==
+                'ROOT_DIRECT_DNS_ACME_AUTHORITY_RECONCILED'
+              - cp_azure_poc_root_direct_dns_acme.actions | length == 0
+              - >-
+                cp_azure_poc_root_direct_dns_acme.scope.parentZone ==
+                cp_azure_poc_direct_dns_parent_zone
+              - >-
+                cp_azure_poc_root_direct_dns_acme.scope.dnsResourceGroup ==
+                cp_azure_poc_direct_dns_resource_group
+              - >-
+                cp_azure_poc_root_direct_dns_acme.scope.profile ==
+                'DIRECT_ROUTING_PRIVATE_PBX_POC'
+              - >-
+                cp_azure_poc_root_direct_dns_acme.scope.childZones ==
+                cp_azure_poc_direct_acme_child_zones
+              - >-
+                cp_azure_poc_root_direct_dns_acme.observed.childZones |
+                map(attribute='name') | list ==
+                cp_azure_poc_direct_acme_child_zones
+              - >-
+                cp_azure_poc_root_direct_dns_acme.observed.childZones |
+                map(attribute='challenge') | list == [none, none, none]
+              - >-
+                cp_azure_poc_root_direct_dns_acme.observed.childZones |
+                map(attribute='roleAssignmentPresent') | list ==
+                [true, true, true]
+              - >-
+                cp_azure_poc_root_direct_dns_acme.authority.childZones |
+                length == 3
+              - >-
+                cp_azure_poc_root_direct_dns_acme.authority.childZones |
+                map(attribute='principalId') | list | unique | length == 3
+              - >-
+                cp_azure_poc_root_direct_dns_acme.authority.parentRecords |
+                length == 9
+              - >-
+                cp_azure_poc_root_direct_dns_acme.authority.parentRecords |
+                selectattr('type', 'equalto', 'A') |
+                map(attribute='name') | list | sort ==
+                ['carrier', 'sbc1', 'sbc2']
+              - >-
+                cp_azure_poc_root_direct_dns_acme.authority.parentRecords |
+                selectattr('type', 'equalto', 'CNAME') | list | length == 3
+              - >-
+                cp_azure_poc_root_direct_dns_acme.authority.parentRecords |
+                selectattr('type', 'equalto', 'NS') | list | length == 3
+              - >-
+                cp_azure_poc_root_direct_dns_acme.authority.virtualMachines |
+                map(attribute='ipAddress') | list ==
+                [((cp_azure_poc_direct_replacement_pips_raw.results[0].stdout |
+                   from_json).ipAddress),
+                 ((cp_azure_poc_direct_replacement_pips_raw.results[1].stdout |
+                   from_json).ipAddress),
+                 cp_azure_public_ip]
+              - >-
+                cp_azure_poc_root_direct_dns_acme.preserved.voiceAuthorityZones |
+                map(attribute='name') | list ==
+                ['voice.vivolution.ae',
+                 'acme-sbc1.voice.vivolution.ae',
+                 'acme-sbc2.voice.vivolution.ae']
+              - >-
+                cp_azure_poc_direct_certificate_fqdns | sort ==
+                (cp_azure_poc_root_direct_dns_acme.authority.parentRecords |
+                 selectattr('type', 'equalto', 'A') |
+                 map(attribute='name') | map('regex_replace', '$',
+                 '.vivolution.ae') | list | sort)
+              - >-
+                cp_azure_poc_root_direct_dns_acme.authority.customRoleDefinition.name ==
+                cp_azure_poc_direct_acme_role_definition_guid
+              - >-
+                cp_azure_poc_root_direct_dns_acme.authority.customRoleDefinition.actions ==
+                ['Microsoft.Network/dnszones/TXT/delete',
+                 'Microsoft.Network/dnszones/TXT/read',
+                 'Microsoft.Network/dnszones/TXT/write',
+                 'Microsoft.Network/dnszones/read',
+                 'Microsoft.ResourceGraph/resources/read']
+            fail_msg: >-
+              Root Direct DNS/ACME authority is not reconciled: the private-PBX
+              profile requires exact g3/CP1 A records, three isolated
+              delegations, one TXT-only identity assignment per child zone,
+              absent challenges, and preserved voice DNS authority.
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
+            - >-
+              cp_azure_poc_direct_replacement_runtime_profile ==
+              'DIRECT_ROUTING_PRIVATE_PBX_POC'
 
         - name: Read each POC Edge virtual machine instance state
           ansible.builtin.command:
@@ -1929,12 +2384,10 @@
           check_mode: false
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
-        - name: Require each exact profile-specific POC Edge NSG
+        - name: Require each exact generation-2 synthetic POC Edge NSG
           ansible.builtin.assert:
             that:
-              - >-
-                rules | length ==
-                (17 if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' else 19)
+              - rules | length == 17
               - rules == expected_rules
             fail_msg: >-
               A POC Edge NSG is not the exact approved administrator,
@@ -1947,7 +2400,7 @@
           vars:
             node: "{{ item.item }}"
             rules: "{{ item.stdout | from_json }}"
-            expected_rule_superset:
+            expected_rule_contract:
               - name: AllowAdminSsh
                 priority: 100
                 protocol: Tcp
@@ -2046,36 +2499,6 @@
                 destinationPrefix: "{{ cp_azure_private_ip }}"
                 destinationPrefixes: []
                 destinationPortRange: '443'
-                destinationPortRanges: []
-                provisioningState: Succeeded
-              - name: AllowMicrosoftMedia
-                priority: 210
-                protocol: Udp
-                access: Allow
-                direction: Inbound
-                sourcePrefix: null
-                sourcePrefixes: "{{ cp_azure_poc_microsoft_media_source_prefixes }}"
-                sourcePortRange: null
-                sourcePortRanges:
-                  - '3478-3481'
-                  - '49152-53247'
-                destinationPrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
-                destinationPrefixes: []
-                destinationPortRange: "{{ cp_azure_poc_rtp_media_port_range }}"
-                destinationPortRanges: []
-                provisioningState: Succeeded
-              - name: AllowMicrosoftTls5061
-                priority: 200
-                protocol: Tcp
-                access: Allow
-                direction: Inbound
-                sourcePrefix: null
-                sourcePrefixes: "{{ cp_azure_poc_microsoft_signaling_source_prefixes }}"
-                sourcePortRange: '*'
-                sourcePortRanges: []
-                destinationPrefix: '*'
-                destinationPrefixes: []
-                destinationPortRange: '5061'
                 destinationPortRanges: []
                 provisioningState: Succeeded
               - name: AllowNtpOutbound
@@ -2228,87 +2651,7 @@
                 destinationPortRange: '*'
                 destinationPortRanges: []
                 provisioningState: Succeeded
-            direct_profile_outbound_rules:
-              - name: AllowMicrosoftMediaOutbound
-                priority: 1110
-                protocol: Udp
-                access: Allow
-                direction: Outbound
-                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
-                sourcePrefixes: []
-                sourcePortRange: "{{ cp_azure_poc_tenant_media_port_range }}"
-                sourcePortRanges: []
-                destinationPrefix: null
-                destinationPrefixes: "{{ cp_azure_poc_microsoft_media_source_prefixes }}"
-                destinationPortRange: null
-                destinationPortRanges:
-                  - '3478-3481'
-                  - '49152-53247'
-                provisioningState: Succeeded
-              - name: AllowMicrosoftSignalingOutbound
-                priority: 1100
-                protocol: Tcp
-                access: Allow
-                direction: Outbound
-                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
-                sourcePrefixes: []
-                sourcePortRange: '*'
-                sourcePortRanges: []
-                destinationPrefix: null
-                destinationPrefixes: "{{ cp_azure_poc_microsoft_signaling_source_prefixes }}"
-                destinationPortRange: '5061'
-                destinationPortRanges: []
-                provisioningState: Succeeded
-              - name: AllowPbxMediaOutbound
-                priority: 1130
-                protocol: Udp
-                access: Allow
-                direction: Outbound
-                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
-                sourcePrefixes: []
-                sourcePortRange: "{{ cp_azure_poc_tenant_media_port_range }}"
-                sourcePortRanges: []
-                destinationPrefix: null
-                destinationPrefixes: "{{ node.pbx_source_prefixes }}"
-                destinationPortRange: >-
-                  {{ node.pbx_media_destination_port_start | string }}-{{ node.pbx_media_destination_port_end | string }}
-                destinationPortRanges: []
-                provisioningState: Succeeded
-              - name: AllowPbxSignalingOutbound
-                priority: 1120
-                protocol: Tcp
-                access: Allow
-                direction: Outbound
-                sourcePrefix: "{{ cp_azure_poc_edge_subnet_address_prefix }}"
-                sourcePrefixes: []
-                sourcePortRange: '*'
-                sourcePortRanges: []
-                destinationPrefix: null
-                destinationPrefixes: "{{ node.pbx_source_prefixes }}"
-                destinationPortRange: '5061'
-                destinationPortRanges: []
-                provisioningState: Succeeded
-            expected_rules: >-
-              {{
-                (
-                  expected_rule_superset |
-                  rejectattr('name', 'equalto', 'AllowMicrosoftMedia') |
-                  rejectattr('name', 'equalto', 'AllowMicrosoftTls5061') |
-                  list
-                )
-                if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE'
-                else
-                (
-                  (
-                    expected_rule_superset |
-                    rejectattr('name', 'equalto', 'AllowSyntheticFixtureMediaOutbound') |
-                    rejectattr('name', 'equalto', 'AllowSyntheticFixtureSignalingOutbound') |
-                    rejectattr('name', 'equalto', 'AllowSyntheticTeamsMedia') |
-                    rejectattr('name', 'equalto', 'AllowSyntheticTeamsTls5061') |
-                    list
-                  ) + direct_profile_outbound_rules
-                ) | sort(attribute='name')
-              }}
+            expected_rules: "{{ expected_rule_contract }}"
 
         - name: Read the public DNS A record without mutation
           ansible.builtin.command:
@@ -2452,7 +2795,12 @@
                 'vm,disk,nic,nsg,public-ip,vnet'
                 if cp_azure_infrastructure_topology_selected == 'legacy-single-node'
                 else
-                '14-declared-resources,3-managed-os-disks,cp1,sbc1,sbc2' }}
+                (
+                  '22-declared-resources,5-managed-os-disks,cp1,g2-sbc1,g2-sbc2,g3-sbc1,g3-sbc2'
+                  if cp_azure_poc_direct_replacement_runtime_profile ==
+                     'DIRECT_ROUTING_PRIVATE_PBX_POC'
+                  else '14-declared-resources,3-managed-os-disks,cp1,sbc1,sbc2'
+                ) }}
               - >-
                 network=vnet-{{ cp_azure_vnet_address_prefix }},
                 subnet-{{ cp_azure_subnet_address_prefix }},
@@ -2462,12 +2810,10 @@
                 'ssh-approved-ip,http-public,https-public,deny-remainder'
                 if cp_azure_infrastructure_topology_selected == 'legacy-single-node'
                 else
-                'profile-' ~ cp_azure_poc_edge_runtime_profile ~
-                ',controller-' ~
-                (6 if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' else 4) ~
-                '-rule,edge-' ~
-                (17 if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' else 19) ~
-                '-rule-exact-contracts' }}
+                'profile-SYNTHETIC_PRIVATE,controller-' ~
+                (8 if cp_azure_poc_direct_replacement_runtime_profile ==
+                      'DIRECT_ROUTING_PRIVATE_PBX_POC' else 6) ~
+                '-rule,edge-17-rule-exact-contracts' }}
               - >-
                 os_disk_network_access={{
                 'controller-disabled-deny-all'
@@ -2479,6 +2825,11 @@
                 'not-applicable'
                 if cp_azure_infrastructure_topology_selected == 'legacy-single-node'
                 else
-                cp_azure_poc_edge_nodes | map(attribute='vm_name') | join(',') }}
+                (
+                  (cp_azure_poc_edge_nodes | map(attribute='vm_name') | list) +
+                  (cp_azure_poc_direct_replacement_vm_names
+                   if cp_azure_poc_direct_replacement_runtime_profile ==
+                      'DIRECT_ROUTING_PRIVATE_PBX_POC' else [])
+                ) | join(',') }}
               - "dns={{ cp_ingress_server_name }}->{{ cp_azure_dns.addresses[0] }}"
               - "runner_dns={{ cp_ingress_server_name }}->{{ cp_azure_runner_dns_addresses[0] }}"

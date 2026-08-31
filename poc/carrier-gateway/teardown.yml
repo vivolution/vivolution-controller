@@ -1,0 +1,8 @@
+---
+- name: Remove the bounded Vivolution carrier gateway
+  hosts: carrier_gateway_controller
+  become: true
+  gather_facts: false
+  serial: 1
+  roles:
+    - role: carrier_gateway_teardown

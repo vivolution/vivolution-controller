@@ -28,11 +28,23 @@ class AzureInfrastructureQualificationStaticTests(unittest.TestCase):
         self.assertIn("cp_azure_vm.networkInterfaces[0].deleteOption == 'Detach'", self.text)
 
     def test_poc_resource_group_is_exact_and_rejects_extra_resources(self) -> None:
-        self.assertIn("cp_azure_poc_declared_resources | length == 14", self.text)
-        self.assertIn("cp_azure_poc_disk_resources | length == 3", self.text)
-        self.assertIn("cp_azure_resources | length == 17", self.text)
+        self.assertIn(
+            "14 + (cp_azure_poc_expected_direct_replacement_declared_resources | length)",
+            self.text,
+        )
+        self.assertIn(
+            "3 + (cp_azure_poc_expected_direct_replacement_disk_resources | length)",
+            self.text,
+        )
+        self.assertIn(
+            "17 + (cp_azure_poc_expected_direct_replacement_declared_resources | length) +",
+            self.text,
+        )
         self.assertIn("cp_azure_poc_expected_declared_resources", self.text)
         self.assertIn("cp_azure_poc_expected_disk_resources", self.text)
+        self.assertIn("cp_azure_poc_expected_direct_replacement_declared_resources", self.text)
+        self.assertIn("cp_azure_poc_expected_direct_replacement_disk_resources", self.text)
+        self.assertIn("cp_azure_poc_direct_replacement_vm_names[0] ~ '-osdisk'", self.text)
         self.assertIn(
             'name: "{{ cp_azure_poc_os_disk_audit.disks[1].name }}"',
             self.text,
@@ -64,66 +76,66 @@ class AzureInfrastructureQualificationStaticTests(unittest.TestCase):
             "20000-20255",
             "pbx_media_destination_port_start",
             "pbx_media_destination_port_end",
-            "AllowMicrosoftTls5061",
             "AllowSyntheticFixtureMediaOutbound",
+            "AllowGeneration3CarrierSignaling",
+            "AllowGeneration3CarrierMedia",
+            "DIRECT_ROUTING_PRIVATE_PBX_POC",
+            "30000-30127",
             "DenyAllOutbound",
             "AllowSyntheticTeamsTls5061",
             "AllowPbxTls",
             "DenyAllInbound",
-            "(17 if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' else 19)",
-            "(6 if cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE' else 4)",
+            "rules | length == 17",
+            "(8 if cp_azure_poc_direct_replacement_runtime_profile ==",
             "disk.publicNetworkAccess == 'Disabled'",
             "disk.networkAccessPolicy == 'DenyAll'",
             "'PowerState/running' in states",
         ):
             self.assertIn(value, self.text)
 
-        self.assertIn("cp_azure_poc_edge_subnet.ipConfigurationIds | length == 2", self.text)
-        self.assertIn("cp_azure_poc_availability_set.vmIds | length == 2", self.text)
+        self.assertIn(
+            "cp_azure_poc_edge_subnet.ipConfigurationIds | length ==\n"
+            "                (4 if cp_azure_poc_direct_replacement_runtime_profile ==",
+            self.text,
+        )
+        self.assertIn(
+            "cp_azure_poc_availability_set.vmIds | length ==\n"
+            "                (4 if cp_azure_poc_direct_replacement_runtime_profile ==",
+            self.text,
+        )
         self.assertIn("cp_azure_poc_availability_set.faultDomains | int == 2", self.text)
         self.assertNotIn(
             "cp_azure_poc_availability_set.provisioningState", self.text
         )
 
-    def test_poc_microsoft_media_rules_are_exact_and_directional(self) -> None:
+    def test_g2_stays_synthetic_and_cp1_overlay_is_exact(self) -> None:
         self.assertIn("sort_by([],&name)[].{name:name,priority:priority", self.text)
-        self.assertEqual(self.text.count("- name: AllowMicrosoftMedia\n"), 1)
-        self.assertEqual(self.text.count("- name: AllowMicrosoftMediaOutbound\n"), 1)
+        self.assertNotIn("- name: AllowMicrosoftMedia\n", self.text)
+        self.assertNotIn("- name: AllowMicrosoftMediaOutbound\n", self.text)
+        self.assertNotIn("- name: AllowMicrosoftTls5061\n", self.text)
         self.assertIn(
             "cp_azure_poc_microsoft_media_source_prefixes | sort ==\n"
             "                ['52.112.0.0/14', '52.120.0.0/14']",
             self.text,
         )
 
-        media_start = self.text.index("              - name: AllowMicrosoftMedia\n")
-        signaling_start = self.text.index("              - name: AllowMicrosoftTls5061\n")
-        inbound = self.text[media_start:signaling_start]
-
-        for value in (
-            "direction: Inbound",
-            "sourcePrefixes: \"{{ cp_azure_poc_microsoft_media_source_prefixes }}\"",
-            "sourcePortRange: null",
-            "sourcePortRanges:\n                  - '3478-3481'\n                  - '49152-53247'",
-            "destinationPrefix: \"{{ cp_azure_poc_edge_subnet_address_prefix }}\"",
-            "destinationPortRange: \"{{ cp_azure_poc_rtp_media_port_range }}\"",
-        ):
-            self.assertIn(value, inbound)
-
-        outbound_start = self.text.index(
-            "              - name: AllowMicrosoftMediaOutbound\n"
+        overlay_start = self.text.index(
+            "              - name: AllowGeneration3CarrierSignaling\n"
         )
-        outbound_end = self.text.index(
-            "              - name: AllowMicrosoftSignalingOutbound\n"
+        overlay_end = self.text.index(
+            "              - name: DenyAllInbound\n", overlay_start
         )
-        outbound = self.text[outbound_start:outbound_end]
+        overlay = self.text[overlay_start:overlay_end]
         for value in (
-            "direction: Outbound",
+            "priority: 320",
+            "priority: 330",
+            "sourcePrefixes:\n                  - 10.20.2.6/32\n                  - 10.20.2.7/32",
+            "destinationPrefix: 10.20.1.4/32",
+            "destinationPortRange: '5061'",
             "sourcePortRange: \"{{ cp_azure_poc_tenant_media_port_range }}\"",
-            "destinationPrefixes: \"{{ cp_azure_poc_microsoft_media_source_prefixes }}\"",
-            "destinationPortRange: null",
-            "destinationPortRanges:\n                  - '3478-3481'\n                  - '49152-53247'",
+            "destinationPortRange: '30000-30127'",
         ):
-            self.assertIn(value, outbound)
+            self.assertIn(value, overlay)
 
         for value in (
             "AllowSyntheticFixtureMediaOutbound",
@@ -139,65 +151,22 @@ class AzureInfrastructureQualificationStaticTests(unittest.TestCase):
         ):
             self.assertIn(value, self.text)
 
-    def test_both_profiles_are_qualified_and_wrong_profile_rules_are_removed(self) -> None:
+    def test_base_synthetic_and_g3_direct_profiles_are_independent(self) -> None:
         for value in (
-            "['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING']",
-            "rejectattr('name', 'equalto', 'AllowMicrosoftMedia')",
-            "rejectattr('name', 'equalto', 'AllowMicrosoftTls5061')",
-            "rejectattr('name', 'equalto', 'AllowSyntheticFixtureMediaOutbound')",
-            "rejectattr('name', 'equalto', 'AllowSyntheticFixtureSignalingOutbound')",
-            "rejectattr('name', 'equalto', 'AllowSyntheticTeamsMedia')",
-            "rejectattr('name', 'equalto', 'AllowSyntheticTeamsTls5061')",
-            "direct_profile_outbound_rules",
-            "AllowPbxMediaOutbound",
-            "AllowPbxSignalingOutbound",
-            "network.prefixlen >= 24",
-            "network.network_address.is_global",
+            "cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE'",
+            "cp_azure_poc_direct_replacement_runtime_profile in",
+            "['NOT_DEPLOYED', 'DIRECT_ROUTING_PRIVATE_PBX_POC']",
+            "cp_azure_poc_direct_replacement_runtime_profile ==",
+            "rejectattr('name', 'equalto', 'AllowGeneration3CarrierSignaling')",
+            "rejectattr('name', 'equalto', 'AllowGeneration3CarrierMedia')",
+            "cp_azure_poc_synthetic_teams_source_prefixes == ['10.20.1.4/32']",
+            "reconcile_dns_acme_authority.py",
+            "reconcile_root_direct_dns_acme_authority.py",
         ):
             self.assertIn(value, self.text)
-
-        self.assertIn(
-            "cp_azure_poc_synthetic_teams_source_prefixes | length == 0",
-            self.text,
+        self.assertNotIn(
+            "cp_azure_poc_edge_runtime_profile == 'DIRECT_ROUTING", self.text
         )
-        self.assertIn("'10.20.1.4/32' not in item.pbx_source_prefixes", self.text)
-        self.assertIn(
-            "item.pbx_media_destination_port_end | int -\n"
-            "                 item.pbx_media_destination_port_start | int + 1 >= 100",
-            self.text,
-        )
-        self.assertIn(
-            "node.pbx_media_destination_port_start | string", self.text
-        )
-
-        superset_text = self.text[
-            self.text.index("            expected_rule_superset:\n") :
-            self.text.index("            direct_profile_outbound_rules:\n")
-        ]
-        direct_text = self.text[
-            self.text.index("            direct_profile_outbound_rules:\n") :
-            self.text.index("            expected_rules: >-\n")
-        ]
-        superset = set(
-            re.findall(r"^              - name: (\S+)$", superset_text, re.MULTILINE)
-        )
-        direct_outbound = set(
-            re.findall(r"^              - name: (\S+)$", direct_text, re.MULTILINE)
-        )
-        synthetic = superset - {"AllowMicrosoftMedia", "AllowMicrosoftTls5061"}
-        direct = (
-            superset
-            - {
-                "AllowSyntheticFixtureMediaOutbound",
-                "AllowSyntheticFixtureSignalingOutbound",
-                "AllowSyntheticTeamsMedia",
-                "AllowSyntheticTeamsTls5061",
-            }
-        ) | direct_outbound
-        self.assertEqual(len(synthetic), 17)
-        self.assertEqual(len(direct), 19)
-        self.assertNotIn("AllowMicrosoftMedia", synthetic)
-        self.assertFalse(any(name.startswith("AllowSynthetic") for name in direct))
 
     def test_all_three_implicit_os_disks_have_network_lockdown_proof(self) -> None:
         expected_disks = {
@@ -275,15 +244,68 @@ class AzureInfrastructureQualificationStaticTests(unittest.TestCase):
             self.assertIn(value, self.text)
         task = self.text[
             self.text.index(
-                "        - name: Read the exact reconciled POC ACME DNS authority contract\n"
+                "        - name: Read the exact reconciled legacy voice POC ACME DNS authority contract\n"
             ) : self.text.index(
-                "        - name: Parse the sanitized POC ACME DNS authority evidence\n"
+                "        - name: Parse the sanitized legacy voice POC ACME DNS authority evidence\n"
             )
         ]
         self.assertNotIn("--mode", task)
         self.assertNotIn("--confirmation", task)
         self.assertIn("changed_when: false", task)
         self.assertIn("check_mode: false", task)
+
+    def test_private_pbx_profile_uses_separate_root_dns_authority(self) -> None:
+        for value in (
+            "cp_azure_poc_direct_dns_resource_group == 'DNS_Zones'",
+            "cp_azure_poc_direct_dns_parent_zone == 'vivolution.ae'",
+            "cp_azure_poc_direct_replacement_runtime_profile",
+            "cp_azure_poc_direct_certificate_fqdns",
+            "['sbc1.vivolution.ae', 'sbc2.vivolution.ae',",
+            "['acme-sbc1.vivolution.ae', 'acme-sbc2.vivolution.ae',",
+            "['viv-sbc-dr-sbc1-g3', 'viv-sbc-dr-sbc2-g3']",
+            "['viv-sbc-dr-sbc1-g3-pip', 'viv-sbc-dr-sbc2-g3-pip']",
+            "c5498bfb-a31f-40dd-b636-0f53e530ed53",
+            "reconcile_root_direct_dns_acme_authority.py",
+            "ROOT_DIRECT_DNS_ACME_AUTHORITY_RECONCILED",
+            "[none, none, none]",
+            "[true, true, true]",
+            "['carrier', 'sbc1', 'sbc2']",
+            "voiceAuthorityZones",
+            "acme-sbc1.voice.vivolution.ae",
+            "customRoleDefinition.actions",
+            "identityPrincipalId:identity.principalId",
+            "viv-sbc-dr-sbc1-g3",
+            "viv-sbc-dr-sbc2-g3",
+        ):
+            self.assertIn(value, self.text)
+        legacy_task = self.text[
+            self.text.index(
+                "        - name: Read the exact reconciled legacy voice POC ACME DNS authority contract\n"
+            ) : self.text.index(
+                "        - name: Parse the sanitized legacy voice POC ACME DNS authority evidence\n"
+            )
+        ]
+        self.assertNotIn("cp_azure_poc_direct_replacement_runtime_profile", legacy_task)
+        self.assertIn(
+            "cp_azure_infrastructure_topology_selected == 'poc-three-node'",
+            legacy_task,
+        )
+        root_task = self.text[
+            self.text.index(
+                "        - name: Read the exact root Direct DNS and ACME authority contract\n"
+            ) : self.text.index(
+                "        - name: Parse sanitized root Direct DNS and ACME authority evidence\n"
+            )
+        ]
+        self.assertNotIn("--mode", root_task)
+        self.assertNotIn("--confirmation", root_task)
+        self.assertIn("changed_when: false", root_task)
+        self.assertIn("check_mode: false", root_task)
+        self.assertIn(
+            "cp_azure_poc_direct_replacement_runtime_profile ==\n"
+            "              'DIRECT_ROUTING_PRIVATE_PBX_POC'",
+            root_task,
+        )
 
     def test_every_azure_cli_operation_is_read_only(self) -> None:
         task_sections = self.text.split("\n        - name: ")
