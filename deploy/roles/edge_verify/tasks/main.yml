@@ -567,7 +567,7 @@
       - >-
         (
           (
-            (edge_runtime_profile == 'DIRECT_ROUTING') or
+            (edge_runtime_profile in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']) or
             (edge_runtime_profile == 'SYNTHETIC_PRIVATE' and
              edge_synthetic_teams_source_ipv4_cidrs | length > 0)
           ) and
@@ -588,7 +588,7 @@
           ' udp dport 20000-20255 accept'
         )
       - >-
-        (edge_runtime_profile != 'DIRECT_ROUTING') or
+        (edge_runtime_profile not in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']) or
         (edge_verify_firewall.stdout is search(
           'ip saddr @microsoft_media_source_ipv4 udp sport .*3478-3481.*49152-53247.*udp dport 20000-20255'
         ))
@@ -618,19 +618,24 @@
           'ip daddr @(microsoft_(signaling|media)_source_ipv4|pbx_source_ipv4)'
         ))
       - >-
-        (edge_runtime_profile != 'DIRECT_ROUTING') or
+        (edge_runtime_profile not in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']) or
         (edge_verify_firewall.stdout is search(
           'ip daddr @microsoft_media_source_ipv4 udp sport 20000-20255 udp dport .*3478-3481.*49152-53247.*accept'
         ))
       - >-
-        (edge_runtime_profile != 'DIRECT_ROUTING') or
+        (edge_runtime_profile not in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']) or
         (edge_verify_firewall.stdout is search(
           'ip daddr @pbx_source_ipv4 udp sport 20000-20255 udp dport ' ~
           (edge_pbx_media_destination_port_start | string) ~ '-' ~
           (edge_pbx_media_destination_port_end | string) ~ ' accept'
         ))
       - >-
-        (edge_runtime_profile != 'DIRECT_ROUTING') or
+        (edge_runtime_profile not in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']) or
+        (edge_verify_firewall.stdout is search(
+          'ip daddr @pbx_source_ipv4 tcp dport 5061.*accept'
+        ))
+      - >-
+        (edge_runtime_profile not in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']) or
         (edge_verify_firewall.stdout is not search(
           'ip (saddr @synthetic_teams_source_ipv4|daddr @control_plane_ipv4 (tcp dport .*16061.*25061|udp sport 20000-20255))'
         ))

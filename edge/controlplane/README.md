@@ -1,8 +1,9 @@
 # CP1 first-tenant materializer
 
 This package creates one node-targeted `ACTIVE` v0.1 tenant envelope for
-`sbc1/A` or `sbc2/B` for either the bounded CP1 fixture or the reviewed
-`DIRECT_ROUTING` profile. It does not copy the schema example's placeholder
+`sbc1/A` or `sbc2/B` for the bounded CP1 fixture, the production-shaped
+`DIRECT_ROUTING` profile, or the explicitly POC-only
+`DIRECT_ROUTING_PRIVATE_PBX_POC` profile. It does not copy the schema example's placeholder
 artifacts. It builds the complete inventory, calls the same deterministic
 renderers used by `edge.compiler`, fills each exact SHA-256 digest, byte size,
 content-addressed fetch path and fixed apply order, validates the finished
@@ -95,6 +96,42 @@ these references do not fetch or install secret material. Direct profiles
 reject reference IDs or versions containing `fixture`, and do not require the
 fixture CA, client certificate or fixture client key.
 
+## Private-PBX Direct Routing POC boundary
+
+`FirstTenantDirectRoutingPrivatePbxPocProfile` with
+`deploymentMode: DIRECT_ROUTING_PRIVATE_PBX_POC` is a third, signed profile;
+it is not an exception inside production `DIRECT_ROUTING`. Its signed manifest
+has the exact prefix `manifest-direct-private-pbx-poc-` and distinct connector,
+listener, and route resource IDs. The privileged runtime requires all of those
+identities together, so renaming a local profile cannot turn a production
+release into this POC or vice versa.
+
+The profile is restricted to generation 3 or later and fixes all private
+carrier authority to:
+
+- logical TLS peer and SNI `carrier.vivolution.ae`;
+- physical peer `10.20.1.4:5061` and source authority `10.20.1.4/32`;
+- carrier media UDP `30000-30127`;
+- Edge-local PBX listener TCP `15061` and Edge media UDP `20000-20255`;
+- live Microsoft three-hub TLS signaling and public RTP advertisement; and
+- UAE outbound route prefix `+971`.
+
+The logical carrier name remains in signed compiler output while the root
+runtime pins its address to `10.20.1.4`; this preserves certificate-name
+verification without granting DNS-derived network authority. The profile uses
+only the five common live TLS inputs (Edge certificate/key, reviewed Microsoft
+roots, PBX CA, and public CA). It rejects fixture CA/client references and
+synthetic Teams source authority. Production `DIRECT_ROUTING` remains
+unchanged and continues to require globally routable PBX source networks.
+
+`first-tenant-direct-routing-private-pbx-poc-profile.template.json` is
+intentionally non-materializable until the real M365 tenant UUID and reviewed
+secret-reference versions replace every sentinel. Sequence 1 requires null
+accepted state; subsequent releases require exact protected lineage with
+`profileKind: FirstTenantDirectRoutingPrivatePbxPocProfile` and the same node
+generation. Materialization proves only signed deterministic configuration,
+not Microsoft registration, PBX/Twilio readiness, or a PSTN call.
+
 ## Signing key
 
 Create the signing seed under a pre-existing, owner-owned private directory
@@ -118,8 +155,11 @@ envelope. Key IDs are never inferred from a filename or public-key hash.
 ## Materialize
 
 Copy `first-tenant-profile.example.json` for the fixture, or copy and fully
-resolve every replacement in
-`first-tenant-direct-routing-profile.template.json` for Direct Routing. Use
+resolve every replacement in either
+`first-tenant-direct-routing-profile.template.json` for production-shaped
+Direct Routing or
+`first-tenant-direct-routing-private-pbx-poc-profile.template.json` for the
+private-CP1 carrier POC. Use
 node facts produced from trusted Azure deployment outputs and fixed bootstrap
 allocations. Then create a brand-new release directory:
 

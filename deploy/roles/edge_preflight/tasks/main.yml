@@ -66,12 +66,15 @@
       - edge_journal_max_use is match('^[1-9][0-9]*[MGT]$')
       - edge_dns_probe_name is match('^[A-Za-z0-9.-]+$')
       - edge_perform_reboot_check is boolean
-      - edge_runtime_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING']
+      - edge_runtime_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
       - edge_azure_wire_server_ipv4 | string == '168.63.129.16'
       - edge_azure_imds_ipv4 | string == '169.254.169.254'
       - edge_acme_email is match('^[A-Za-z0-9.!#$%&''*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+$')
       - edge_acme_node_fqdn is match('^' ~ inventory_hostname ~ '\\.[a-z0-9.-]+$')
       - edge_acme_wildcard_fqdn == '*.' ~ edge_acme_node_fqdn
+      - >-
+        edge_runtime_profile != 'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+        edge_acme_node_fqdn == inventory_hostname ~ '.vivolution.ae'
       - edge_azure_subscription_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
       - edge_azure_tenant_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
       - edge_azure_dns_resource_group is match('^[A-Za-z0-9._()-]{1,90}$')
@@ -93,13 +96,18 @@
         (edge_runtime_profile == 'SYNTHETIC_PRIVATE' and
          edge_pbx_media_destination_port_start | int == 21000 and
          edge_pbx_media_destination_port_end | int == 21127) or
+        (edge_runtime_profile == 'DIRECT_ROUTING_PRIVATE_PBX_POC' and
+         edge_pbx_media_destination_port_start | int == 30000 and
+         edge_pbx_media_destination_port_end | int == 30127) or
         (edge_runtime_profile == 'DIRECT_ROUTING' and
          edge_pbx_media_destination_port_start | int != 21000 and
          edge_pbx_media_destination_port_end | int != 21127 and
          edge_pbx_media_destination_port_end | int -
          edge_pbx_media_destination_port_start | int + 1 >= 100)
     fail_msg: >-
-      Synthetic requires the exact CP1 PBX range 21000-21127. Direct Routing
+      Synthetic requires exact CP1 fixture range 21000-21127; the explicitly
+      POC-only private-PBX Direct Routing profile requires exact CP1 carrier
+      range 30000-30127. Production Direct Routing
       requires an explicit non-fixture PBX destination range with at least two
       UDP ports for each of the 50 reviewed non-muxed POC sessions.
 
@@ -125,6 +133,17 @@
         edge_ntp_server_ipv4_cidrs ==
         ['162.159.200.1/32', '162.159.200.123/32']
     fail_msg: Administration, Microsoft, and first-tenant PBX source CIDRs are mandatory.
+
+- name: Bind the POC-only private PBX authority before host mutation
+  ansible.builtin.assert:
+    that:
+      - edge_synthetic_teams_source_ipv4_cidrs == []
+      - edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32']
+      - edge_control_plane_ipv4_cidrs == edge_pbx_source_ipv4_cidrs
+    fail_msg: >-
+      DIRECT_ROUTING_PRIVATE_PBX_POC permits Microsoft authority only on the
+      public Teams side and exactly 10.20.1.4/32 on the private PBX side.
+  when: edge_runtime_profile == 'DIRECT_ROUTING_PRIVATE_PBX_POC'
 
 - name: Validate the public media address
   ansible.builtin.command:

@@ -34,6 +34,27 @@ from edge.schema import manifest_tool
 RUNTIME_API_VERSION = "edge.vivolution.ae/runtime/v0.1"
 RUNTIME_AUTHORITY_API_VERSION = "edge.vivolution.ae/runtime-authority/v0.1"
 COMPILER_API_VERSION = "edge.vivolution.ae/compiler/v0.1"
+SYNTHETIC_PRIVATE_PROFILE = "SYNTHETIC_PRIVATE"
+DIRECT_ROUTING_PROFILE = "DIRECT_ROUTING"
+DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE = "DIRECT_ROUTING_PRIVATE_PBX_POC"
+SUPPORTED_RUNTIME_PROFILES = frozenset(
+    {
+        SYNTHETIC_PRIVATE_PROFILE,
+        DIRECT_ROUTING_PROFILE,
+        DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE,
+    }
+)
+LIVE_MICROSOFT_PROFILES = frozenset(
+    {DIRECT_ROUTING_PROFILE, DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE}
+)
+PRIVATE_FIXTURE_PBX_PROFILES = frozenset(
+    {SYNTHETIC_PRIVATE_PROFILE}
+)
+PRIVATE_PBX_POC_HOST = "carrier.vivolution.ae"
+PRIVATE_PBX_POC_IPV4 = "10.20.1.4"
+PRIVATE_PBX_POC_PORT = 5061
+PRIVATE_PBX_POC_MEDIA_DESTINATION_PORT_START = 30000
+PRIVATE_PBX_POC_MEDIA_DESTINATION_PORT_END = 30127
 
 OPENSIPS_VERSION = "3.6.8-1"
 RTPENGINE_VERSION = "26.0.1.22-1~bpo13+1"
@@ -75,6 +96,21 @@ TEAMS_HUBS = (
     "sip.pstnhub.microsoft.com",
     "sip2.pstnhub.microsoft.com",
     "sip3.pstnhub.microsoft.com",
+)
+PRIVATE_PBX_POC_UNIQUE_RESOURCE_IDS = frozenset(
+    {
+        "connector-pbx-direct-private-poc",
+        "listener-pbx-direct-private-poc",
+        "route-direct-private-poc-teams-to-pbx",
+        "route-direct-private-poc-pbx-to-teams",
+    }
+)
+PRIVATE_PBX_POC_RESOURCE_IDS = frozenset(
+    {
+        *PRIVATE_PBX_POC_UNIQUE_RESOURCE_IDS,
+        "media-first-tenant",
+        "capacity-first-tenant",
+    }
 )
 
 LOCAL_HEALTH_GATE_FIELDS = frozenset(
@@ -131,6 +167,7 @@ _SYNTHETIC_SECRET_NAMES = _COMMON_SECRET_NAMES | {
     "fixtureClientCrt",
     "fixtureClientKey",
 }
+_PRIVATE_PBX_POC_SECRET_NAMES = _COMMON_SECRET_NAMES
 _DIRECT_RESERVED_FQDN_SUFFIXES = (
     ".alt",
     ".arpa",
@@ -340,7 +377,7 @@ class RuntimeAuthority:
         if slot not in {"A", "B"}:
             _fail("runtime authority slot must be A or B")
         profile = record["profile"]
-        if profile not in {"SYNTHETIC_PRIVATE", "DIRECT_ROUTING"}:
+        if profile not in SUPPORTED_RUNTIME_PROFILES:
             _fail("runtime authority profile is unsupported")
         administrators = _cidrs(
             record["administratorSourceIpv4Cidrs"],
@@ -352,11 +389,12 @@ class RuntimeAuthority:
         dhcp = _ipv4(record["azureDhcpServerIpv4"], "azureDhcpServerIpv4")
         if dhcp != "168.63.129.16":
             _fail("azureDhcpServerIpv4 must equal the fixed Azure WireServer address")
-        required_secret_names = (
-            _SYNTHETIC_SECRET_NAMES
-            if profile == "SYNTHETIC_PRIVATE"
-            else _COMMON_SECRET_NAMES
-        )
+        if profile == SYNTHETIC_PRIVATE_PROFILE:
+            required_secret_names = _SYNTHETIC_SECRET_NAMES
+        elif profile == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE:
+            required_secret_names = _PRIVATE_PBX_POC_SECRET_NAMES
+        else:
+            required_secret_names = _COMMON_SECRET_NAMES
         secrets = _exact_mapping(
             record["secretDigests"],
             set(required_secret_names),
@@ -400,9 +438,9 @@ class SecretPaths:
             "pbxCaBundlePem": self.pbx_ca_bundle_pem,
             "publicCaBundlePem": self.public_ca_bundle_pem,
         }
-        if profile == "SYNTHETIC_PRIVATE":
+        if profile == SYNTHETIC_PRIVATE_PROFILE:
             return paths
-        if profile == "DIRECT_ROUTING":
+        if profile in LIVE_MICROSOFT_PROFILES:
             return {
                 name: path
                 for name, path in paths.items()
@@ -504,7 +542,7 @@ def validate_secret_material(
     except Exception as exc:
         _fail("edge public certificate SAN/chain validation failed: {}".format(exc))
 
-    if authority.profile == "SYNTHETIC_PRIVATE":
+    if authority.profile == SYNTHETIC_PRIVATE_PROFILE:
         try:
             fixture_certificates = x509.load_pem_x509_certificates(
                 secret_bytes["fixtureClientCrt"]
@@ -563,7 +601,7 @@ def validate_secret_material(
             _fail("fixture client certificate chain validation failed: {}".format(exc))
 
     ca_bundle_names = ["microsoftCaBundlePem", "pbxCaBundlePem", "publicCaBundlePem"]
-    if authority.profile == "SYNTHETIC_PRIVATE":
+    if authority.profile == SYNTHETIC_PRIVATE_PROFILE:
         ca_bundle_names.insert(0, "fixtureCaCrt")
     for name in ca_bundle_names:
         try:
@@ -1188,8 +1226,9 @@ def render_runtime_rtpengine(
 
     The compiler artifact remains byte-canonical and bound to immutable node
     facts as ``private!public``.  The root runtime may narrow only the live SDP
-    advertisement: the isolated fixture uses the private address, while real
-    Direct Routing retains the public address.
+    advertisement: the isolated fixture uses the private address, production
+    Direct Routing retains the public address, and the private-PBX POC uses
+    explicit private and public realms over the same Azure private NIC address.
     """
 
     if (
@@ -1210,9 +1249,9 @@ def render_runtime_rtpengine(
     ).encode("ascii")
     if compiler_config.count(compiler_interface) != 1:
         _fail("RTPengine compiler interface transformation is ambiguous")
-    if authority.profile == "SYNTHETIC_PRIVATE":
+    if authority.profile == SYNTHETIC_PRIVATE_PROFILE:
         advertised_ipv4 = facts.private_ipv4
-    elif authority.profile == "DIRECT_ROUTING":
+    elif authority.profile in LIVE_MICROSOFT_PROFILES:
         advertised_ipv4 = facts.public_ipv4
     else:
         _fail("runtime authority profile cannot select an RTP advertisement")
@@ -1223,11 +1262,25 @@ def render_runtime_rtpengine(
         compiler_spec.port_max,
         compiler_spec.max_sessions,
     )
-    runtime_interface = "interface = {}!{}\n".format(
-        facts.private_ipv4, advertised_ipv4
-    ).encode("ascii")
+    if authority.profile == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE:
+        runtime_interface = (
+            "interface = private/{0};public/{0}!{1}\n".format(
+                facts.private_ipv4, facts.public_ipv4
+            )
+        ).encode("ascii")
+    else:
+        runtime_interface = "interface = {}!{}\n".format(
+            facts.private_ipv4, advertised_ipv4
+        ).encode("ascii")
     transformed = compiler_config.replace(compiler_interface, runtime_interface, 1)
-    if transformed != render_rtpengine(runtime_spec):
+    expected = render_rtpengine(runtime_spec).replace(
+        "interface = {}!{}\n".format(
+            runtime_spec.private_ipv4, runtime_spec.public_ipv4
+        ).encode("ascii"),
+        runtime_interface,
+        1,
+    )
+    if transformed != expected:
         _fail("RTPengine profile transformation differs from the fixed runtime grammar")
     return transformed
 
@@ -1366,7 +1419,7 @@ def render_nftables(
 ) -> bytes:
     synthetic_sets = ""
     synthetic_rules = ""
-    if authority.profile == "SYNTHETIC_PRIVATE":
+    if authority.profile == SYNTHETIC_PRIVATE_PROFILE:
         synthetic_sets = f"""
     set synthetic_teams_source_ipv4 {{
         type ipv4_addr
@@ -1381,7 +1434,7 @@ def render_nftables(
 """
     microsoft_rules = ""
     profile_output_rules = ""
-    if authority.profile == "DIRECT_ROUTING":
+    if authority.profile in LIVE_MICROSOFT_PROFILES:
         microsoft_rules = f"""        ip saddr @microsoft_signaling_source_ipv4 tcp dport 5061 ct state new accept
         ip saddr @microsoft_media_source_ipv4 udp sport {MICROSOFT_MEDIA_PROCESSOR_REMOTE_PORT_SET} udp dport {facts.tenant_media_port_start}-{facts.tenant_media_port_end} accept
 """
@@ -1528,7 +1581,9 @@ def _egress_identity(facts: NodeFacts, port: int, indentation: str = "    ") -> 
     )
 
 
-def _direct_options_routes(route: TenantRouteSpec, facts: NodeFacts) -> str:
+def _direct_options_routes(
+    route: TenantRouteSpec, facts: NodeFacts, authority: RuntimeAuthority
+) -> str:
     # OpenSIPS 3.6.8's TM module runs ``local_route`` for each request created
     # by ``t_new_request``.  Assigning the TLS client-domain AVP and forced
     # socket there is important: TM reselects that socket and rebuilds Via
@@ -1553,7 +1608,12 @@ def _direct_options_routes(route: TenantRouteSpec, facts: NodeFacts) -> str:
             f'"sip:{hub}:{TEAMS_TLS_PORT}");'
         )
 
-    pbx_ruri = f"sip:{route.pbx_host}:{route.pbx_port};transport=tls"
+    pbx_target_host = (
+        "10.20.1.4"
+        if authority.profile == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE
+        else route.pbx_host
+    )
+    pbx_ruri = f"sip:{pbx_target_host}:{route.pbx_port};transport=tls"
     local_targets.append(
         f'''    if ($ru == "{pbx_ruri}") {{
         $avp(tls_sip_dom) = "{route.pbx_host}";
@@ -1589,11 +1649,12 @@ def _runtime_tenant_fragment(
 ) -> str:
     source = _compiler_fragment(route).decode("ascii")
     pbx_du = f'    $du = "sip:{route.pbx_host}:{route.pbx_port};transport=tls";'
-    pbx_target = (
-        '    $du = "sip:10.20.1.4:16061;transport=tls";'
-        if authority.profile == "SYNTHETIC_PRIVATE"
-        else pbx_du
-    )
+    if authority.profile == SYNTHETIC_PRIVATE_PROFILE:
+        pbx_target = '    $du = "sip:10.20.1.4:16061;transport=tls";'
+    elif authority.profile == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE:
+        pbx_target = '    $du = "sip:10.20.1.4:5061;transport=tls";'
+    else:
+        pbx_target = pbx_du
     pbx_runtime = (
         f'    $avp(tls_sip_dom) = "{route.pbx_host}";\n'
         f"{pbx_target}\n"
@@ -1604,7 +1665,7 @@ def _runtime_tenant_fragment(
     source = source.replace(pbx_du, pbx_runtime, 1)
 
     teams_du = f'    $du = "sip:{TEAMS_HUBS[0]}:5061;transport=tls";'
-    if authority.profile == "SYNTHETIC_PRIVATE":
+    if authority.profile == SYNTHETIC_PRIVATE_PROFILE:
         teams_runtime = (
             '    $avp(tls_sip_dom) = "10.20.1.4";\n'
             '    $du = "sip:10.20.1.4:25061;transport=tls";\n'
@@ -1621,6 +1682,80 @@ def _runtime_tenant_fragment(
         _fail("internal Teams destination transformation is ambiguous")
     source = source.replace(teams_du, teams_runtime, 1)
 
+    if authority.profile == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE:
+        generic_offer = (
+            '        if (!rtpengine_offer('
+            '"replace-origin replace-session-connection ICE=remove")) {'
+        )
+        if source.count(generic_offer) != 2:
+            _fail("internal private-PBX media-direction transformation is ambiguous")
+        teams_to_pbx_offer = (
+            '        if (!rtpengine_offer('
+            '"replace-origin replace-session-connection ICE=remove '
+            'in-iface=public out-iface=private")) {'
+        )
+        pbx_to_teams_offer = (
+            '        if (!rtpengine_offer('
+            '"replace-origin replace-session-connection ICE=remove '
+            'in-iface=private out-iface=public")) {'
+        )
+        source = source.replace(generic_offer, teams_to_pbx_offer, 1)
+        source = source.replace(generic_offer, pbx_to_teams_offer, 1)
+
+        generic_reply_hook = f'    t_on_reply("VIVO_{route.token}_MEDIA_REPLY");'
+        if source.count(generic_reply_hook) != 2:
+            _fail("internal private-PBX media-reply transformation is ambiguous")
+        source = source.replace(
+            generic_reply_hook,
+            f'    t_on_reply("VIVO_{route.token}_TEAMS_TO_PBX_MEDIA_REPLY");',
+            1,
+        )
+        source = source.replace(
+            generic_reply_hook,
+            f'    t_on_reply("VIVO_{route.token}_PBX_TO_TEAMS_MEDIA_REPLY");',
+            1,
+        )
+
+        generic_reply_route = f'''onreply_route[VIVO_{route.token}_MEDIA_REPLY] {{
+    if (t_check_status("[12][0-9][0-9]") && has_body("application/sdp")) {{
+        if (!rtpengine_answer("replace-origin replace-session-connection ICE=remove")) {{
+{_synthetic_cdr_final(route.token, "MEDIA_ANCHOR_FAILED", "            ")}
+            drop;
+        }}
+    }}
+    if (t_check_status("2[0-9][0-9]")) {{
+{_synthetic_cdr_final(route.token, "ACCEPTED", "        ")}
+    }}
+}}
+'''
+        teams_to_pbx_reply_route = generic_reply_route.replace(
+            f"VIVO_{route.token}_MEDIA_REPLY",
+            f"VIVO_{route.token}_TEAMS_TO_PBX_MEDIA_REPLY",
+            1,
+        ).replace(
+            'rtpengine_answer("replace-origin replace-session-connection ICE=remove")',
+            'rtpengine_answer("replace-origin replace-session-connection ICE=remove '
+            'in-iface=private out-iface=public")',
+            1,
+        )
+        pbx_to_teams_reply_route = generic_reply_route.replace(
+            f"VIVO_{route.token}_MEDIA_REPLY",
+            f"VIVO_{route.token}_PBX_TO_TEAMS_MEDIA_REPLY",
+            1,
+        ).replace(
+            'rtpengine_answer("replace-origin replace-session-connection ICE=remove")',
+            'rtpengine_answer("replace-origin replace-session-connection ICE=remove '
+            'in-iface=public out-iface=private")',
+            1,
+        )
+        if source.count(generic_reply_route) != 1:
+            _fail("internal private-PBX reply-route grammar is ambiguous")
+        source = source.replace(
+            generic_reply_route,
+            teams_to_pbx_reply_route + "\n" + pbx_to_teams_reply_route,
+            1,
+        )
+
     failure_hook = f'    t_on_failure("VIVO_{route.token}_MEDIA_FAILURE");'
     first = source.find(failure_hook)
     second = source.find(failure_hook, first + 1)
@@ -1628,7 +1763,7 @@ def _runtime_tenant_fragment(
         _fail("internal failure-route transformation is ambiguous")
     failover_hook = (
         f'    t_on_failure("VIVO_{route.token}_MEDIA_FAILURE");'
-        if authority.profile == "SYNTHETIC_PRIVATE"
+        if authority.profile == SYNTHETIC_PRIVATE_PROFILE
         else f'    t_on_failure("VIVO_{route.token}_TEAMS_FAILOVER");'
     )
     source = source[:second] + failover_hook + source[second + len(failure_hook) :]
@@ -1639,7 +1774,7 @@ def _runtime_tenant_fragment(
 }}
 """
     new_tail = old_tail
-    if authority.profile == "DIRECT_ROUTING":
+    if authority.profile in LIVE_MICROSOFT_PROFILES:
         new_tail += f"""
 failure_route[VIVO_{route.token}_TEAMS_FAILOVER] {{
     if (t_was_cancelled()) {{
@@ -1665,7 +1800,7 @@ failure_route[VIVO_{route.token}_TEAMS_FAILOVER] {{
     rtpengine_delete();
 }}
 """
-        new_tail += "\n" + _direct_options_routes(route, facts)
+        new_tail += "\n" + _direct_options_routes(route, facts, authority)
     if source.count(old_tail) != 1:
         _fail("internal failure-route tail transformation is ambiguous")
     return source.replace(old_tail, new_tail, 1)
@@ -1679,7 +1814,7 @@ def render_opensips(
 ) -> bytes:
     peer_ca = (
         secrets.fixture_ca_crt
-        if authority.profile == "SYNTHETIC_PRIVATE"
+        if authority.profile == SYNTHETIC_PRIVATE_PROFILE
         else secrets.microsoft_ca_bundle_pem
     )
     teams_server = _tls_domain(
@@ -1699,10 +1834,12 @@ def render_opensips(
         facts.node_fqdn,
         secrets.edge_certificate_chain_pem,
         secrets.edge_private_key_pem,
-        secrets.fixture_ca_crt if authority.profile == "SYNTHETIC_PRIVATE" else secrets.pbx_ca_bundle_pem,
+        secrets.fixture_ca_crt
+        if authority.profile == SYNTHETIC_PRIVATE_PROFILE
+        else secrets.pbx_ca_bundle_pem,
         MICROSOFT_TLS12_CIPHER_LIST,
     )
-    if authority.profile == "SYNTHETIC_PRIVATE":
+    if authority.profile == SYNTHETIC_PRIVATE_PROFILE:
         teams_clients = _tls_domain(
             "client",
             "teams-fixture-outbound",
@@ -1730,18 +1867,30 @@ def render_opensips(
     pbx_client = _tls_domain(
         "client",
         "pbx-outbound",
-        "10.20.1.4:16061" if authority.profile == "SYNTHETIC_PRIVATE" else "*",
+        (
+            "10.20.1.4:16061"
+            if authority.profile == SYNTHETIC_PRIVATE_PROFILE
+            else "10.20.1.4:5061"
+            if authority.profile == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE
+            else "*"
+        ),
         route.pbx_host,
-        secrets.fixture_client_crt if authority.profile == "SYNTHETIC_PRIVATE" else secrets.edge_certificate_chain_pem,
-        secrets.fixture_client_key if authority.profile == "SYNTHETIC_PRIVATE" else secrets.edge_private_key_pem,
-        secrets.fixture_ca_crt if authority.profile == "SYNTHETIC_PRIVATE" else secrets.pbx_ca_bundle_pem,
+        secrets.fixture_client_crt
+        if authority.profile == SYNTHETIC_PRIVATE_PROFILE
+        else secrets.edge_certificate_chain_pem,
+        secrets.fixture_client_key
+        if authority.profile == SYNTHETIC_PRIVATE_PROFILE
+        else secrets.edge_private_key_pem,
+        secrets.fixture_ca_crt
+        if authority.profile == SYNTHETIC_PRIVATE_PROFILE
+        else secrets.pbx_ca_bundle_pem,
         SYNTHETIC_FIXTURE_TLS12_CIPHER_LIST
-        if authority.profile == "SYNTHETIC_PRIVATE"
+        if authority.profile == SYNTHETIC_PRIVATE_PROFILE
         else MICROSOFT_TLS12_CIPHER_LIST,
     )
     microsoft_sources = (
         facts.authorized_pbx_source_ipv4_cidrs
-        if authority.profile == "SYNTHETIC_PRIVATE"
+        if authority.profile == SYNTHETIC_PRIVATE_PROFILE
         else facts.teams_signaling_source_ipv4_cidrs
     )
     if not microsoft_sources:
@@ -1749,7 +1898,7 @@ def render_opensips(
     synthetic_cdr_runtime = (
         "#!define VIVO_SYNTHETIC_CDR\n"
         'modparam("tm", "onreply_avp_mode", 1)\n'
-        if authority.profile == "SYNTHETIC_PRIVATE"
+        if authority.profile == SYNTHETIC_PRIVATE_PROFILE
         else ""
     )
     text = f"""#### Vivolution Open Edge runtime configuration v0.1
@@ -2118,6 +2267,83 @@ def _verify_root_signed_envelope(
     )
 
 
+def _validate_signed_runtime_profile_identity(
+    envelope: Mapping[str, Any], authority: RuntimeAuthority, facts: NodeFacts
+) -> None:
+    """Bind the POC-only root profile to an explicit signed manifest identity.
+
+    The existing v0.1 manifest has no mutable top-level runtime-profile field.
+    Profile-specific resource identifiers and the manifest identifier are inside
+    the canonical signed bytes, so they provide the downgrade-resistant binding
+    without weakening the production Direct Routing contract.
+    """
+
+    manifest = envelope.get("manifest")
+    if not isinstance(manifest, Mapping):
+        _fail("signed runtime profile binding requires a manifest object")
+    resources = manifest.get("resourceSet", {}).get("resources")
+    if not isinstance(resources, list):
+        _fail("signed runtime profile binding requires the complete resource set")
+    resource_ids = {
+        item.get("resourceId")
+        for item in resources
+        if isinstance(item, Mapping)
+    }
+    if len(resource_ids) != len(resources) or not all(
+        isinstance(item, str) for item in resource_ids
+    ):
+        _fail("signed runtime profile resource identifiers are invalid or duplicated")
+
+    private_identity_present = bool(
+        resource_ids & PRIVATE_PBX_POC_UNIQUE_RESOURCE_IDS
+    ) or str(manifest.get("manifestId", "")).startswith(
+        "manifest-direct-private-pbx-poc-"
+    )
+    if authority.profile != DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE:
+        if private_identity_present:
+            _fail(
+                "private-PBX POC signed identity cannot run under another root profile"
+            )
+        return
+
+    expected_manifest_id = "manifest-direct-private-pbx-poc-{}-{:06d}".format(
+        facts.node_id, manifest.get("sequence")
+    )
+    if manifest.get("manifestId") != expected_manifest_id:
+        _fail(
+            "private-PBX POC signed manifestId does not bind the exact node and sequence"
+        )
+    if resource_ids != PRIVATE_PBX_POC_RESOURCE_IDS:
+        _fail(
+            "private-PBX POC signed resources differ from the exact profile identity"
+        )
+    typed = {
+        (item["resourceId"], item["type"]): item
+        for item in resources
+    }
+    required_types = {
+        ("connector-pbx-direct-private-poc", "tenant.connector"),
+        ("listener-pbx-direct-private-poc", "tenant.listener"),
+        ("route-direct-private-poc-teams-to-pbx", "tenant.route"),
+        ("route-direct-private-poc-pbx-to-teams", "tenant.route"),
+        ("media-first-tenant", "tenant.media"),
+        ("capacity-first-tenant", "tenant.capacity"),
+    }
+    if set(typed) != required_types:
+        _fail("private-PBX POC signed resource types differ from the exact profile")
+    if (
+        typed[("route-direct-private-poc-teams-to-pbx", "tenant.route")]["spec"].get(
+            "direction"
+        )
+        != "TEAMS_TO_PBX"
+        or typed[("route-direct-private-poc-pbx-to-teams", "tenant.route")]["spec"].get(
+            "direction"
+        )
+        != "PBX_TO_TEAMS"
+    ):
+        _fail("private-PBX POC signed route directions are reversed or invalid")
+
+
 def validate_candidate(
     handoff: Mapping[str, bytes],
     node_facts_raw: bytes,
@@ -2181,6 +2407,7 @@ def validate_candidate(
         expected_manifest_digest=expected_manifest_digest,
         now=effective_now,
     )
+    _validate_signed_runtime_profile_identity(signed_envelope, authority, facts)
 
     receipt_mapping = parse_json_bytes(handoff["verifier-receipt.json"], "verifier receipt")
     try:
@@ -2207,7 +2434,7 @@ def validate_candidate(
         _fail("compiler health plan differs from the independently verified signed plan")
     validate_secret_material(facts, authority, secret_bytes, now=effective_now)
     route = parse_compiler_fragment(artifacts["opensips-tenant.cfg"], facts)
-    if authority.profile == "SYNTHETIC_PRIVATE":
+    if authority.profile == SYNTHETIC_PRIVATE_PROFILE:
         if facts.synthetic_teams_source_ipv4_cidrs:
             _fail(
                 "synthetic runtime profile keeps compiler synthetic source authority empty; "
@@ -2227,7 +2454,46 @@ def validate_candidate(
                 "synthetic runtime profile requires typed PBX TLS identity "
                 "pbx-fixture.invalid:16061; runtime pins its address to 10.20.1.4"
             )
-    else:
+    elif authority.profile == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE:
+        if authority.generation < 3:
+            _fail(
+                "private-PBX Direct Routing POC requires replacement generation 3 or later"
+            )
+        if facts.node_fqdn != "{}.vivolution.ae".format(facts.node_id):
+            _fail(
+                "private-PBX Direct Routing POC requires the exact root Microsoft gateway FQDN"
+            )
+        if facts.synthetic_teams_source_ipv4_cidrs:
+            _fail(
+                "private-PBX Direct Routing POC refuses synthetic Teams source authority"
+            )
+        if facts.authorized_pbx_source_ipv4_cidrs != ("10.20.1.4/32",):
+            _fail(
+                "private-PBX Direct Routing POC requires only fixed CP1 PBX source 10.20.1.4/32"
+            )
+        if (
+            facts.pbx_media_destination_port_start,
+            facts.pbx_media_destination_port_end,
+        ) != (
+            PRIVATE_PBX_POC_MEDIA_DESTINATION_PORT_START,
+            PRIVATE_PBX_POC_MEDIA_DESTINATION_PORT_END,
+        ):
+            _fail(
+                "private-PBX Direct Routing POC requires fixed CP1 carrier media destination 30000-30127"
+            )
+        if (route.pbx_host, route.pbx_port) != (
+            PRIVATE_PBX_POC_HOST,
+            PRIVATE_PBX_POC_PORT,
+        ):
+            _fail(
+                "private-PBX Direct Routing POC requires the signed carrier TLS identity "
+                "carrier.vivolution.ae:5061 and pins resolution to 10.20.1.4"
+            )
+        if route.called_number_prefix != "+971":
+            _fail(
+                "private-PBX Direct Routing POC called-number prefix must be exactly +971"
+            )
+    elif authority.profile == DIRECT_ROUTING_PROFILE:
         if authority.generation < 2:
             _fail("Direct Routing requires a replacement/new-generation node identity")
         if facts.synthetic_teams_source_ipv4_cidrs:
@@ -2281,6 +2547,8 @@ def validate_candidate(
             )
         if route.called_number_prefix != "+971":
             _fail("Direct Routing called-number prefix must be exactly +971")
+    else:  # pragma: no cover - RuntimeAuthority rejects unsupported values first
+        _fail("runtime authority profile is unsupported")
     rtpengine = parse_rtpengine_artifact(artifacts["rtpengine-tenant.conf"], facts)
     validate_nft_artifact(artifacts["nftables-tenant-policy.json"], facts)
 

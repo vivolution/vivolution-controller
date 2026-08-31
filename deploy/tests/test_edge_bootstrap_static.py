@@ -85,6 +85,18 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
             "edge_acme_node_fqdn is match('^' ~ edge_expected_hostname ~ '\\\\.[a-z0-9.-]+$')",
             preflight,
         )
+        root_gateway_expression = (
+            "edge_runtime_profile != 'DIRECT_ROUTING_PRIVATE_PBX_POC' or "
+            "edge_acme_node_fqdn == inventory_hostname ~ '.vivolution.ae'"
+        )
+        self.assertIn(
+            "edge_runtime_profile != 'DIRECT_ROUTING_PRIVATE_PBX_POC' or",
+            preflight,
+        )
+        self.assertIn(
+            "edge_acme_node_fqdn == inventory_hostname ~ '.vivolution.ae'",
+            preflight,
+        )
 
         variables = {
             "edge_expected_hostname": "viv-sbc-poc-sbc1",
@@ -107,6 +119,30 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
             },
         )
         self.assertNotEqual(conflated.returncode, 0)
+
+        legacy_private_pbx = self.run_local_assertions(
+            assertions + [root_gateway_expression],
+            {
+                **variables,
+                "edge_runtime_profile": "DIRECT_ROUTING_PRIVATE_PBX_POC",
+            },
+        )
+        self.assertNotEqual(legacy_private_pbx.returncode, 0)
+
+        root_private_pbx = self.run_local_assertions(
+            assertions + [root_gateway_expression],
+            {
+                **variables,
+                "edge_runtime_profile": "DIRECT_ROUTING_PRIVATE_PBX_POC",
+                "edge_acme_node_fqdn": "sbc1.vivolution.ae",
+                "edge_acme_wildcard_fqdn": "*.sbc1.vivolution.ae",
+            },
+        )
+        self.assertEqual(
+            root_private_pbx.returncode,
+            0,
+            msg=f"{root_private_pbx.stdout}\n{root_private_pbx.stderr}",
+        )
 
     def test_playbook_is_edge_only_except_shared_ssh_hardening(self) -> None:
         playbook = self.read("playbooks/install-edge.yml")
@@ -288,9 +324,15 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
         self.assertIn("edge_microsoft_media_processor_remote_port_ranges", firewall)
         self.assertIn("udp sport", firewall)
         self.assertIn("edge_runtime_profile == 'SYNTHETIC_PRIVATE'", firewall)
-        self.assertIn("edge_runtime_profile == 'DIRECT_ROUTING'", firewall)
+        self.assertIn(
+            "edge_runtime_profile in ['DIRECT_ROUTING', "
+            "'DIRECT_ROUTING_PRIVATE_PBX_POC']",
+            firewall,
+        )
+        self.assertIn("DIRECT_ROUTING_PRIVATE_PBX_POC", firewall)
         direct_input = (
-            "{% if edge_runtime_profile == 'DIRECT_ROUTING' %}\n"
+            "{% if edge_runtime_profile in ['DIRECT_ROUTING', "
+            "'DIRECT_ROUTING_PRIVATE_PBX_POC'] %}\n"
             "        ip saddr @microsoft_signaling_source_ipv4"
         )
         synthetic_input = (
@@ -320,6 +362,19 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
         self.assertIn("destroy table inet vivolution_edge_filter", systemd)
         self.assertNotIn("state: restarted", handler)
         self.assertIn("--file, /etc/nftables.conf", handler)
+
+        for verifier in (tasks, self.read("roles/edge_verify/tasks/main.yml")):
+            self.assertEqual(
+                verifier.count(
+                    "'ip daddr @pbx_source_ipv4 tcp dport 5061.*accept'"
+                ),
+                1,
+            )
+            self.assertIn(
+                "edge_runtime_profile not in ['DIRECT_ROUTING', "
+                "'DIRECT_ROUTING_PRIVATE_PBX_POC']",
+                verifier,
+            )
 
     def test_live_firewall_tls_port_assertion_is_profile_exact(self) -> None:
         assertions = [
@@ -387,6 +442,20 @@ class EdgeBootstrapStaticTests(unittest.TestCase):
             (
                 "direct-rejects-missing-5061",
                 "DIRECT_ROUTING",
+                [],
+                azure_synthetic_nft,
+                False,
+            ),
+            (
+                "private-pbx-poc-requires-5061",
+                "DIRECT_ROUTING_PRIVATE_PBX_POC",
+                [],
+                azure_direct_nft,
+                True,
+            ),
+            (
+                "private-pbx-poc-rejects-missing-5061",
+                "DIRECT_ROUTING_PRIVATE_PBX_POC",
                 [],
                 azure_synthetic_nft,
                 False,

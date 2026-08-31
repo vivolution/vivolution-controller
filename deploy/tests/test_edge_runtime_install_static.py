@@ -321,9 +321,10 @@ print(
         )
         self.assertIn("edge_runtime_common_tls_inventory", tasks)
         self.assertIn("edge_runtime_synthetic_tls_inventory", tasks)
-        self.assertIn("edge_runtime_profile == 'SYNTHETIC_PRIVATE' else []", tasks)
+        self.assertIn("if edge_runtime_profile == 'SYNTHETIC_PRIVATE'", tasks)
         self.assertIn("edge_direct_pbx_ca_bundle_sha256", tasks)
         self.assertIn("DIRECT_ROUTING", tasks)
+        self.assertIn("DIRECT_ROUTING_PRIVATE_PBX_POC", tasks)
         self.assertIn("checksum_algorithm: sha256", tasks)
         self.assertIn("'sha256:' ~ item.stat.checksum", tasks)
         self.assertIn("group: opensips", tasks)
@@ -682,9 +683,10 @@ print(
             contracts,
         )
         self.assertIn("def render_runtime_rtpengine(", contracts)
-        self.assertIn('authority.profile == "SYNTHETIC_PRIVATE"', contracts)
+        self.assertIn("authority.profile == SYNTHETIC_PRIVATE_PROFILE", contracts)
         self.assertIn('advertised_ipv4 = facts.private_ipv4', contracts)
-        self.assertIn('authority.profile == "DIRECT_ROUTING"', contracts)
+        self.assertIn("authority.profile in LIVE_MICROSOFT_PROFILES", contracts)
+        self.assertIn("DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE", contracts)
         self.assertIn('advertised_ipv4 = facts.public_ipv4', contracts)
         self.assertIn(
             "runtime authority profile cannot select an RTP advertisement", contracts
@@ -694,6 +696,7 @@ print(
         )
         self.assertIn("rtpengine-synthetic-private-advertisement", runtime)
         self.assertIn("rtpengine-direct-public-advertisement", runtime)
+        self.assertIn("private-pbx-poc-carrier-routing", runtime)
         self.assertIn('record["rtpAdvertisedIpv4"]', runtime)
         self.assertIn('record["runtimeProfile"]', runtime)
 
@@ -866,6 +869,45 @@ print(
         self.assertIn("INSTALL_DIRECT_ROUTING_REPLACEMENT_GENERATION", tasks)
         self.assertIn("ACTIVATE_DIRECT_ROUTING_REPLACEMENT_GENERATION", activation)
         self.assertIn("generation | int >= 2", tasks)
+        self.assertIn(
+            "INSTALL_DIRECT_ROUTING_PRIVATE_PBX_POC_REPLACEMENT_GENERATION", tasks
+        )
+        self.assertIn(
+            "ACTIVATE_DIRECT_ROUTING_PRIVATE_PBX_POC_REPLACEMENT_GENERATION",
+            activation,
+        )
+        self.assertIn("edge_generation | int >= 3", tasks)
+        self.assertIn(
+            "Refuse private-PBX POC bootstrap over retained fixture material",
+            self.read("playbooks/install-edge.yml"),
+        )
+        deployment_readme = self.read("README.md")
+        self.assertIn("`sbc1.vivolution.ae`", deployment_readme)
+        self.assertIn("`sbc2.vivolution.ae`", deployment_readme)
+        self.assertIn(
+            "existing `voice.vivolution.ae` DNS/ACME package does\n"
+            "not create or authorize certificates for those names",
+            deployment_readme,
+        )
+        self.assertIn("separate, reviewed\nroot DNS/ACME staging workflow", deployment_readme)
+        direct_activation = activation[
+            activation.index("Require an explicit Direct Routing replacement activation") :
+            activation.index(
+                "Require an explicit POC-only private PBX Direct Routing activation"
+            )
+        ]
+        private_poc_activation = activation[
+            activation.index(
+                "Require an explicit POC-only private PBX Direct Routing activation"
+            ) :
+            activation.index(
+                "Validate canonical globally routable Direct Routing PBX source CIDRs"
+            )
+        ]
+        self.assertIn("edge_generation | int >= 2", direct_activation)
+        self.assertNotIn("edge_generation | int >= 3", direct_activation)
+        self.assertIn("edge_generation | int >= 3", private_poc_activation)
+        self.assertNotIn("edge_generation | int >= 2", private_poc_activation)
         self.assertIn("globally routable Direct Routing PBX source CIDRs", tasks)
         self.assertIn("TRANSITION_TO_DIRECT_ROUTING_REPLACEMENT_FLEET", transition)
         self.assertIn(

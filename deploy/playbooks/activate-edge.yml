@@ -25,7 +25,7 @@
           - edge_activation_local_evidence_dir is match('^/')
           - edge_signed_envelope_src == inventory_dir ~ '/generated/envelopes/' ~ inventory_hostname ~ '.json'
           - edge_activation_local_evidence_dir == inventory_dir ~ '/generated/activation-evidence'
-          - edge_runtime_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING']
+          - edge_runtime_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
         fail_msg: >-
           Refusing activation without the exact signed candidate identity,
           protected local envelope digest, and explicit activation acknowledgement.
@@ -52,6 +52,21 @@
           replacement/new-generation node; an active synthetic generation is
           never rewritten in place.
       when: edge_runtime_profile == 'DIRECT_ROUTING'
+
+    - name: Require an explicit POC-only private PBX Direct Routing activation
+      ansible.builtin.assert:
+        that:
+          - edge_generation | int >= 3
+          - edge_synthetic_teams_source_ipv4_cidrs == []
+          - edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32']
+          - edge_pbx_media_destination_port_start | int == 30000
+          - edge_pbx_media_destination_port_end | int == 30127
+          - edge_direct_private_pbx_poc_activation_acknowledgement == 'ACTIVATE_DIRECT_ROUTING_PRIVATE_PBX_POC_REPLACEMENT_GENERATION'
+        fail_msg: >-
+          DIRECT_ROUTING_PRIVATE_PBX_POC activation requires an explicitly
+          acknowledged replacement generation and the exact private CP1 PBX
+          source and media authority. It is not a production profile.
+      when: edge_runtime_profile == 'DIRECT_ROUTING_PRIVATE_PBX_POC'
 
     - name: Validate canonical globally routable Direct Routing PBX source CIDRs
       ansible.builtin.command:
@@ -98,14 +113,14 @@
           Activation inventory differs from the installed immutable runtime
           authority or node facts.
 
-    - name: Require Direct Routing authority to contain no synthetic fixture digest
+    - name: Require live Direct Routing authority to contain no synthetic fixture digest
       ansible.builtin.assert:
         that:
           - >-
             ((edge_activation_installed_authority.results[0].content | b64decode | from_json).secretDigests.keys() | list | sort) ==
             ['edgeCertificateChainPem', 'edgePrivateKeyPem', 'microsoftCaBundlePem', 'pbxCaBundlePem', 'publicCaBundlePem']
         fail_msg: Direct Routing authority contains a synthetic or unexpected secret digest.
-      when: edge_runtime_profile == 'DIRECT_ROUTING'
+      when: edge_runtime_profile in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
 
     - name: Inspect the shared Edge state traversal root before creating candidate paths
       ansible.builtin.stat:

@@ -1,0 +1,79 @@
+{
+  "acceptedState": null,
+  "activationTtlSeconds": 1800,
+  "apiVersion": "edge.vivolution.ae/control-plane-profile/v0.1",
+  "capacity": {
+    "maxBandwidthKbps": 6400,
+    "maxCallsPerSecond": 5,
+    "maxConcurrentSessions": 50,
+    "reservedConcurrentSessions": 25
+  },
+  "deploymentMode": "DIRECT_ROUTING_PRIVATE_PBX_POC",
+  "kind": "FirstTenantDirectRoutingPrivatePbxPocProfile",
+  "media": {
+    "codecs": [
+      "PCMA",
+      "PCMU"
+    ],
+    "maxSessions": 50,
+    "rtcpMux": false
+  },
+  "microsoftTargets": [
+    {
+      "fqdn": "sip.pstnhub.microsoft.com",
+      "tlsPort": 5061,
+      "transport": "TLS"
+    },
+    {
+      "fqdn": "sip2.pstnhub.microsoft.com",
+      "tlsPort": 5061,
+      "transport": "TLS"
+    },
+    {
+      "fqdn": "sip3.pstnhub.microsoft.com",
+      "tlsPort": 5061,
+      "transport": "TLS"
+    }
+  ],
+  "pbxConnector": {
+    "mediaDestinationPortEnd": 30127,
+    "mediaDestinationPortStart": 30000,
+    "optionsIntervalSeconds": 60,
+    "remoteHost": "carrier.vivolution.ae",
+    "remotePort": 5061,
+    "sourceIpv4Cidrs": [
+      "10.20.1.4/32"
+    ],
+    "tlsServerName": "carrier.vivolution.ae"
+  },
+  "routing": {
+    "calledNumberPrefix": "+971",
+    "priority": 100
+  },
+  "secretReferences": {
+    "pbxClientCa": {
+      "offlineValiditySeconds": 31536000,
+      "secretRefId": "secret-private-pbx-poc-client-ca",
+      "version": "version-replace-private-pbx-poc-ca"
+    },
+    "pbxClientIdentity": {
+      "offlineValiditySeconds": 31536000,
+      "secretRefId": "secret-private-pbx-poc-client-identity",
+      "version": "version-replace-private-pbx-poc-client"
+    },
+    "pbxServerIdentity": {
+      "offlineValiditySeconds": 31536000,
+      "secretRefId": "secret-private-pbx-poc-server-identity",
+      "version": "version-replace-private-pbx-poc-server"
+    }
+  },
+  "sequence": 1,
+  "targetAuthority": {
+    "allocationId": "allocation-vivolution-uaen-poc",
+    "clusterId": "cluster-uaen-poc-01",
+    "customerAccountId": "vivolution-technologies-llc",
+    "m365TenantId": "00000000-0000-0000-0000-000000000000",
+    "serviceInstanceId": "service-vivolution-pbx-relay",
+    "tenantContextId": "tenant-vivolution-poc"
+  }
+}

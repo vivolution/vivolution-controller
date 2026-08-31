@@ -112,7 +112,11 @@ def _resource(envelope: dict, kind: str) -> dict:
     return next(item for item in envelope["manifest"]["resourceSet"]["resources"] if item["type"] == kind)
 
 
-def compiled_handoff(*, direct: bool = False) -> tuple[dict[str, bytes], dict]:
+def compiled_handoff(
+    *, direct: bool = False, private_pbx_poc: bool = False
+) -> tuple[dict[str, bytes], dict]:
+    if direct and private_pbx_poc:
+        raise ValueError("test handoff profile is ambiguous")
     envelope = copy.deepcopy(manifest_tool.load_json(EXAMPLE))
     manifest = envelope["manifest"]
     manifest.setdefault("lifecycle", "ACTIVE")
@@ -133,15 +137,51 @@ def compiled_handoff(*, direct: bool = False) -> tuple[dict[str, bytes], dict]:
         raw_facts["pbxMediaDestinationPortStart"] = 30000
         raw_facts["pbxMediaDestinationPortEnd"] = 30127
         manifest["target"]["generation"] = 2
+    elif private_pbx_poc:
+        raw_facts["generation"] = 3
+        raw_facts["nodeFqdn"] = "sbc1.vivolution.ae"
+        raw_facts["pbxMediaDestinationPortStart"] = 30000
+        raw_facts["pbxMediaDestinationPortEnd"] = 30127
+        manifest["target"]["generation"] = 3
+        manifest["manifestId"] = "manifest-direct-private-pbx-poc-sbc1-000001"
+        resource_ids = {
+            "connector-vivolution-pbx": "connector-pbx-direct-private-poc",
+            "listener-vivolution-pbx": "listener-pbx-direct-private-poc",
+            "route-vivolution-teams-to-pbx": "route-direct-private-poc-teams-to-pbx",
+            "route-vivolution-pbx-to-teams": "route-direct-private-poc-pbx-to-teams",
+            "media-vivolution-rtpengine": "media-first-tenant",
+            "capacity-vivolution-poc": "capacity-first-tenant",
+        }
+        for resource in manifest["resourceSet"]["resources"]:
+            original_id = resource["resourceId"]
+            resource["resourceId"] = resource_ids[original_id]
+            if resource["type"] == "tenant.route":
+                resource["spec"]["connectorRef"] = resource_ids[
+                    resource["spec"]["connectorRef"]
+                ]
+        for gate in manifest["healthGates"]:
+            gate["resourceRefs"] = [resource_ids[item] for item in gate["resourceRefs"]]
     facts = NodeFacts.from_mapping(raw_facts)
     connector = _resource(envelope, "tenant.connector")
     connector["spec"].update(
         {
-            "remoteHost": "pbx.voice.vivolution.ae" if direct else "pbx-fixture.invalid",
-            "remotePort": 5061 if direct else 16061,
+            "remoteHost": (
+                "carrier.vivolution.ae"
+                if private_pbx_poc
+                else "pbx.voice.vivolution.ae"
+                if direct
+                else "pbx-fixture.invalid"
+            ),
+            "remotePort": 5061 if direct or private_pbx_poc else 16061,
             "mediaDestinationPortStart": facts.pbx_media_destination_port_start,
             "mediaDestinationPortEnd": facts.pbx_media_destination_port_end,
-            "tlsServerName": "pbx.voice.vivolution.ae" if direct else "pbx-fixture.invalid",
+            "tlsServerName": (
+                "carrier.vivolution.ae"
+                if private_pbx_poc
+                else "pbx.voice.vivolution.ae"
+                if direct
+                else "pbx-fixture.invalid"
+            ),
             "sourceCidrs": list(facts.authorized_pbx_source_ipv4_cidrs),
         }
     )
@@ -153,7 +193,9 @@ def compiled_handoff(*, direct: bool = False) -> tuple[dict[str, bytes], dict]:
         if resource["type"] == "tenant.media":
             resource["spec"]["advertisedAddress"] = facts.public_ipv4
         if resource["type"] == "tenant.route":
-            resource["spec"]["calledNumberPrefix"] = "+971" if direct else "+999"
+            resource["spec"]["calledNumberPrefix"] = (
+                "+971" if direct or private_pbx_poc else "+999"
+            )
     effective = compiler._extract_effective(envelope, facts)
     rendered = compiler._render_artifacts(effective, facts)
     for declaration in manifest["resourceSet"]["artifacts"]:
@@ -338,14 +380,14 @@ def _leaf(
     )
 
 
-def secret_material() -> dict[str, bytes]:
+def secret_material(node_fqdn: str = "sbc1.voice.vivolution.ae") -> dict[str, bytes]:
     public_key, public_ca = _ca("POC public root")
     fixture_key, fixture_ca = _ca("Vivolution fixture root")
     edge_cert, edge_key = _leaf(
         public_key,
         public_ca,
-        "sbc1.voice.vivolution.ae",
-        dns=["sbc1.voice.vivolution.ae", "*.sbc1.voice.vivolution.ae"],
+        node_fqdn,
+        dns=[node_fqdn, "*." + node_fqdn],
         ip=None,
         eku=ExtendedKeyUsageOID.SERVER_AUTH,
     )
@@ -1786,6 +1828,236 @@ class RuntimeTests(unittest.TestCase):
             "interface = 10.20.2.4!20.74.155.72\n",
             self.harness.layout.live_rtpengine.read_text(encoding="ascii"),
         )
+
+    def test_private_pbx_poc_is_signed_generation_three_live_microsoft_and_private_carrier(self) -> None:
+        handoff, facts_record_value = compiled_handoff(private_pbx_poc=True)
+        facts = NodeFacts.from_mapping(facts_record_value)
+        receipt = json.loads(handoff["verifier-receipt.json"])
+        authority_record = json.loads(
+            self.harness.layout.runtime_authority.read_bytes()
+        )
+        authority_record["profile"] = "DIRECT_ROUTING_PRIVATE_PBX_POC"
+        authority_record["generation"] = 3
+        private_pbx_secrets = {
+            name: content
+            for name, content in secret_material("sbc1.vivolution.ae").items()
+            if not name.startswith("fixture")
+        }
+        private_fake_root = x509.load_pem_x509_certificates(
+            private_pbx_secrets["microsoftCaBundlePem"]
+        )[0]
+        contracts.MICROSOFT_SIP_ROOT_SHA1 = frozenset(
+            {private_fake_root.fingerprint(hashes.SHA1()).hex().upper()}
+        )
+        authority_record["secretDigests"] = {
+            name: sha256_digest(content)
+            for name, content in private_pbx_secrets.items()
+        }
+        authority = contracts.RuntimeAuthority.from_mapping(authority_record)
+        direct_secrets = private_pbx_secrets
+        route = contracts.parse_compiler_fragment(
+            handoff["opensips-tenant.cfg"], facts
+        )
+        self.assertEqual(
+            (route.pbx_host, route.pbx_port), ("carrier.vivolution.ae", 5061)
+        )
+        self.assertEqual(
+            (
+                route.pbx_media_destination_port_start,
+                route.pbx_media_destination_port_end,
+            ),
+            (30000, 30127),
+        )
+
+        candidate = contracts.validate_candidate(
+            handoff,
+            canonical_bytes(facts_record_value),
+            canonical_bytes(authority.canonical_record()),
+            pinned_key_bytes(),
+            direct_secrets,
+            self.harness.layout.secrets,
+            expected_sequence=receipt["sequence"],
+            expected_manifest_digest=receipt["manifestDigest"],
+            accepted_runtime=contracts.AcceptedRuntimeState.bootstrap(),
+            now=NOW,
+        )
+        config = candidate.opensips_config.decode("ascii")
+        self.assertIn(
+            '$avp(tls_sip_dom) = "carrier.vivolution.ae";\n'
+            '    $du = "sip:10.20.1.4:5061;transport=tls";',
+            config,
+        )
+        self.assertIn(
+            'match_ip_address", "[pbx-outbound]10.20.1.4:5061"', config
+        )
+        self.assertIn(
+            'match_sip_domain", "[pbx-outbound]carrier.vivolution.ae"', config
+        )
+        for hub in contracts.TEAMS_HUBS:
+            self.assertIn(hub, config)
+        for forbidden in (
+            "pbx-fixture.invalid",
+            "10.20.1.4:16061",
+            "10.20.1.4:25061",
+            "fixture-client.crt",
+            "fixture-client.key",
+            "teams-fixture-outbound",
+        ):
+            self.assertNotIn(forbidden, config)
+        teams_to_pbx = config.split(
+            "route[VIVO_", 1
+        )[1].split("_TEAMS_TO_PBX]", 1)[1].split("route[VIVO_", 1)[0]
+        pbx_to_teams = config.split("_PBX_TO_TEAMS]", 1)[1].split(
+            "onreply_route[", 1
+        )[0]
+        self.assertIn(
+            "in-iface=public out-iface=private", teams_to_pbx
+        )
+        self.assertNotIn(
+            "in-iface=private out-iface=public", teams_to_pbx
+        )
+        self.assertIn(
+            "in-iface=private out-iface=public", pbx_to_teams
+        )
+        self.assertNotIn(
+            "in-iface=public out-iface=private", pbx_to_teams
+        )
+        self.assertIn(
+            "in-iface=private out-iface=public",
+            config.split("_TEAMS_TO_PBX_MEDIA_REPLY]", 1)[1].split(
+                "onreply_route[", 1
+            )[0],
+        )
+        self.assertIn(
+            "in-iface=public out-iface=private",
+            config.split("_PBX_TO_TEAMS_MEDIA_REPLY]", 1)[1].split(
+                "failure_route[", 1
+            )[0],
+        )
+        self.assertIn(
+            b"interface = private/10.20.2.4;public/10.20.2.4!20.74.155.72\n",
+            candidate.rtpengine_config,
+        )
+        nft = candidate.nftables_config.decode("ascii")
+        self.assertIn(
+            "ip daddr @pbx_source_ipv4 tcp dport 5061 ct state new accept", nft
+        )
+        self.assertIn(
+            "ip daddr @pbx_source_ipv4 udp sport 20000-20255 "
+            "udp dport 30000-30127 accept",
+            nft,
+        )
+        self.assertIn(
+            "ip saddr @pbx_source_ipv4 udp sport 30000-30127 "
+            "udp dport 20000-20255 accept",
+            nft,
+        )
+        self.assertIn(
+            "ip daddr @microsoft_signaling_source_ipv4 tcp dport 5061", nft
+        )
+        self.assertNotIn("udp dport { 21000-21127, 22000-22063 }", nft)
+
+        self.harness.layout.runtime_authority.write_bytes(
+            canonical_bytes(authority.canonical_record())
+        )
+        self.harness.layout.node_facts.write_bytes(canonical_bytes(facts_record_value))
+        for name, content in direct_secrets.items():
+            secret_path = self.harness.layout.secrets.as_mapping(authority.profile)[name]
+            secret_path.chmod(0o600)
+            secret_path.write_bytes(content)
+            secret_path.chmod(0o440)
+        for name, path in self.harness.layout.secrets.as_mapping(
+            "SYNTHETIC_PRIVATE"
+        ).items():
+            if name.startswith("fixture"):
+                path.unlink()
+        self.harness.write_handoff(
+            handoff, receipt["sequence"], receipt["manifestDigest"]
+        )
+        manager, _ = self.harness.manager()
+        evidence = manager.activate(receipt["sequence"], receipt["manifestDigest"])
+        self.assertEqual(
+            evidence["runtimeProfile"], "DIRECT_ROUTING_PRIVATE_PBX_POC"
+        )
+        self.assertEqual(evidence["rtpAdvertisedIpv4"], "20.74.155.72")
+        self.assertEqual(
+            [item["name"] for item in evidence["runtimeChecks"]],
+            [
+                "package-opensips-3.6.8",
+                "package-rtpengine-26.0.1.22",
+                "opensips-offline-parse",
+                "nftables-offline-parse",
+                "rtpengine-typed-config",
+                "systemd-nftables",
+                "systemd-rtpengine-daemon",
+                "systemd-opensips",
+                "opensips-active-parse",
+                "nft-owned-default-deny",
+                "rtpengine-ng-ping",
+                "listeners-exact",
+                "rtpengine-control-loopback",
+                "teams-three-hub-failover",
+                "private-pbx-poc-carrier-routing",
+                "rtpengine-private-public-directional-advertisement",
+                "nft-bounded-ingress",
+                "nft-bounded-egress",
+            ],
+        )
+
+    def test_private_pbx_poc_signed_identity_cannot_cross_root_profiles(self) -> None:
+        poc_handoff, poc_facts = compiled_handoff(private_pbx_poc=True)
+        poc_receipt = json.loads(poc_handoff["verifier-receipt.json"])
+        authority_record = json.loads(
+            self.harness.layout.runtime_authority.read_bytes()
+        )
+        authority_record["profile"] = "DIRECT_ROUTING_PRIVATE_PBX_POC"
+        authority_record["generation"] = 3
+        authority_record["secretDigests"] = {
+            name: digest
+            for name, digest in authority_record["secretDigests"].items()
+            if not name.startswith("fixture")
+        }
+        direct_secrets = {
+            name: content
+            for name, content in self.harness.secrets.items()
+            if not name.startswith("fixture")
+        }
+
+        production_authority = copy.deepcopy(authority_record)
+        production_authority["profile"] = "DIRECT_ROUTING"
+        with self.assertRaisesRegex(
+            RuntimeContractError, "cannot run under another root profile"
+        ):
+            contracts.validate_candidate(
+                poc_handoff,
+                canonical_bytes(poc_facts),
+                canonical_bytes(production_authority),
+                pinned_key_bytes(),
+                direct_secrets,
+                self.harness.layout.secrets,
+                expected_sequence=poc_receipt["sequence"],
+                expected_manifest_digest=poc_receipt["manifestDigest"],
+                accepted_runtime=contracts.AcceptedRuntimeState.bootstrap(),
+                now=NOW,
+            )
+
+        direct_handoff, direct_facts = compiled_handoff(direct=True)
+        direct_receipt = json.loads(direct_handoff["verifier-receipt.json"])
+        generation_two_poc = copy.deepcopy(authority_record)
+        generation_two_poc["generation"] = 2
+        with self.assertRaisesRegex(RuntimeContractError, "signed manifestId"):
+            contracts.validate_candidate(
+                direct_handoff,
+                canonical_bytes(direct_facts),
+                canonical_bytes(generation_two_poc),
+                pinned_key_bytes(),
+                direct_secrets,
+                self.harness.layout.secrets,
+                expected_sequence=direct_receipt["sequence"],
+                expected_manifest_digest=direct_receipt["manifestDigest"],
+                accepted_runtime=contracts.AcceptedRuntimeState.bootstrap(),
+                now=NOW,
+            )
 
     def test_tls_domain_rejects_unreviewed_or_default_cipher_lists(self) -> None:
         for cipher_list in ("", "DEFAULT", "HIGH", "ALL"):

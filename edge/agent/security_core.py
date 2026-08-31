@@ -119,6 +119,14 @@ RUNTIME_CHECKS_BY_PROFILE = MappingProxyType(
             "nft-bounded-ingress",
             "nft-bounded-egress",
         ),
+        "DIRECT_ROUTING_PRIVATE_PBX_POC": RUNTIME_CHECKS_COMMON
+        + (
+            "teams-three-hub-failover",
+            "private-pbx-poc-carrier-routing",
+            "rtpengine-private-public-directional-advertisement",
+            "nft-bounded-ingress",
+            "nft-bounded-egress",
+        ),
     }
 )
 DESIRED_STATE_SCHEMA_PATH = (
@@ -2034,9 +2042,14 @@ def _validate_runtime_success_evidence(
     if (
         not isinstance(advertised_address, ipaddress.IPv4Address)
         or str(advertised_address) != advertised
-        or profile not in {"SYNTHETIC_PRIVATE", "DIRECT_ROUTING"}
+        or profile
+        not in {
+            "SYNTHETIC_PRIVATE",
+            "DIRECT_ROUTING",
+            "DIRECT_ROUTING_PRIVATE_PBX_POC",
+        }
         or (
-            profile == "DIRECT_ROUTING"
+            profile in {"DIRECT_ROUTING", "DIRECT_ROUTING_PRIVATE_PBX_POC"}
             and advertised != local_context.expected_advertised_public_ip
         )
         or (profile == "SYNTHETIC_PRIVATE" and not advertised_address.is_private)

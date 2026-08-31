@@ -43,8 +43,8 @@ parameter-mutated plan fails before artifact output.
 - The signed RTPengine artifact is always canonical `privateIpv4!publicIpv4`.
   It never accepts a profile-selected advertised address. After independently
   validating those exact bytes and their digest, the privileged runtime alone
-  narrows `SYNTHETIC_PRIVATE` to `privateIpv4!privateIpv4`; Direct Routing
-  preserves `privateIpv4!publicIpv4`.
+  narrows `SYNTHETIC_PRIVATE` to `privateIpv4!privateIpv4`; both live
+  Microsoft profiles preserve `privateIpv4!publicIpv4`.
 - Optional synthetic-Teams sources must be RFC1918 CIDRs of /24 or narrower.
 - `ABSENT` and `DECOMMISSION` are rejected. Removal needs a separate, reviewed
   compiler and apply transaction.
@@ -71,10 +71,18 @@ path mapping, load `tm`, `rr`, `sipmsgops`, `proto_tls`, `tls_mgm` and
 in-dialog requests and CANCEL, and qualify Contact/FQDN rewriting and Microsoft
 SRTP/SDP behavior. It currently uses the primary Microsoft SIP hub only.
 The primary hub in this include is the deterministic routing seed. For a
-root-authorized `DIRECT_ROUTING` release, the privileged runtime expands it to
+root-authorized `DIRECT_ROUTING` or `DIRECT_ROUTING_PRIVATE_PBX_POC` release,
+the privileged runtime expands it to
 all three fixed Microsoft hubs and originates periodic OPTIONS to those hubs
 and the exact signed PBX peer. The compiler itself does not originate traffic,
 and a `SYNTHETIC_PRIVATE` runtime does not inherit those live-peer probes.
+
+The POC-only private-PBX profile is distinguished by signed manifest and
+resource IDs, not by compiler flags. Its signed connector retains logical SNI
+`carrier.vivolution.ae:5061` and UDP `30000-30127`; immutable node facts retain
+the exact `10.20.1.4/32` physical peer authority. Only the privileged runtime
+may bind those two authorities together. Production `DIRECT_ROUTING` keeps its
+existing globally routable PBX contract.
 
 The nftables artifact is typed merge input for the future fixed root helper,
 not raw text for `nft -f`. Shared TCP 5061 rules are explicitly listed as

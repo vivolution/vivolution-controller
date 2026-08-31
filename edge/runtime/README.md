@@ -53,9 +53,9 @@ The fixed files are:
 ```
 
 The three `fixture-*` files are additionally present only for
-`SYNTHETIC_PRIVATE`; a `DIRECT_ROUTING` authority has exactly the five common
-TLS digests and the runtime neither reads nor validates fixture paths. A Direct
-Routing replacement refuses retained fixture files instead of carrying
+`SYNTHETIC_PRIVATE`; both live Microsoft profiles have exactly the five common
+TLS digests and the runtime neither reads nor validates fixture paths. A live
+replacement refuses retained fixture files instead of carrying
 synthetic credentials into the live profile.
 
 The node facts and runtime authority must be root-owned mode `0600`; the
@@ -150,7 +150,32 @@ Microsoft tenant/domain, certificate, DNS, connectivity, and live call
 qualification steps. Its live RTPengine interface remains
 `privateIpv4!publicIpv4`, advertising the node's public media address.
 
-For `DIRECT_ROUTING` only, the runtime consumes the signed, compiler-carried
+`DIRECT_ROUTING_PRIVATE_PBX_POC` is a separately acknowledged generation-3+
+profile for the current test architecture. Microsoft-side behavior is the
+same live three-hub behavior as Direct Routing, but the other leg
+is deliberately private: signed SNI `carrier.vivolution.ae`, statically pinned
+to CP1 `10.20.1.4:5061`, with only `10.20.1.4/32` peer authority and UDP
+`30000-30127` carrier media. The Edge still listens for that leg on TCP 15061
+and uses its tenant-local UDP `20000-20255` allocation. Root validation requires
+the exact POC manifest/resource identity, generation, address, ports, `+971`
+route, PBX CA, and absence of fixture credentials before rendering anything.
+It cannot be selected by a production `DIRECT_ROUTING` manifest, and a POC
+manifest cannot run under either other root profile.
+
+Its live RTPengine interface is exactly
+`private/privateIpv4;public/privateIpv4!publicIpv4`. The Teams-to-PBX offer
+selects `public` to `private`, the PBX-to-Teams offer selects `private` to
+`public`, and their answer routes explicitly reverse those selections with the
+pinned OpenSIPS `in-iface`/`out-iface` grammar. Consequently SDP sent to CP1
+contains the private Edge address while SDP sent to Microsoft contains the
+public address; neither leg relies on Azure public-IP hairpinning.
+
+This profile is a POC bridge to a CP1-hosted carrier/PBX gateway. It does not
+relax Microsoft certificate, hub, public RTP, firewall, replay, signature, or
+transactional rollback rules. It also does not claim Microsoft certification,
+Twilio authorization, licensed-user policy propagation, or PSTN success.
+
+For both live Microsoft profiles, the runtime consumes the signed, compiler-carried
 `optionsIntervalSeconds` and renders one OpenSIPS `timer_route` at the exact
 reviewed 60-second interval. Each tick creates a stateful mutual-TLS OPTIONS
 request to all three fixed Microsoft hubs and to the exact signed PBX TLS

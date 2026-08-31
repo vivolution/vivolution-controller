@@ -20,6 +20,12 @@ from edge.controlplane.core import (
     DIRECT_ROUTING_LISTENER_RESOURCE_ID,
     DIRECT_ROUTING_MICROSOFT_TARGETS,
     DIRECT_ROUTING_PBX_TO_TEAMS_ROUTE_ID,
+    DIRECT_ROUTING_PRIVATE_PBX_POC_CONNECTOR_RESOURCE_ID,
+    DIRECT_ROUTING_PRIVATE_PBX_POC_DEPLOYMENT_MODE,
+    DIRECT_ROUTING_PRIVATE_PBX_POC_LISTENER_RESOURCE_ID,
+    DIRECT_ROUTING_PRIVATE_PBX_POC_PBX_TO_TEAMS_ROUTE_ID,
+    DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND,
+    DIRECT_ROUTING_PRIVATE_PBX_POC_TEAMS_TO_PBX_ROUTE_ID,
     DIRECT_ROUTING_PROFILE_KIND,
     DIRECT_ROUTING_TEAMS_TO_PBX_ROUTE_ID,
     SYNTHETIC_PROFILE_KIND,
@@ -36,6 +42,10 @@ ROOT = Path(__file__).resolve().parents[3]
 PROFILE_EXAMPLE = ROOT / "edge/controlplane/first-tenant-profile.example.json"
 DIRECT_PROFILE_TEMPLATE = (
     ROOT / "edge/controlplane/first-tenant-direct-routing-profile.template.json"
+)
+PRIVATE_PBX_POC_PROFILE_TEMPLATE = (
+    ROOT
+    / "edge/controlplane/first-tenant-direct-routing-private-pbx-poc-profile.template.json"
 )
 
 
@@ -125,6 +135,47 @@ def direct_profile_record() -> dict:
             "version": "version-direct-2026-08-30-01",
         },
     }
+    return record
+
+
+def private_pbx_poc_profile_record() -> dict:
+    record = direct_profile_record()
+    record["deploymentMode"] = DIRECT_ROUTING_PRIVATE_PBX_POC_DEPLOYMENT_MODE
+    record["kind"] = DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND
+    record["pbxConnector"] = {
+        "mediaDestinationPortEnd": 30127,
+        "mediaDestinationPortStart": 30000,
+        "optionsIntervalSeconds": 60,
+        "remoteHost": "carrier.vivolution.ae",
+        "remotePort": 5061,
+        "sourceIpv4Cidrs": ["10.20.1.4/32"],
+        "tlsServerName": "carrier.vivolution.ae",
+    }
+    record["secretReferences"] = {
+        "pbxClientCa": {
+            "offlineValiditySeconds": 31536000,
+            "secretRefId": "secret-private-pbx-poc-client-ca",
+            "version": "version-private-pbx-poc-ca",
+        },
+        "pbxClientIdentity": {
+            "offlineValiditySeconds": 31536000,
+            "secretRefId": "secret-private-pbx-poc-client-identity",
+            "version": "version-private-pbx-poc-client",
+        },
+        "pbxServerIdentity": {
+            "offlineValiditySeconds": 31536000,
+            "secretRefId": "secret-private-pbx-poc-server-identity",
+            "version": "version-private-pbx-poc-server",
+        },
+    }
+    return record
+
+
+def private_pbx_poc_facts_record(node_id: str = "sbc1") -> dict:
+    record = facts_record(node_id, direct_routing=True)
+    record["authorizedPbxSourceIpv4Cidrs"] = ["10.20.1.4/32"]
+    record["generation"] = 3
+    record["nodeFqdn"] = "{}.vivolution.ae".format(node_id)
     return record
 
 
@@ -222,6 +273,27 @@ class MaterializerTests(unittest.TestCase):
             [dict(item) for item in DIRECT_ROUTING_MICROSOFT_TARGETS],
         )
         with self.assertRaises(ControlPlaneError):
+            FirstTenantProfile.from_mapping(loaded)
+
+    def test_checked_in_private_pbx_poc_template_is_exact_and_explicit(self) -> None:
+        loaded = manifest_tool.load_json(PRIVATE_PBX_POC_PROFILE_TEMPLATE)
+        self.assertEqual(
+            loaded["deploymentMode"], DIRECT_ROUTING_PRIVATE_PBX_POC_DEPLOYMENT_MODE
+        )
+        self.assertEqual(loaded["kind"], DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND)
+        self.assertEqual(
+            loaded["pbxConnector"],
+            {
+                "mediaDestinationPortEnd": 30127,
+                "mediaDestinationPortStart": 30000,
+                "optionsIntervalSeconds": 60,
+                "remoteHost": "carrier.vivolution.ae",
+                "remotePort": 5061,
+                "sourceIpv4Cidrs": ["10.20.1.4/32"],
+                "tlsServerName": "carrier.vivolution.ae",
+            },
+        )
+        with self.assertRaisesRegex(ControlPlaneError, "m365TenantId"):
             FirstTenantProfile.from_mapping(loaded)
 
     def test_signature_agent_stage_and_compiler_are_compatible(self) -> None:
@@ -351,6 +423,106 @@ class MaterializerTests(unittest.TestCase):
             VerificationReceipt.from_mapping(staged.evidence()),
         )
         self.assertEqual(dict(compiled.artifacts), dict(release.artifacts))
+
+    def test_private_pbx_poc_materializes_distinct_signed_generation_three_release(self) -> None:
+        profile = FirstTenantProfile.from_mapping(private_pbx_poc_profile_record())
+        facts = NodeFacts.from_mapping(private_pbx_poc_facts_record())
+        release = self.materialize(profile=profile, facts=facts)
+        manifest = release.envelope["manifest"]
+
+        self.assertEqual(profile.kind, DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND)
+        self.assertEqual(
+            profile.deployment_mode, DIRECT_ROUTING_PRIVATE_PBX_POC_DEPLOYMENT_MODE
+        )
+        self.assertEqual(
+            manifest["manifestId"], "manifest-direct-private-pbx-poc-sbc1-000001"
+        )
+        resources = {
+            item["resourceId"]: item
+            for item in manifest["resourceSet"]["resources"]
+        }
+        self.assertTrue(
+            {
+                DIRECT_ROUTING_PRIVATE_PBX_POC_CONNECTOR_RESOURCE_ID,
+                DIRECT_ROUTING_PRIVATE_PBX_POC_LISTENER_RESOURCE_ID,
+                DIRECT_ROUTING_PRIVATE_PBX_POC_TEAMS_TO_PBX_ROUTE_ID,
+                DIRECT_ROUTING_PRIVATE_PBX_POC_PBX_TO_TEAMS_ROUTE_ID,
+            }.issubset(resources)
+        )
+        self.assertEqual(manifest["target"]["generation"], 3)
+        opensips = release.artifacts["opensips-tenant.cfg"].decode("ascii")
+        self.assertIn("sip:carrier.vivolution.ae:5061;transport=tls", opensips)
+        self.assertIn("sip:sip.pstnhub.microsoft.com:5061;transport=tls", opensips)
+        self.assertNotIn("fixture", release.envelope_bytes.decode("utf-8"))
+        self.assertEqual(
+            release.evidence["pocBoundary"],
+            "PUBLIC_MICROSOFT_DIRECT_ROUTING_WITH_FIXED_PRIVATE_CP1_PBX_NO_PRODUCTION_CLAIM",
+        )
+        self.assertEqual(
+            release.evidence["profileKind"],
+            DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND,
+        )
+
+        public_bytes = base64.b64decode(
+            release.public_key_metadata["publicKeyBase64"], validate=True
+        )
+        state_directory = self.root / "private-pbx-poc-agent-state"
+        state_directory.mkdir(mode=0o700)
+        staged = security_core.verify_and_stage(
+            release.envelope_bytes,
+            local_context=local_context(facts),
+            keyring=security_core.PinnedKeyring({KEY_ID: public_bytes}),
+            state_directory=state_directory,
+            now=ISSUED,
+        )
+        compiled = compile_tenant_bundle(
+            release.envelope,
+            facts,
+            VerificationReceipt.from_mapping(staged.evidence()),
+        )
+        self.assertEqual(dict(compiled.artifacts), dict(release.artifacts))
+
+    def test_private_pbx_poc_rejects_every_cross_profile_or_generation_input(self) -> None:
+        for field, candidate in (
+            ("remoteHost", "pbx-fixture.invalid"),
+            ("tlsServerName", "pbx-fixture.invalid"),
+            ("remotePort", 16061),
+            ("sourceIpv4Cidrs", ["8.8.8.8/32"]),
+            ("mediaDestinationPortStart", 21000),
+            ("mediaDestinationPortEnd", 21127),
+        ):
+            with self.subTest(field=field):
+                record = private_pbx_poc_profile_record()
+                record["pbxConnector"][field] = candidate
+                with self.assertRaises(ControlPlaneError):
+                    FirstTenantProfile.from_mapping(record)
+
+        fixture_secret = private_pbx_poc_profile_record()
+        fixture_secret["secretReferences"]["pbxClientIdentity"]["version"] = (
+            "version-fixture-client"
+        )
+        with self.assertRaisesRegex(ControlPlaneError, "must not reference fixture"):
+            FirstTenantProfile.from_mapping(fixture_secret)
+
+        generation_two = private_pbx_poc_facts_record()
+        generation_two["generation"] = 2
+        with self.assertRaisesRegex(ControlPlaneError, "generation 3 or later"):
+            self.materialize(
+                profile=FirstTenantProfile.from_mapping(
+                    private_pbx_poc_profile_record()
+                ),
+                facts=NodeFacts.from_mapping(generation_two),
+            )
+
+        legacy_gateway = private_pbx_poc_facts_record()
+        legacy_gateway["nodeFqdn"] = "sbc1.voice.vivolution.ae"
+        with self.assertRaisesRegex(ControlPlaneError, "root Microsoft gateway FQDN"):
+            self.materialize(
+                profile=FirstTenantProfile.from_mapping(
+                    private_pbx_poc_profile_record()
+                ),
+                facts=NodeFacts.from_mapping(legacy_gateway),
+            )
 
     def test_direct_routing_rejects_non_real_or_ambiguous_pbx_names(self) -> None:
         bad_names = (
@@ -495,7 +667,7 @@ class MaterializerTests(unittest.TestCase):
 
         synthetic_lineage = copy.deepcopy(record)
         synthetic_lineage["acceptedState"]["profileKind"] = SYNTHETIC_PROFILE_KIND
-        with self.assertRaisesRegex(ControlPlaneError, "prove Direct Routing lineage"):
+        with self.assertRaisesRegex(ControlPlaneError, "prove exact profile lineage"):
             FirstTenantProfile.from_mapping(synthetic_lineage)
 
     def test_rendering_and_signing_are_deterministic_apart_from_timestamps(

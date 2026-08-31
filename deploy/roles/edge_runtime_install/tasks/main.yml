@@ -12,7 +12,7 @@
       - edge_m365_tenant_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
       - edge_m365_tenant_id != '00000000-0000-0000-0000-000000000000'
       - edge_generation is number
-      - edge_runtime_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING']
+      - edge_runtime_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
       - (inventory_hostname == 'sbc1' and edge_slot == 'A') or (inventory_hostname == 'sbc2' and edge_slot == 'B')
       - edge_private_ipv4 == edge_effective_private_ipv4
       - edge_cluster_media_port_start | int == 20000
@@ -51,6 +51,24 @@
       SYNTHETIC_PRIVATE requires a positive immutable node generation, empty
       compiler synthetic-source facts, and the fixed CP1 fixture identity.
   when: edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+
+- name: Require the exact POC-only private PBX Direct Routing boundary
+  ansible.builtin.assert:
+    that:
+      - edge_generation | int >= 3
+      - edge_synthetic_teams_source_ipv4_cidrs == []
+      - edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32']
+      - edge_pbx_media_destination_port_start | int == 30000
+      - edge_pbx_media_destination_port_end | int == 30127
+      - edge_control_plane_ipv4_cidrs == edge_pbx_source_ipv4_cidrs
+      - edge_direct_pbx_ca_bundle_src is match('^/')
+      - edge_direct_pbx_ca_bundle_sha256 is match('^[0-9a-f]{64}$')
+      - edge_direct_private_pbx_poc_install_acknowledgement == 'INSTALL_DIRECT_ROUTING_PRIVATE_PBX_POC_REPLACEMENT_GENERATION'
+    fail_msg: >-
+      DIRECT_ROUTING_PRIVATE_PBX_POC is an explicitly acknowledged generation-3
+      POC only. It pins carrier.vivolution.ae to CP1 10.20.1.4:5061 and UDP
+      30000-30127 while keeping synthetic Teams authority empty.
+  when: edge_runtime_profile == 'DIRECT_ROUTING_PRIVATE_PBX_POC'
 
 - name: Require an explicit Direct Routing replacement generation
   ansible.builtin.assert:
@@ -103,7 +121,7 @@
     - /etc/vivolution-edge/tls/fixture-client.crt
     - /etc/vivolution-edge/tls/fixture-client.key
   register: edge_runtime_direct_forbidden_fixture_paths
-  when: edge_runtime_profile == 'DIRECT_ROUTING'
+  when: edge_runtime_profile in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
 
 - name: Refuse Direct Routing installation over retained synthetic secrets
   ansible.builtin.assert:
@@ -114,7 +132,7 @@
       A synthetic fixture credential exists on the Direct Routing target.
       Reimage the replacement instead of converting this node in place.
   loop: "{{ edge_runtime_direct_forbidden_fixture_paths.results | default([]) }}"
-  when: edge_runtime_profile == 'DIRECT_ROUTING'
+  when: edge_runtime_profile in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
 
 - name: Validate the pinned raw Ed25519 public key
   ansible.builtin.command:
@@ -188,7 +206,7 @@
   delegate_to: localhost
   become: false
   register: edge_runtime_direct_pbx_ca_source
-  when: edge_runtime_profile == 'DIRECT_ROUTING'
+  when: edge_runtime_profile in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
 
 - name: Require the exact single-link Direct Routing PBX trust bundle
   ansible.builtin.assert:
@@ -204,7 +222,7 @@
       Direct Routing PBX trust is missing, linked, oversized, or differs from
       its reviewed controller-side SHA-256 digest.
   no_log: true
-  when: edge_runtime_profile == 'DIRECT_ROUTING'
+  when: edge_runtime_profile in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
 
 - name: Create the dedicated unprivileged Edge Agent group
   ansible.builtin.group:
@@ -450,7 +468,7 @@
     mode: '0440'
     force: true
   no_log: true
-  when: edge_runtime_profile == 'DIRECT_ROUTING'
+  when: edge_runtime_profile in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
 
 - name: Extract the exact seven reviewed Microsoft SIP roots
   ansible.builtin.command:
@@ -495,7 +513,9 @@
   ansible.builtin.set_fact:
     edge_runtime_tls_inventory: >-
       {{ edge_runtime_common_tls_inventory +
-         (edge_runtime_synthetic_tls_inventory if edge_runtime_profile == 'SYNTHETIC_PRIVATE' else []) }}
+         (edge_runtime_synthetic_tls_inventory
+          if edge_runtime_profile == 'SYNTHETIC_PRIVATE'
+          else []) }}
 
 - name: Calculate remote SHA-256 digests without following TLS links
   ansible.builtin.stat:

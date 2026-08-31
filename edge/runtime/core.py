@@ -71,6 +71,13 @@ _PROFILE_SUCCESS_RUNTIME_CHECKS = {
         "nft-bounded-ingress",
         "nft-bounded-egress",
     ),
+    "DIRECT_ROUTING_PRIVATE_PBX_POC": (
+        "teams-three-hub-failover",
+        "private-pbx-poc-carrier-routing",
+        "rtpengine-private-public-directional-advertisement",
+        "nft-bounded-ingress",
+        "nft-bounded-egress",
+    ),
 }
 
 
@@ -1098,6 +1105,76 @@ class RuntimeManager:
                         "fixture client leaf was assigned to a public Edge server listener"
                     )
             return
+        if (
+            candidate.authority.profile
+            == contracts.DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE
+        ):
+            for hub in contracts.TEAMS_HUBS:
+                if hub.encode("ascii") not in content:
+                    raise RuntimeApplyError(
+                        "private-PBX POC OpenSIPS config lacks a fixed Teams hub identity"
+                    )
+            for token in (
+                b"TEAMS_FAILOVER",
+                b"10.20.1.4:5061",
+                b"carrier.vivolution.ae",
+                self.layout.secrets.edge_certificate_chain_pem.name.encode("ascii"),
+                self.layout.secrets.edge_private_key_pem.name.encode("ascii"),
+                self.layout.secrets.pbx_ca_bundle_pem.name.encode("ascii"),
+                'force_send_socket("tls:{}:5061")'.format(
+                    candidate.facts.private_ipv4
+                ).encode("ascii"),
+                'force_send_socket("tls:{}:15061")'.format(
+                    candidate.facts.private_ipv4
+                ).encode("ascii"),
+            ):
+                if token not in content:
+                    raise RuntimeApplyError(
+                        "private-PBX POC OpenSIPS config lacks its mixed live/private identity boundary"
+                    )
+            directional_offers = (
+                b'rtpengine_offer("replace-origin replace-session-connection ICE=remove in-iface=public out-iface=private")',
+                b'rtpengine_offer("replace-origin replace-session-connection ICE=remove in-iface=private out-iface=public")',
+            )
+            if any(content.count(token) != 1 for token in directional_offers):
+                raise RuntimeApplyError(
+                    "private-PBX POC OpenSIPS config lacks exact bidirectional media realms"
+                )
+            if content.count(
+                b'rtpengine_offer("replace-origin replace-session-connection ICE=remove")'
+            ):
+                raise RuntimeApplyError(
+                    "private-PBX POC OpenSIPS config retained an unscoped media offer"
+                )
+            directional_answers = (
+                b'rtpengine_answer("replace-origin replace-session-connection ICE=remove in-iface=private out-iface=public")',
+                b'rtpengine_answer("replace-origin replace-session-connection ICE=remove in-iface=public out-iface=private")',
+            )
+            if any(content.count(token) != 1 for token in directional_answers):
+                raise RuntimeApplyError(
+                    "private-PBX POC OpenSIPS config lacks exact reverse media realms"
+                )
+            if content.count(
+                b'rtpengine_answer("replace-origin replace-session-connection ICE=remove")'
+            ):
+                raise RuntimeApplyError(
+                    "private-PBX POC OpenSIPS config retained an unscoped media answer"
+                )
+            if any(
+                token in content
+                for token in (
+                    b"10.20.1.4:16061",
+                    b"10.20.1.4:25061",
+                    b"pbx-fixture.invalid",
+                    b"fixture-client.crt",
+                    b"fixture-client.key",
+                    b"teams-fixture-outbound",
+                )
+            ):
+                raise RuntimeApplyError(
+                    "private-PBX POC OpenSIPS config retained synthetic fixture authority"
+                )
+            return
         for hub in contracts.TEAMS_HUBS:
             if hub.encode("ascii") not in content:
                 raise RuntimeApplyError(
@@ -1125,15 +1202,23 @@ class RuntimeManager:
     def _assert_rtpengine_profile_advertisement(
         self, candidate: ValidatedCandidate, content: bytes
     ) -> None:
-        advertised_ipv4 = (
-            candidate.facts.private_ipv4
-            if candidate.authority.profile == "SYNTHETIC_PRIVATE"
-            else candidate.facts.public_ipv4
-        )
-        expected = "interface = {}!{}\n".format(
-            candidate.facts.private_ipv4, advertised_ipv4
-        ).encode("ascii")
-        if content.count(expected) != 1:
+        if (
+            candidate.authority.profile
+            == contracts.DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE
+        ):
+            expected = "interface = private/{0};public/{0}!{1}\n".format(
+                candidate.facts.private_ipv4, candidate.facts.public_ipv4
+            ).encode("ascii")
+        else:
+            advertised_ipv4 = (
+                candidate.facts.private_ipv4
+                if candidate.authority.profile == "SYNTHETIC_PRIVATE"
+                else candidate.facts.public_ipv4
+            )
+            expected = "interface = {}!{}\n".format(
+                candidate.facts.private_ipv4, advertised_ipv4
+            ).encode("ascii")
+        if content.count(expected) != 1 or content.count(b"interface = ") != 1:
             raise RuntimeApplyError(
                 "active RTPengine interface differs from the trusted runtime profile"
             )
@@ -1464,6 +1549,17 @@ class RuntimeManager:
         if candidate.authority.profile == "SYNTHETIC_PRIVATE":
             gates.append("synthetic-private-fixture-routing")
             media_gate = "rtpengine-synthetic-private-advertisement"
+        elif (
+            candidate.authority.profile
+            == contracts.DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE
+        ):
+            gates.extend(
+                (
+                    "teams-three-hub-failover",
+                    "private-pbx-poc-carrier-routing",
+                )
+            )
+            media_gate = "rtpengine-private-public-directional-advertisement"
         else:
             gates.append("teams-three-hub-failover")
             media_gate = "rtpengine-direct-public-advertisement"
@@ -1657,7 +1753,8 @@ class RuntimeManager:
             facts.private_ipv4
             if profile == "SYNTHETIC_PRIVATE"
             else facts.public_ipv4
-            if profile == "DIRECT_ROUTING"
+            if profile
+            in {"DIRECT_ROUTING", "DIRECT_ROUTING_PRIVATE_PBX_POC"}
             else None
         )
         if evidence["rtpAdvertisedIpv4"] != expected_advertised:
@@ -1779,7 +1876,7 @@ class RuntimeManager:
         if (runtime_profile is None) != (rtp_advertised_ipv4 is None):
             raise RuntimeSecurityError("runtime evidence profile and RTP address must be recorded together")
         if runtime_profile is not None and rtp_advertised_ipv4 is not None:
-            if runtime_profile not in {"SYNTHETIC_PRIVATE", "DIRECT_ROUTING"}:
+            if runtime_profile not in contracts.SUPPORTED_RUNTIME_PROFILES:
                 raise RuntimeSecurityError("runtime evidence profile is invalid")
             try:
                 packed_address = socket.inet_pton(socket.AF_INET, rtp_advertised_ipv4)

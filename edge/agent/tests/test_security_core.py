@@ -142,7 +142,9 @@ def envelope_bytes(envelope: dict) -> bytes:
     return manifest_tool.canonical_json_bytes(envelope)
 
 
-def runtime_success_evidence(envelope: dict) -> dict:
+def runtime_success_evidence(
+    envelope: dict, *, profile: str = "DIRECT_ROUTING"
+) -> dict:
     plan = security_core._build_local_health_gate_plan(envelope)
     results = []
     for gate in plan["healthGates"]:
@@ -179,9 +181,9 @@ def runtime_success_evidence(envelope: dict) -> dict:
         "runtimeApplied": True,
         "runtimeChecks": [
             {"name": name, "status": "PASSED"}
-            for name in security_core.RUNTIME_CHECKS_BY_PROFILE["DIRECT_ROUTING"]
+            for name in security_core.RUNTIME_CHECKS_BY_PROFILE[profile]
         ],
-        "runtimeProfile": "DIRECT_ROUTING",
+        "runtimeProfile": profile,
         "runtimeReleaseDigest": "sha256:" + "2" * 64,
         "sequence": envelope["manifest"]["sequence"],
         "status": security_core.RUNTIME_SUCCESS_STATUS,
@@ -541,6 +543,74 @@ class SecurityCoreTests(unittest.TestCase):
                 self.assertIsNotNone(self.load_state()["pendingCandidate"])
 
         self.commit(envelope)
+
+    def test_private_pbx_poc_runtime_evidence_requires_exact_checks_and_public_rtp(self) -> None:
+        envelope = make_envelope(self.private_key)
+        self.stage(envelope)
+        evidence = runtime_success_evidence(
+            envelope, profile="DIRECT_ROUTING_PRIVATE_PBX_POC"
+        )
+        self.assertIn(
+            {
+                "name": "private-pbx-poc-carrier-routing",
+                "status": "PASSED",
+            },
+            evidence["runtimeChecks"],
+        )
+        self.assertIn(
+            {
+                "name": "rtpengine-private-public-directional-advertisement",
+                "status": "PASSED",
+            },
+            evidence["runtimeChecks"],
+        )
+        self.commit(envelope, evidence=evidence)
+        self.assertEqual(self.load_state()["activeLastKnownGood"]["sequence"], 1)
+
+        second = make_envelope(
+            self.private_key, sequence=2, previous_envelope=envelope
+        )
+        self.stage(second)
+        wrong_checks = runtime_success_evidence(
+            second, profile="DIRECT_ROUTING_PRIVATE_PBX_POC"
+        )
+        wrong_checks["runtimeChecks"] = [
+            {"name": name, "status": "PASSED"}
+            for name in security_core.RUNTIME_CHECKS_BY_PROFILE["DIRECT_ROUTING"]
+        ]
+        wrong_checks = reseal_runtime_evidence(wrong_checks)
+        self.write_runtime_evidence(wrong_checks)
+        with self.assertRaisesRegex(
+            security_core.StateLifecycleError, "runtime check"
+        ):
+            self.commit_with_values(
+                {
+                    "local_context": local_context(),
+                    "state_directory": self.state_directory,
+                    "sequence": 2,
+                    "manifest_digest": second["manifestDigest"],
+                    "runtime_evidence_digest": wrong_checks["evidenceDigest"],
+                }
+            )
+
+        private_rtp = runtime_success_evidence(
+            second, profile="DIRECT_ROUTING_PRIVATE_PBX_POC"
+        )
+        private_rtp["rtpAdvertisedIpv4"] = "10.20.2.4"
+        private_rtp = reseal_runtime_evidence(private_rtp)
+        self.write_runtime_evidence(private_rtp)
+        with self.assertRaisesRegex(
+            security_core.StateLifecycleError, "advertised address"
+        ):
+            self.commit_with_values(
+                {
+                    "local_context": local_context(),
+                    "state_directory": self.state_directory,
+                    "sequence": 2,
+                    "manifest_digest": second["manifestDigest"],
+                    "runtime_evidence_digest": private_rtp["evidenceDigest"],
+                }
+            )
 
     def test_commit_requires_exact_immutable_runtime_evidence_file(self) -> None:
         envelope = make_envelope(self.private_key)

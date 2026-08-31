@@ -32,8 +32,14 @@ from edge.schema import manifest_tool
 PROFILE_API_VERSION = "edge.vivolution.ae/control-plane-profile/v0.1"
 SYNTHETIC_PROFILE_KIND = "FirstTenantSyntheticFixtureProfile"
 DIRECT_ROUTING_PROFILE_KIND = "FirstTenantDirectRoutingProfile"
+DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND = (
+    "FirstTenantDirectRoutingPrivatePbxPocProfile"
+)
 SYNTHETIC_DEPLOYMENT_MODE = "CP1_SYNTHETIC_NO_PSTN"
 DIRECT_ROUTING_DEPLOYMENT_MODE = "DIRECT_ROUTING"
+DIRECT_ROUTING_PRIVATE_PBX_POC_DEPLOYMENT_MODE = (
+    "DIRECT_ROUTING_PRIVATE_PBX_POC"
+)
 # Backwards-compatible names retain the original bounded fixture contract.
 PROFILE_KIND = SYNTHETIC_PROFILE_KIND
 DEPLOYMENT_MODE = SYNTHETIC_DEPLOYMENT_MODE
@@ -44,6 +50,11 @@ FIXTURE_PBX_PORT = 16061
 FIXTURE_PBX_SOURCE_CIDRS = ("10.20.1.4/32",)
 FIXTURE_PBX_MEDIA_DESTINATION_PORT_START = 21000
 FIXTURE_PBX_MEDIA_DESTINATION_PORT_END = 21127
+PRIVATE_PBX_POC_HOST = "carrier.vivolution.ae"
+PRIVATE_PBX_POC_PORT = 5061
+PRIVATE_PBX_POC_SOURCE_CIDRS = ("10.20.1.4/32",)
+PRIVATE_PBX_POC_MEDIA_DESTINATION_PORT_START = 30000
+PRIVATE_PBX_POC_MEDIA_DESTINATION_PORT_END = 30127
 MAX_DIRECT_PBX_MEDIA_DESTINATION_PORTS = 4096
 _RESERVED_SIGNALING_AND_CONTROL_PORTS = frozenset(
     {
@@ -71,10 +82,22 @@ SYNTHETIC_CONNECTOR_RESOURCE_ID = "connector-pbx-fixture"
 SYNTHETIC_LISTENER_RESOURCE_ID = "listener-pbx-fixture"
 DIRECT_ROUTING_CONNECTOR_RESOURCE_ID = "connector-pbx-direct-routing"
 DIRECT_ROUTING_LISTENER_RESOURCE_ID = "listener-pbx-direct-routing"
+DIRECT_ROUTING_PRIVATE_PBX_POC_CONNECTOR_RESOURCE_ID = (
+    "connector-pbx-direct-private-poc"
+)
+DIRECT_ROUTING_PRIVATE_PBX_POC_LISTENER_RESOURCE_ID = (
+    "listener-pbx-direct-private-poc"
+)
 SYNTHETIC_TEAMS_TO_PBX_ROUTE_ID = "route-teams-to-pbx"
 SYNTHETIC_PBX_TO_TEAMS_ROUTE_ID = "route-pbx-to-teams"
 DIRECT_ROUTING_TEAMS_TO_PBX_ROUTE_ID = "route-direct-teams-to-pbx"
 DIRECT_ROUTING_PBX_TO_TEAMS_ROUTE_ID = "route-direct-pbx-to-teams"
+DIRECT_ROUTING_PRIVATE_PBX_POC_TEAMS_TO_PBX_ROUTE_ID = (
+    "route-direct-private-poc-teams-to-pbx"
+)
+DIRECT_ROUTING_PRIVATE_PBX_POC_PBX_TO_TEAMS_ROUTE_ID = (
+    "route-direct-private-poc-pbx-to-teams"
+)
 
 _BASE_PROFILE_FIELDS = {
     "acceptedState",
@@ -101,6 +124,12 @@ _TARGET_FIELDS = {
 }
 _ACCEPTED_FIELDS = {"artifactDigests", "manifestDigest", "sequence"}
 _DIRECT_ROUTING_ACCEPTED_FIELDS = _ACCEPTED_FIELDS | {"generation", "profileKind"}
+_LIVE_DIRECT_PROFILE_KINDS = frozenset(
+    {
+        DIRECT_ROUTING_PROFILE_KIND,
+        DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND,
+    }
+)
 _PBX_FIELDS = {
     "mediaDestinationPortEnd",
     "mediaDestinationPortStart",
@@ -361,10 +390,15 @@ class FirstTenantProfile:
         elif kind == DIRECT_ROUTING_PROFILE_KIND:
             fields = _DIRECT_ROUTING_PROFILE_FIELDS
             expected_mode = DIRECT_ROUTING_DEPLOYMENT_MODE
+        elif kind == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND:
+            fields = _DIRECT_ROUTING_PROFILE_FIELDS
+            expected_mode = DIRECT_ROUTING_PRIVATE_PBX_POC_DEPLOYMENT_MODE
         else:
             _fail(
-                "profile kind must be {} or {}".format(
-                    SYNTHETIC_PROFILE_KIND, DIRECT_ROUTING_PROFILE_KIND
+                "profile kind must be {}, {}, or {}".format(
+                    SYNTHETIC_PROFILE_KIND,
+                    DIRECT_ROUTING_PROFILE_KIND,
+                    DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND,
                 )
             )
         profile = _exact_mapping(value, fields, "first-tenant profile")
@@ -399,7 +433,7 @@ class FirstTenantProfile:
         else:
             accepted_fields = (
                 _DIRECT_ROUTING_ACCEPTED_FIELDS
-                if kind == DIRECT_ROUTING_PROFILE_KIND
+                if kind in _LIVE_DIRECT_PROFILE_KINDS
                 else _ACCEPTED_FIELDS
             )
             accepted = _exact_mapping(accepted, accepted_fields, "acceptedState")
@@ -420,15 +454,17 @@ class FirstTenantProfile:
             )
             if tuple(sorted(set(normalized))) != normalized:
                 _fail("acceptedState.artifactDigests must be unique and sorted")
-            if kind == DIRECT_ROUTING_PROFILE_KIND:
-                if accepted["profileKind"] != DIRECT_ROUTING_PROFILE_KIND:
+            if kind in _LIVE_DIRECT_PROFILE_KINDS:
+                if accepted["profileKind"] != kind:
                     _fail(
-                        "direct-routing acceptedState.profileKind must prove Direct Routing lineage"
+                        "direct-routing acceptedState.profileKind must prove exact profile lineage"
                     )
                 _integer(
                     accepted["generation"],
                     "direct-routing acceptedState.generation",
-                    2,
+                    3
+                    if kind == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND
+                    else 2,
                     2**31 - 1,
                 )
 
@@ -470,7 +506,7 @@ class FirstTenantProfile:
                         FIXTURE_PBX_MEDIA_DESTINATION_PORT_END,
                     )
                 )
-        else:
+        elif kind == DIRECT_ROUTING_PROFILE_KIND:
             remote_host = _direct_routing_pbx_fqdn(
                 pbx["remoteHost"], "direct-routing PBX remoteHost"
             )
@@ -491,6 +527,47 @@ class FirstTenantProfile:
                 label="direct-routing PBX",
             )
             _validate_direct_routing_microsoft_targets(profile["microsoftTargets"])
+        else:
+            if (
+                pbx["remoteHost"] != PRIVATE_PBX_POC_HOST
+                or pbx["tlsServerName"] != PRIVATE_PBX_POC_HOST
+            ):
+                _fail(
+                    "private-PBX Direct Routing POC remoteHost and tlsServerName "
+                    "must both be {}".format(PRIVATE_PBX_POC_HOST)
+                )
+            if pbx["remotePort"] != PRIVATE_PBX_POC_PORT or isinstance(
+                pbx["remotePort"], bool
+            ):
+                _fail(
+                    "private-PBX Direct Routing POC remotePort must be {}".format(
+                        PRIVATE_PBX_POC_PORT
+                    )
+                )
+            if (
+                not isinstance(pbx["sourceIpv4Cidrs"], list)
+                or tuple(pbx["sourceIpv4Cidrs"]) != PRIVATE_PBX_POC_SOURCE_CIDRS
+            ):
+                _fail(
+                    "private-PBX Direct Routing POC source authority must be exactly {}".format(
+                        list(PRIVATE_PBX_POC_SOURCE_CIDRS)
+                    )
+                )
+            if (
+                pbx["mediaDestinationPortStart"],
+                pbx["mediaDestinationPortEnd"],
+            ) != (
+                PRIVATE_PBX_POC_MEDIA_DESTINATION_PORT_START,
+                PRIVATE_PBX_POC_MEDIA_DESTINATION_PORT_END,
+            ):
+                _fail(
+                    "private-PBX Direct Routing POC media destination range must be "
+                    "exactly {}-{}".format(
+                        PRIVATE_PBX_POC_MEDIA_DESTINATION_PORT_START,
+                        PRIVATE_PBX_POC_MEDIA_DESTINATION_PORT_END,
+                    )
+                )
+            _validate_direct_routing_microsoft_targets(profile["microsoftTargets"])
         if pbx["optionsIntervalSeconds"] != 60 or isinstance(
             pbx["optionsIntervalSeconds"], bool
         ):
@@ -503,7 +580,7 @@ class FirstTenantProfile:
             or manifest_tool.E164_PREFIX_RE.fullmatch(prefix) is None
         ):
             _fail("routing.calledNumberPrefix must be an E.164 prefix")
-        if kind == DIRECT_ROUTING_PROFILE_KIND and prefix != "+971":
+        if kind in _LIVE_DIRECT_PROFILE_KINDS and prefix != "+971":
             _fail("direct-routing calledNumberPrefix must be exactly +971")
         if routing["priority"] != 100 or isinstance(routing["priority"], bool):
             _fail("routing.priority must be the reviewed POC value 100")
@@ -514,7 +591,7 @@ class FirstTenantProfile:
         max_sessions = _integer(media["maxSessions"], "media.maxSessions", 1, 64)
         if media["rtcpMux"] is not False:
             _fail("media.rtcpMux must be false for the reviewed first-tenant profiles")
-        if kind == DIRECT_ROUTING_PROFILE_KIND:
+        if kind in _LIVE_DIRECT_PROFILE_KINDS:
             remote_media_ports = (
                 pbx["mediaDestinationPortEnd"]
                 - pbx["mediaDestinationPortStart"]
@@ -565,7 +642,7 @@ class FirstTenantProfile:
                 _fail("secret reference identifiers must be unique")
             seen_secret_ids.add(ref_id)
             version = _identifier(reference["version"], "{}.version".format(role))
-            if kind == DIRECT_ROUTING_PROFILE_KIND and (
+            if kind in _LIVE_DIRECT_PROFILE_KINDS and (
                 "fixture" in ref_id or "fixture" in version
             ):
                 _fail(
@@ -598,7 +675,7 @@ class FirstTenantProfile:
 
     @property
     def is_direct_routing(self) -> bool:
-        return self.kind == DIRECT_ROUTING_PROFILE_KIND
+        return self.kind in _LIVE_DIRECT_PROFILE_KINDS
 
 
 def _secure_flags(*flags: int) -> int:
@@ -852,6 +929,15 @@ def _profile_resource_ids(profile: Mapping[str, Any]) -> Mapping[str, str]:
                 "teamsToPbxRoute": DIRECT_ROUTING_TEAMS_TO_PBX_ROUTE_ID,
             }
         )
+    if profile["kind"] == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND:
+        return MappingProxyType(
+            {
+                "connector": DIRECT_ROUTING_PRIVATE_PBX_POC_CONNECTOR_RESOURCE_ID,
+                "listener": DIRECT_ROUTING_PRIVATE_PBX_POC_LISTENER_RESOURCE_ID,
+                "pbxToTeamsRoute": DIRECT_ROUTING_PRIVATE_PBX_POC_PBX_TO_TEAMS_ROUTE_ID,
+                "teamsToPbxRoute": DIRECT_ROUTING_PRIVATE_PBX_POC_TEAMS_TO_PBX_ROUTE_ID,
+            }
+        )
     _fail("validated profile has an unknown kind")
 
 
@@ -1095,9 +1181,15 @@ def _build_manifest(
         "issuedAt": issued_text,
         "lifecycle": "ACTIVE",
         "manifestId": (
-            "manifest-direct-{}-{:06d}".format(facts.node_id, sequence)
-            if profile["kind"] == DIRECT_ROUTING_PROFILE_KIND
-            else "manifest-{}-{:06d}".format(facts.node_id, sequence)
+            "manifest-direct-private-pbx-poc-{}-{:06d}".format(
+                facts.node_id, sequence
+            )
+            if profile["kind"] == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND
+            else (
+                "manifest-direct-{}-{:06d}".format(facts.node_id, sequence)
+                if profile["kind"] == DIRECT_ROUTING_PROFILE_KIND
+                else "manifest-{}-{:06d}".format(facts.node_id, sequence)
+            )
         ),
         "previousDigest": previous_digest,
         "resourceSet": {
@@ -1191,10 +1283,16 @@ def _bind_profile_to_facts(profile: Mapping[str, Any], facts: NodeFacts) -> None
                     FIXTURE_PBX_MEDIA_DESTINATION_PORT_END,
                 )
             )
-    elif profile["kind"] == DIRECT_ROUTING_PROFILE_KIND:
-        if facts.generation < 2:
+    elif profile["kind"] in _LIVE_DIRECT_PROFILE_KINDS:
+        minimum_generation = (
+            3
+            if profile["kind"] == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND
+            else 2
+        )
+        if facts.generation < minimum_generation:
             _fail(
-                "direct-routing materialization requires replacement node generation 2 or later"
+                "direct-routing materialization requires replacement node generation "
+                "{} or later".format(minimum_generation)
             )
         expected_pbx_sources = tuple(profile["pbxConnector"]["sourceIpv4Cidrs"])
         if facts.authorized_pbx_source_ipv4_cidrs != expected_pbx_sources:
@@ -1219,6 +1317,24 @@ def _bind_profile_to_facts(profile: Mapping[str, Any], facts: NodeFacts) -> None
             _fail(
                 "direct-routing acceptedState generation must equal the replacement node generation"
             )
+        if profile["kind"] == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND:
+            if facts.node_fqdn != "{}.vivolution.ae".format(facts.node_id):
+                _fail(
+                    "private-PBX Direct Routing POC node facts require the exact root Microsoft gateway FQDN"
+                )
+            if expected_pbx_sources != PRIVATE_PBX_POC_SOURCE_CIDRS:
+                _fail(
+                    "private-PBX Direct Routing POC node facts must authorize only "
+                    "10.20.1.4/32"
+                )
+            if expected_pbx_media_destination != (
+                PRIVATE_PBX_POC_MEDIA_DESTINATION_PORT_START,
+                PRIVATE_PBX_POC_MEDIA_DESTINATION_PORT_END,
+            ):
+                _fail(
+                    "private-PBX Direct Routing POC node facts must retain only the "
+                    "fixed 30000-30127 CP1 carrier media destination"
+                )
     else:
         _fail("validated profile has an unknown kind")
     if facts.synthetic_teams_source_ipv4_cidrs:
@@ -1409,7 +1525,10 @@ def materialize_first_tenant(
             "sizeBytes": len(content),
         }
     envelope_bytes = manifest_tool.canonical_json_bytes(envelope)
-    direct_routing = record["kind"] == DIRECT_ROUTING_PROFILE_KIND
+    direct_routing = record["kind"] in _LIVE_DIRECT_PROFILE_KINDS
+    private_pbx_poc = (
+        record["kind"] == DIRECT_ROUTING_PRIVATE_PBX_POC_PROFILE_KIND
+    )
     readiness = {
         "callRateLimitEnforced": False,
         "codecPolicyEnforced": False,
@@ -1445,15 +1564,23 @@ def materialize_first_tenant(
     if direct_routing:
         evidence.update(
             {
-                "deploymentMode": DIRECT_ROUTING_DEPLOYMENT_MODE,
+                "deploymentMode": (
+                    DIRECT_ROUTING_PRIVATE_PBX_POC_DEPLOYMENT_MODE
+                    if private_pbx_poc
+                    else DIRECT_ROUTING_DEPLOYMENT_MODE
+                ),
                 "microsoftTargets": copy.deepcopy(record["microsoftTargets"]),
                 "pbxMediaDestinationPortRange": {
                     "end": facts.pbx_media_destination_port_end,
                     "start": facts.pbx_media_destination_port_start,
                 },
-                "profileKind": DIRECT_ROUTING_PROFILE_KIND,
+                "profileKind": record["kind"],
             }
         )
+        if private_pbx_poc:
+            evidence["pocBoundary"] = (
+                "PUBLIC_MICROSOFT_DIRECT_ROUTING_WITH_FIXED_PRIVATE_CP1_PBX_NO_PRODUCTION_CLAIM"
+            )
     return MaterializedRelease(
         _envelope_bytes=envelope_bytes,
         artifacts=MappingProxyType(dict(compiled.artifacts)),

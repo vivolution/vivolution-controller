@@ -72,7 +72,7 @@ table inet vivolution_edge_filter {
 {% endif %}
         ip saddr @admin_source_ipv4 tcp dport 22 ct state new accept
 
-{% if edge_runtime_profile == 'DIRECT_ROUTING' %}
+{% if edge_runtime_profile in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC'] %}
         ip saddr @microsoft_signaling_source_ipv4 tcp dport {{ edge_tls_signaling_port }} ct state new accept
         ip saddr @microsoft_media_source_ipv4 udp sport { {{ edge_microsoft_media_processor_remote_port_ranges | join(', ') }} } udp dport {{ edge_rtp_port_start }}-{{ edge_rtp_port_end }} accept
 {% elif edge_synthetic_teams_source_ipv4_cidrs | length > 0 %}
@@ -105,7 +105,7 @@ table inet vivolution_edge_filter {
 {% if edge_runtime_profile == 'SYNTHETIC_PRIVATE' %}
         ip daddr @control_plane_ipv4 tcp dport { 16061, 25061 } ct state new accept
         ip daddr @control_plane_ipv4 udp sport {{ edge_rtp_port_start }}-{{ edge_rtp_port_end }} udp dport { 21000-21127, 22000-22063 } accept
-{% elif edge_runtime_profile == 'DIRECT_ROUTING' %}
+{% elif edge_runtime_profile in ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC'] %}
         ip daddr @microsoft_signaling_source_ipv4 tcp dport 5061 ct state new accept
         ip daddr @microsoft_media_source_ipv4 udp sport {{ edge_rtp_port_start }}-{{ edge_rtp_port_end }} udp dport { {{ edge_microsoft_media_processor_remote_port_ranges | join(', ') }} } accept
         ip daddr @pbx_source_ipv4 tcp dport 5061 ct state new accept

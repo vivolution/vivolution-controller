@@ -35,8 +35,10 @@ edge_tls_signaling_port: 5061
 edge_pbx_tls_signaling_port: 15061
 edge_rtp_port_start: 20000
 edge_rtp_port_end: 20255
-# Synthetic is pinned to the CP1 Asterisk PBX RTP range. DIRECT_ROUTING must
-# override both values per node with the reviewed real-PBX destination range.
+# Synthetic defaults to its CP1 fixture allocation. The generation-3
+# DIRECT_ROUTING_PRIVATE_PBX_POC inventory must override this with the fixed
+# CP1 carrier range 30000-30127; production DIRECT_ROUTING must supply its
+# independently reviewed PBX range.
 edge_pbx_media_destination_port_start: 21000
 edge_pbx_media_destination_port_end: 21127
 edge_rtpengine_ng_port: 2223
@@ -82,7 +84,9 @@ edge_fixture_ca_src: "{{ inventory_dir }}/generated/fixture/fixture-ca.crt"
 edge_fixture_ca_sha256: REPLACE_FIXTURE_CA_SHA256
 edge_system_ca_bundle_remote_src: /etc/ssl/certs/ca-certificates.crt
 
-# Direct Routing uses a distinct, reimaged generation-2-or-later fleet. These
+# Direct Routing uses a distinct, reimaged replacement fleet. The private-PBX
+# POC is fixed to generation 3 or later and uses this same explicit PBX trust
+# input; it never reuses the synthetic fixture client credentials. These
 # sentinels are inert under the default synthetic profile and intentionally do
 # not contain any valid acknowledgement. The PBX bundle is public trust
 # material, but its exact bytes are still controller-pinned before transfer.
@@ -90,6 +94,8 @@ edge_direct_pbx_ca_bundle_src: "{{ inventory_dir }}/generated/direct/pbx-ca-bund
 edge_direct_pbx_ca_bundle_sha256: REPLACE_DIRECT_PBX_CA_BUNDLE_SHA256
 edge_direct_install_acknowledgement: REPLACE_WITH_INSTALL_DIRECT_ROUTING_REPLACEMENT_GENERATION
 edge_direct_activation_acknowledgement: REPLACE_WITH_ACTIVATE_DIRECT_ROUTING_REPLACEMENT_GENERATION
+edge_direct_private_pbx_poc_install_acknowledgement: REPLACE_WITH_INSTALL_DIRECT_ROUTING_PRIVATE_PBX_POC_REPLACEMENT_GENERATION
+edge_direct_private_pbx_poc_activation_acknowledgement: REPLACE_WITH_ACTIVATE_DIRECT_ROUTING_PRIVATE_PBX_POC_REPLACEMENT_GENERATION
 edge_direct_replacement_transition_acknowledgement: REPLACE_WITH_TRANSITION_TO_DIRECT_ROUTING_REPLACEMENT_FLEET
 edge_direct_rollback_contract: REPLACE_WITH_PRESERVE_SYNTHETIC_PREDECESSOR_UNTIL_SEPARATE_CUTOVER
 edge_direct_predecessor_fixture_probe_acknowledgement: REPLACE_WITH_PROBE_PRESERVED_SYNTHETIC_PREDECESSOR_BEFORE_AND_AFTER

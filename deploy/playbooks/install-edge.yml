@@ -204,6 +204,52 @@
         - edge_runtime_profile == 'DIRECT_ROUTING'
         - edge_install_direct_existing_identity.results[0].stat.exists | default(false)
 
+    - name: Inspect private-PBX POC authority and forbidden fixture paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - /var/lib/vivolution-edge/runtime/runtime-authority.json
+        - /etc/vivolution-edge/tls/fixture-ca.crt
+        - /etc/vivolution-edge/tls/fixture-client.crt
+        - /etc/vivolution-edge/tls/fixture-client.key
+      register: edge_install_private_pbx_poc_existing_identity
+      when: edge_runtime_profile == 'DIRECT_ROUTING_PRIVATE_PBX_POC'
+
+    - name: Refuse private-PBX POC bootstrap over retained fixture material
+      ansible.builtin.assert:
+        that:
+          - not (item.stat.exists | default(false))
+          - not (item.stat.islnk | default(false))
+        fail_msg: >-
+          The private-PBX Direct Routing POC requires a clean generation-3
+          replacement; synthetic fixture material will not be removed or
+          overwritten in place.
+      loop: "{{ (edge_install_private_pbx_poc_existing_identity.results | default([]))[1:] }}"
+      when: edge_runtime_profile == 'DIRECT_ROUTING_PRIVATE_PBX_POC'
+
+    - name: Read an existing POC-only private PBX Direct Routing authority
+      ansible.builtin.slurp:
+        src: /var/lib/vivolution-edge/runtime/runtime-authority.json
+      register: edge_install_private_pbx_poc_existing_authority
+      when:
+        - edge_runtime_profile == 'DIRECT_ROUTING_PRIVATE_PBX_POC'
+        - edge_install_private_pbx_poc_existing_identity.results[0].stat.exists | default(false)
+
+    - name: Refuse a different profile or generation before private-PBX POC mutation
+      ansible.builtin.assert:
+        that:
+          - (edge_install_private_pbx_poc_existing_authority.content | b64decode | from_json).profile == 'DIRECT_ROUTING_PRIVATE_PBX_POC'
+          - (edge_install_private_pbx_poc_existing_authority.content | b64decode | from_json).generation | int == edge_generation | int
+          - (edge_install_private_pbx_poc_existing_authority.content | b64decode | from_json).nodeId == inventory_hostname
+        fail_msg: >-
+          The private-PBX Direct Routing POC will not rewrite a synthetic,
+          production Direct Routing, or different-generation node authority.
+          Use a distinct clean replacement target.
+      when:
+        - edge_runtime_profile == 'DIRECT_ROUTING_PRIVATE_PBX_POC'
+        - edge_install_private_pbx_poc_existing_identity.results[0].stat.exists | default(false)
+
   roles:
     - role: edge_preflight
     - role: edge_base_os

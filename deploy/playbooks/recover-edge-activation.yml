@@ -24,7 +24,7 @@
           - edge_activation_recovery_node_id == inventory_hostname
           - edge_expected_hostname is match('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
           - edge_recovery_os_hostname.stdout | trim == edge_expected_hostname
-          - edge_activation_recovery_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING']
+          - edge_activation_recovery_profile in ['SYNTHETIC_PRIVATE', 'DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
           - edge_activation_recovery_profile == edge_runtime_profile
           - edge_activation_recovery_generation is number
           - edge_activation_recovery_generation | int >= 1
@@ -42,7 +42,12 @@
              edge_activation_recovery_generation | int >= 1 and
              edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32']) or
             (edge_activation_recovery_profile == 'DIRECT_ROUTING' and
-             edge_activation_recovery_generation | int >= 2)
+             edge_activation_recovery_generation | int >= 2) or
+            (edge_activation_recovery_profile == 'DIRECT_ROUTING_PRIVATE_PBX_POC' and
+             edge_activation_recovery_generation | int >= 3 and
+             edge_pbx_source_ipv4_cidrs == ['10.20.1.4/32'] and
+             edge_pbx_media_destination_port_start | int == 30000 and
+             edge_pbx_media_destination_port_end | int == 30127)
         fail_msg: >-
           Recovery requires an explicit acknowledgement, the exact logical node
           identity, the separately pinned operating-system hostname, and a
