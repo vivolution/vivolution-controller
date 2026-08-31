@@ -660,6 +660,45 @@ tampered fixture manifest. Its canonical `acceptance.json`
 contains only runtime/public identity, hashes, timing, synthetic call summary,
 and the conclusion `liveM365Interoperability=NOT_ASSERTED`.
 
+An `ABORTED_RECONCILED` journal is intentionally terminal: the ordinary
+qualification acknowledgement can only resume/read that exact run and cannot
+silently allocate another reboot. After correcting the documented cause, use
+the separate localhost-only rollover play and bind both the terminal run ID
+and its exact `stateDigest`:
+
+```bash
+ANSIBLE_ROLES_PATH=deploy/roles ansible-playbook \
+  -i /absolute/private/poc-edge/hosts.yml \
+  -e edge_active_reboot_rollover_acknowledgement=ARCHIVE_RECONCILED_ACTIVE_EDGE_REBOOT_AND_ALLOCATE_FRESH_RUN \
+  -e edge_active_reboot_rollover_terminal_run_id=20260830T234934Z-a09550b4442a \
+  -e edge_active_reboot_rollover_terminal_state_digest=sha256:7afc65b6c81d003bce5000c9e93a6ffeb2cec873a1a6a56ec8fdd52cf7d788bf \
+  deploy/playbooks/rollover-active-edge-reboot.yml
+```
+
+That play has only `localhost` authority and cannot reboot or contact either
+Edge. Under the same durable lock it moves the terminal `.active-run` journal
+into the terminal run's existing evidence leaf, inventories and hashes every
+retained journal/evidence file, writes an exclusive self-digested archive
+manifest and rollover receipt, and allocates one fresh all-`PENDING` journal.
+It never deletes or replaces the prior evidence. An interruption leaves a
+protected rollover transaction that blocks ordinary begin/transition commands;
+rerun the same rollover command with the same three exact values to finish it.
+An exact post-success rerun only revalidates the receipt, manifest, archived
+journal, retained bytes, and unchanged fresh journal.
+Exclusive transaction, manifest, receipt, and preflight writes use one
+deterministic protected staging name. A crash before linking safely resumes
+that staging write; a crash after linking verifies the exact shared inode and
+bytes before removing only the staging link. Unrelated symlinks or hard links
+remain fatal. The two reserved rollover-metadata staging names are excluded
+from the evidence payload manifest only while the transaction is unfinished,
+and successful receipt validation requires both to be absent.
+
+Only after this local play reports the new pending run should the operator run
+`qualify-active-edge-reboots.yml` separately with its distinct
+`REBOOT_ACTIVE_SYNTHETIC_EDGES_SBC1_THEN_SBC2_ONCE` acknowledgement. This
+two-command separation ensures archive allocation itself carries no reboot
+authority.
+
 ## Interrupted Edge activation recovery
 
 If SSH or the operator process is lost after Agent staging, do not delete state

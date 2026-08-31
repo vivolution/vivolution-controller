@@ -26,16 +26,62 @@ from typing import Any, Mapping
 API_VERSION = "edge.vivolution.ae/active-edge-reboot-journal/v0.1"
 KIND = "ActiveEdgeRebootQualificationJournal"
 ACKNOWLEDGEMENT = "REBOOT_ACTIVE_SYNTHETIC_EDGES_SBC1_THEN_SBC2_ONCE"
+ROLLOVER_ACKNOWLEDGEMENT = (
+    "ARCHIVE_RECONCILED_ACTIVE_EDGE_REBOOT_AND_ALLOCATE_FRESH_RUN"
+)
 SCOPE = "BOUNDED_PRIVATE_SYNTHETIC_POC"
 ORDER = ("sbc1", "sbc2")
 STATE_DIRECTORY_NAME = ".active-run"
 STATE_FILE_NAME = "state.json"
 LOCK_FILE_NAME = ".active-edge-reboot.lock"
+ROLLOVER_TRANSACTION_FILE_NAME = ".active-edge-reboot-rollover.json"
+ARCHIVED_JOURNAL_DIRECTORY_NAME = "journal"
+ROLLOVER_MANIFEST_FILE_NAME = "rollover-archive-manifest.json"
+ROLLOVER_RECEIPT_FILE_NAME = "rollover-receipt.json"
 RUN_ID_RE = re.compile(r"\A[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\Z")
 UUID_RE = re.compile(
     r"\A[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
+
+ROLLOVER_TRANSACTION_KEYS = {
+    "acknowledgement",
+    "apiVersion",
+    "fromRunId",
+    "fromStateDigest",
+    "kind",
+    "newEvidenceDirectory",
+    "newRunId",
+    "newStateDigest",
+    "scope",
+    "transactionDigest",
+}
+ROLLOVER_MANIFEST_KEYS = {
+    "apiVersion",
+    "files",
+    "fromRunId",
+    "fromStateDigest",
+    "kind",
+    "manifestDigest",
+    "scope",
+}
+ROLLOVER_MANIFEST_ENTRY_KEYS = {"path", "sha256", "size"}
+ROLLOVER_RECEIPT_KEYS = {
+    "acknowledgement",
+    "apiVersion",
+    "archiveManifestDigest",
+    "archivedJournalPath",
+    "fromRunId",
+    "fromStateDigest",
+    "kind",
+    "newEvidenceDirectory",
+    "newRunId",
+    "newStateDigest",
+    "receiptDigest",
+    "scope",
+    "status",
+    "transactionDigest",
+}
 
 STATE_KEYS = {
     "abortReason",
@@ -247,9 +293,210 @@ def _write_all(descriptor: int, content: bytes) -> None:
         remaining = remaining[written:]
 
 
+def _exclusive_staging_path(path: Path) -> Path:
+    return path.with_name(f".{path.name}.exclusive-staging")
+
+
+def _exclusive_write_checkpoint(_path: Path, _phase: str) -> None:
+    """No-op fault-injection boundary used by crash-recovery tests."""
+
+
+def _exclusive_candidate(
+    path: Path,
+    *,
+    maximum: int,
+    allowed_links: set[int],
+    allow_empty: bool,
+) -> tuple[os.stat_result, bytes]:
+    try:
+        before = path.lstat()
+    except FileNotFoundError as exc:
+        raise JournalError(f"exclusive file {path.name} is absent") from exc
+    minimum = 0 if allow_empty else 1
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or before.st_nlink not in allowed_links
+        or before.st_uid != os.geteuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or not minimum <= before.st_size <= maximum
+    ):
+        raise JournalError(
+            f"exclusive file {path.name} is linked, unprotected, or outside bounds"
+        )
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_nlink,
+        ) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_nlink,
+        ):
+            raise JournalError(f"exclusive file {path.name} changed before read")
+        chunks: list[bytes] = []
+        remaining = maximum + 1
+        while remaining:
+            chunk = os.read(descriptor, min(256 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if len(raw) != before.st_size or (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_nlink,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ) != (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_nlink,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ):
+        raise JournalError(f"exclusive file {path.name} changed while read")
+    return before, raw
+
+
+def _normalize_exclusive_target(path: Path, *, maximum: int = 16 * 1024 * 1024) -> None:
+    """Finish the only safe hard-link crash state for an exclusive write."""
+
+    if not (path.exists() or path.is_symlink()):
+        return
+    staging = _exclusive_staging_path(path)
+    target_metadata, target_raw = _exclusive_candidate(
+        path,
+        maximum=maximum,
+        allowed_links={1, 2},
+        allow_empty=False,
+    )
+    if target_metadata.st_nlink == 1:
+        if staging.exists() or staging.is_symlink():
+            raise JournalError(
+                f"exclusive target {path.name} has an unrelated staging file"
+            )
+        _fsync_directory(path.parent)
+        return
+    if not (staging.exists() or staging.is_symlink()):
+        raise JournalError(
+            f"exclusive target {path.name} has an unaccounted hard link"
+        )
+    staging_metadata, staging_raw = _exclusive_candidate(
+        staging,
+        maximum=maximum,
+        allowed_links={2},
+        allow_empty=False,
+    )
+    if (
+        (target_metadata.st_dev, target_metadata.st_ino)
+        != (staging_metadata.st_dev, staging_metadata.st_ino)
+        or staging_raw != target_raw
+    ):
+        raise JournalError(
+            f"exclusive target {path.name} does not match its staging link"
+        )
+    staging.unlink()
+    _fsync_directory(path.parent)
+    final_metadata, final_raw = _exclusive_candidate(
+        path,
+        maximum=maximum,
+        allowed_links={1},
+        allow_empty=False,
+    )
+    if final_metadata.st_ino != target_metadata.st_ino or final_raw != target_raw:
+        raise JournalError(f"exclusive target {path.name} changed during recovery")
+
+
+def _exclusive_atomic_write(path: Path, content: bytes) -> None:
+    if not content:
+        raise JournalError("exclusive writes must not be empty")
+    staging = _exclusive_staging_path(path)
+    if path.exists() or path.is_symlink():
+        _normalize_exclusive_target(path, maximum=len(content))
+        _metadata, existing = _exclusive_candidate(
+            path,
+            maximum=len(content),
+            allowed_links={1},
+            allow_empty=False,
+        )
+        if existing != content:
+            raise JournalError(f"refusing to replace existing {path.name}")
+        return
+
+    if staging.exists() or staging.is_symlink():
+        _metadata, staged = _exclusive_candidate(
+            staging,
+            maximum=len(content),
+            allowed_links={1},
+            allow_empty=True,
+        )
+        if staged != content:
+            staging.unlink()
+            _fsync_directory(path.parent)
+        else:
+            descriptor = os.open(
+                staging,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+    if not (staging.exists() or staging.is_symlink()):
+        descriptor = os.open(
+            staging,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            _exclusive_write_checkpoint(path, "after-create")
+            _write_all(descriptor, content)
+            _exclusive_write_checkpoint(path, "after-write")
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            _exclusive_write_checkpoint(path, "after-file-fsync")
+        finally:
+            os.close(descriptor)
+
+    try:
+        os.link(staging, path, follow_symlinks=False)
+    except FileExistsError:
+        _normalize_exclusive_target(path, maximum=len(content))
+        _metadata, existing = _exclusive_candidate(
+            path,
+            maximum=len(content),
+            allowed_links={1},
+            allow_empty=False,
+        )
+        if existing != content:
+            raise JournalError(f"refusing to replace existing {path.name}")
+        return
+    _exclusive_write_checkpoint(path, "after-link")
+    _fsync_directory(path.parent)
+    _exclusive_write_checkpoint(path, "after-link-fsync")
+    staging.unlink()
+    _exclusive_write_checkpoint(path, "after-unlink")
+    _fsync_directory(path.parent)
+    _exclusive_write_checkpoint(path, "after-unlink-fsync")
+
+
 def _atomic_write(path: Path, content: bytes, *, replace: bool) -> None:
-    if not replace and (path.exists() or path.is_symlink()):
-        raise JournalError(f"refusing to replace existing {path.name}")
+    if not replace:
+        _exclusive_atomic_write(path, content)
+        return
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     descriptor = os.open(
         temporary,
@@ -278,6 +525,20 @@ def _digest_state(state: Mapping[str, Any]) -> str:
     unsigned = dict(state)
     unsigned.pop("stateDigest", None)
     return sha256_digest(canonical_bytes(unsigned))
+
+
+def _self_digest(value: Mapping[str, Any], digest_key: str) -> str:
+    unsigned = dict(value)
+    unsigned.pop(digest_key, None)
+    return sha256_digest(canonical_bytes(unsigned))
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _validate_preflight(raw: bytes, node: str) -> Mapping[str, Any]:
@@ -465,7 +726,18 @@ def _lock(path: Path) -> int:
     return descriptor
 
 
-def _load(root: Path, state_directory: Path, state_path: Path) -> dict[str, Any]:
+def _load(
+    root: Path,
+    state_directory: Path,
+    state_path: Path,
+    *,
+    allow_rollover: bool = False,
+) -> dict[str, Any]:
+    rollover_path = root / ROLLOVER_TRANSACTION_FILE_NAME
+    if not allow_rollover and (rollover_path.exists() or rollover_path.is_symlink()):
+        raise JournalError(
+            "a rollover transaction is pending; exact rollover acknowledgement is required"
+        )
     _secure_directory(state_directory, 0o700, "active journal directory")
     return dict(_validate_state(_parse_json(_secure_read(state_path), "state.json"), root, state_directory))
 
@@ -490,12 +762,49 @@ def _empty_node() -> dict[str, Any]:
     }
 
 
+def _new_state(root: Path, run_id: str) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "abortReason": None,
+        "acceptanceDigest": None,
+        "acknowledgement": ACKNOWLEDGEMENT,
+        "apiVersion": API_VERSION,
+        "currentNode": "sbc1",
+        "evidenceDirectory": str(root / run_id),
+        "kind": KIND,
+        "nodes": {node: _empty_node() for node in ORDER},
+        "rebootOrder": list(ORDER),
+        "runId": run_id,
+        "scope": SCOPE,
+        "stateDigest": "",
+        "status": "IN_PROGRESS",
+    }
+    state["stateDigest"] = _digest_state(state)
+    return state
+
+
+def _new_run_id(root: Path) -> str:
+    for _attempt in range(32):
+        run_id = (
+            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            + "-"
+            + secrets.token_hex(6)
+        )
+        if not (root / run_id).exists() and not (root / run_id).is_symlink():
+            return run_id
+    raise JournalError("could not allocate a unique reboot run ID")
+
+
 def _begin(args: argparse.Namespace) -> Mapping[str, Any]:
     if args.acknowledgement != ACKNOWLEDGEMENT:
         raise JournalError("one-run acknowledgement is not exact")
     root, state_directory, state_path, lock_path = _paths(args.evidence_root)
     lock_fd = _lock(lock_path)
     try:
+        rollover_path = root / ROLLOVER_TRANSACTION_FILE_NAME
+        if rollover_path.exists() or rollover_path.is_symlink():
+            raise JournalError(
+                "a rollover transaction is pending; exact rollover acknowledgement is required"
+            )
         if state_directory.exists() or state_directory.is_symlink():
             if state_path.exists() or state_path.is_symlink():
                 return _load(root, state_directory, state_path)
@@ -515,26 +824,12 @@ def _begin(args: argparse.Namespace) -> Mapping[str, Any]:
                 _secure_read(entry)
                 entry.unlink()
             orphan.rmdir()
-        run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(6)
+        run_id = _new_run_id(root)
         evidence = root / run_id
         os.mkdir(evidence, 0o700)
         initializer = root / f".{STATE_DIRECTORY_NAME.lstrip('.')}.init-{secrets.token_hex(8)}"
         os.mkdir(initializer, 0o700)
-        state: dict[str, Any] = {
-            "abortReason": None,
-            "acceptanceDigest": None,
-            "acknowledgement": ACKNOWLEDGEMENT,
-            "apiVersion": API_VERSION,
-            "currentNode": "sbc1",
-            "evidenceDirectory": str(evidence),
-            "kind": KIND,
-            "nodes": {node: _empty_node() for node in ORDER},
-            "rebootOrder": list(ORDER),
-            "runId": run_id,
-            "scope": SCOPE,
-            "stateDigest": "",
-            "status": "IN_PROGRESS",
-        }
+        state = _new_state(root, run_id)
         _save(initializer / STATE_FILE_NAME, state)
         os.replace(initializer, state_directory)
         root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
@@ -543,6 +838,589 @@ def _begin(args: argparse.Namespace) -> Mapping[str, Any]:
         finally:
             os.close(root_fd)
         return _load(root, state_directory, state_path)
+    finally:
+        os.close(lock_fd)
+
+
+def _rollover_transaction(
+    root: Path,
+    terminal: Mapping[str, Any],
+    new_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    transaction: dict[str, Any] = {
+        "acknowledgement": ROLLOVER_ACKNOWLEDGEMENT,
+        "apiVersion": "edge.vivolution.ae/active-edge-reboot-rollover/v0.1",
+        "fromRunId": terminal["runId"],
+        "fromStateDigest": terminal["stateDigest"],
+        "kind": "ActiveEdgeRebootQualificationRollover",
+        "newEvidenceDirectory": new_state["evidenceDirectory"],
+        "newRunId": new_state["runId"],
+        "newStateDigest": new_state["stateDigest"],
+        "scope": SCOPE,
+        "transactionDigest": "",
+    }
+    transaction["transactionDigest"] = _self_digest(
+        transaction, "transactionDigest"
+    )
+    return transaction
+
+
+def _validate_rollover_transaction(
+    value: object,
+    root: Path,
+    terminal_run_id: str,
+    terminal_state_digest: str,
+) -> Mapping[str, Any]:
+    transaction = _exact(
+        value, ROLLOVER_TRANSACTION_KEYS, "reboot rollover transaction"
+    )
+    if (
+        transaction["acknowledgement"] != ROLLOVER_ACKNOWLEDGEMENT
+        or transaction["apiVersion"]
+        != "edge.vivolution.ae/active-edge-reboot-rollover/v0.1"
+        or transaction["kind"] != "ActiveEdgeRebootQualificationRollover"
+        or transaction["scope"] != SCOPE
+        or transaction["fromRunId"] != terminal_run_id
+        or transaction["fromStateDigest"] != terminal_state_digest
+        or not isinstance(transaction["newRunId"], str)
+        or RUN_ID_RE.fullmatch(transaction["newRunId"]) is None
+        or transaction["newRunId"] == terminal_run_id
+        or transaction["newEvidenceDirectory"]
+        != str(root / transaction["newRunId"])
+        or not isinstance(transaction["newStateDigest"], str)
+        or DIGEST_RE.fullmatch(transaction["newStateDigest"]) is None
+        or transaction["transactionDigest"]
+        != _self_digest(transaction, "transactionDigest")
+    ):
+        raise JournalError("reboot rollover transaction authority is invalid")
+    return transaction
+
+
+def _load_rollover_transaction(
+    path: Path,
+    root: Path,
+    terminal_run_id: str,
+    terminal_state_digest: str,
+) -> Mapping[str, Any]:
+    return _validate_rollover_transaction(
+        _parse_json(_secure_read(path), "reboot rollover transaction"),
+        root,
+        terminal_run_id,
+        terminal_state_digest,
+    )
+
+
+def _rollover_initializer(root: Path, run_id: str) -> Path:
+    return root / f".active-run.rollover-{run_id}"
+
+
+def _ensure_rollover_resources(
+    root: Path,
+    state_directory: Path,
+    transaction: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    new_run_id = transaction["newRunId"]
+    evidence = root / new_run_id
+    if evidence.exists() or evidence.is_symlink():
+        _secure_directory(evidence, 0o700, "new rollover evidence leaf")
+    else:
+        os.mkdir(evidence, 0o700)
+        _fsync_directory(root)
+    if any(evidence.iterdir()):
+        raise JournalError("new rollover evidence leaf is not empty")
+
+    expected = _new_state(root, new_run_id)
+    if expected["stateDigest"] != transaction["newStateDigest"]:
+        raise JournalError("new rollover state differs from its transaction")
+
+    initializer = _rollover_initializer(root, new_run_id)
+    active_is_new = False
+    if state_directory.exists() or state_directory.is_symlink():
+        active = _load(
+            root,
+            state_directory,
+            state_directory / STATE_FILE_NAME,
+            allow_rollover=True,
+        )
+        active_is_new = active["runId"] == new_run_id
+    if active_is_new:
+        if initializer.exists() or initializer.is_symlink():
+            raise JournalError("new active journal has a duplicate rollover initializer")
+        if active != expected:
+            raise JournalError("new active journal differs from its allocated state")
+        return expected
+
+    if initializer.exists() or initializer.is_symlink():
+        _secure_directory(initializer, 0o700, "rollover initializer")
+    else:
+        os.mkdir(initializer, 0o700)
+        _fsync_directory(root)
+    initializer_state = initializer / STATE_FILE_NAME
+    allowed_initializer_entries = {
+        STATE_FILE_NAME,
+        _exclusive_staging_path(initializer_state).name,
+    }
+    if any(
+        entry.name not in allowed_initializer_entries
+        for entry in os.scandir(initializer)
+    ):
+        raise JournalError("rollover initializer has unexpected content")
+    _atomic_write(
+        initializer_state,
+        canonical_bytes(expected),
+        replace=False,
+    )
+    if {entry.name for entry in os.scandir(initializer)} != {STATE_FILE_NAME}:
+        raise JournalError("rollover initializer did not reconcile exactly")
+    existing = _load(
+        root,
+        initializer,
+        initializer_state,
+        allow_rollover=True,
+    )
+    if existing != expected:
+        raise JournalError("rollover initializer differs from its transaction")
+    _fsync_directory(root)
+    return expected
+
+
+def _archive_terminal_journal(
+    root: Path,
+    state_directory: Path,
+    terminal_run_id: str,
+    terminal_state_digest: str,
+    new_run_id: str,
+) -> Mapping[str, Any]:
+    evidence = _secure_directory(
+        root / terminal_run_id, 0o700, "terminal evidence leaf"
+    )
+    archive = evidence / ARCHIVED_JOURNAL_DIRECTORY_NAME
+
+    if state_directory.exists() or state_directory.is_symlink():
+        active = _load(
+            root,
+            state_directory,
+            state_directory / STATE_FILE_NAME,
+            allow_rollover=True,
+        )
+        if active["runId"] == terminal_run_id:
+            if archive.exists() or archive.is_symlink():
+                raise JournalError(
+                    "terminal journal exists both active and archived; refusing overwrite"
+                )
+            os.rename(state_directory, archive)
+            _fsync_directory(evidence)
+            _fsync_directory(root)
+        elif active["runId"] != new_run_id:
+            raise JournalError("active journal is unrelated to the rollover transaction")
+    if not (archive.exists() or archive.is_symlink()):
+        raise JournalError("terminal journal was not durably archived")
+
+    archived = _load(
+        root,
+        archive,
+        archive / STATE_FILE_NAME,
+        allow_rollover=True,
+    )
+    if (
+        archived["runId"] != terminal_run_id
+        or archived["stateDigest"] != terminal_state_digest
+        or archived["status"] != "ABORTED_RECONCILED"
+    ):
+        raise JournalError("archived terminal journal identity is invalid")
+    return archived
+
+
+def _archive_file_inventory(evidence: Path) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    total_size = 0
+    reserved_metadata = {
+        ROLLOVER_MANIFEST_FILE_NAME,
+        ROLLOVER_RECEIPT_FILE_NAME,
+        f".{ROLLOVER_MANIFEST_FILE_NAME}.exclusive-staging",
+        f".{ROLLOVER_RECEIPT_FILE_NAME}.exclusive-staging",
+    }
+
+    def visit(directory: Path, relative_directory: Path) -> None:
+        nonlocal total_size
+        _secure_directory(directory, 0o700, "rollover archive directory")
+        for entry in sorted(os.scandir(directory), key=lambda item: item.name):
+            relative = relative_directory / entry.name
+            if (
+                relative_directory == Path(".")
+                and entry.name in reserved_metadata
+            ):
+                continue
+            path = Path(entry.path)
+            metadata = path.lstat()
+            if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+                visit(path, relative)
+                continue
+            raw = _secure_read(path, maximum=16 * 1024 * 1024)
+            total_size += len(raw)
+            if len(files) >= 128 or total_size > 64 * 1024 * 1024:
+                raise JournalError("rollover archive inventory exceeds fixed bounds")
+            files.append(
+                {
+                    "path": relative.as_posix(),
+                    "sha256": sha256_digest(raw),
+                    "size": len(raw),
+                }
+            )
+
+    visit(evidence, Path("."))
+    if not any(item["path"] == "journal/state.json" for item in files):
+        raise JournalError("rollover archive does not contain its terminal journal")
+    return files
+
+
+def _archive_manifest(
+    evidence: Path,
+    terminal_run_id: str,
+    terminal_state_digest: str,
+) -> dict[str, Any]:
+    manifest: dict[str, Any] = {
+        "apiVersion": "edge.vivolution.ae/active-edge-reboot-archive/v0.1",
+        "files": _archive_file_inventory(evidence),
+        "fromRunId": terminal_run_id,
+        "fromStateDigest": terminal_state_digest,
+        "kind": "ActiveEdgeRebootQualificationArchive",
+        "manifestDigest": "",
+        "scope": SCOPE,
+    }
+    manifest["manifestDigest"] = _self_digest(manifest, "manifestDigest")
+    return manifest
+
+
+def _validate_archive_manifest(
+    value: object,
+    evidence: Path,
+    terminal_run_id: str,
+    terminal_state_digest: str,
+) -> Mapping[str, Any]:
+    manifest = _exact(value, ROLLOVER_MANIFEST_KEYS, "rollover archive manifest")
+    raw_files = manifest["files"]
+    if not isinstance(raw_files, list):
+        raise JournalError("rollover archive manifest file inventory is invalid")
+    normalized_files: list[Mapping[str, Any]] = []
+    for index, item in enumerate(raw_files):
+        entry = _exact(
+            item,
+            ROLLOVER_MANIFEST_ENTRY_KEYS,
+            f"rollover archive manifest file {index}",
+        )
+        if (
+            not isinstance(entry["path"], str)
+            or entry["path"].startswith("/")
+            or ".." in Path(entry["path"]).parts
+            or not isinstance(entry["sha256"], str)
+            or DIGEST_RE.fullmatch(entry["sha256"]) is None
+        ):
+            raise JournalError("rollover archive manifest entry is invalid")
+        _integer(entry["size"], "rollover archive file size", 1, 16 * 1024 * 1024)
+        normalized_files.append(entry)
+    if (
+        manifest["apiVersion"]
+        != "edge.vivolution.ae/active-edge-reboot-archive/v0.1"
+        or manifest["kind"] != "ActiveEdgeRebootQualificationArchive"
+        or manifest["scope"] != SCOPE
+        or manifest["fromRunId"] != terminal_run_id
+        or manifest["fromStateDigest"] != terminal_state_digest
+        or manifest["manifestDigest"] != _self_digest(manifest, "manifestDigest")
+        or normalized_files != _archive_file_inventory(evidence)
+    ):
+        raise JournalError("rollover archive manifest does not match retained evidence")
+    return manifest
+
+
+def _ensure_archive_manifest(
+    evidence: Path,
+    terminal_run_id: str,
+    terminal_state_digest: str,
+) -> Mapping[str, Any]:
+    path = evidence / ROLLOVER_MANIFEST_FILE_NAME
+    if path.exists() or path.is_symlink():
+        _normalize_exclusive_target(path)
+        return _validate_archive_manifest(
+            _parse_json(_secure_read(path), "rollover archive manifest"),
+            evidence,
+            terminal_run_id,
+            terminal_state_digest,
+        )
+    manifest = _archive_manifest(evidence, terminal_run_id, terminal_state_digest)
+    _atomic_write(path, canonical_bytes(manifest), replace=False)
+    return _validate_archive_manifest(
+        _parse_json(_secure_read(path), "rollover archive manifest"),
+        evidence,
+        terminal_run_id,
+        terminal_state_digest,
+    )
+
+
+def _activate_rollover_journal(
+    root: Path,
+    state_directory: Path,
+    transaction: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    initializer = _rollover_initializer(root, transaction["newRunId"])
+    if state_directory.exists() or state_directory.is_symlink():
+        active = _load(
+            root,
+            state_directory,
+            state_directory / STATE_FILE_NAME,
+            allow_rollover=True,
+        )
+    else:
+        _secure_directory(initializer, 0o700, "rollover initializer")
+        os.rename(initializer, state_directory)
+        _fsync_directory(root)
+        active = _load(
+            root,
+            state_directory,
+            state_directory / STATE_FILE_NAME,
+            allow_rollover=True,
+        )
+    if (
+        active["runId"] != transaction["newRunId"]
+        or active["stateDigest"] != transaction["newStateDigest"]
+        or active["status"] != "IN_PROGRESS"
+        or active["currentNode"] != "sbc1"
+    ):
+        raise JournalError("fresh rollover journal identity is invalid")
+    return active
+
+
+def _rollover_receipt(
+    transaction: Mapping[str, Any], manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    receipt: dict[str, Any] = {
+        "acknowledgement": ROLLOVER_ACKNOWLEDGEMENT,
+        "apiVersion": "edge.vivolution.ae/active-edge-reboot-rollover-receipt/v0.1",
+        "archiveManifestDigest": manifest["manifestDigest"],
+        "archivedJournalPath": "journal/state.json",
+        "fromRunId": transaction["fromRunId"],
+        "fromStateDigest": transaction["fromStateDigest"],
+        "kind": "ActiveEdgeRebootQualificationRolloverReceipt",
+        "newEvidenceDirectory": transaction["newEvidenceDirectory"],
+        "newRunId": transaction["newRunId"],
+        "newStateDigest": transaction["newStateDigest"],
+        "receiptDigest": "",
+        "scope": SCOPE,
+        "status": "ARCHIVED_RECONCILED_RUN_AND_ALLOCATED_FRESH_RUN",
+        "transactionDigest": transaction["transactionDigest"],
+    }
+    receipt["receiptDigest"] = _self_digest(receipt, "receiptDigest")
+    return receipt
+
+
+def _validate_rollover_receipt(
+    value: object,
+    root: Path,
+    terminal_run_id: str,
+    terminal_state_digest: str,
+) -> Mapping[str, Any]:
+    receipt = _exact(value, ROLLOVER_RECEIPT_KEYS, "reboot rollover receipt")
+    evidence = _secure_directory(
+        root / terminal_run_id, 0o700, "terminal evidence leaf"
+    )
+    for final_name in (
+        ROLLOVER_MANIFEST_FILE_NAME,
+        ROLLOVER_RECEIPT_FILE_NAME,
+    ):
+        staging = _exclusive_staging_path(evidence / final_name)
+        if staging.exists() or staging.is_symlink():
+            raise JournalError("completed rollover retains unfinished metadata staging")
+    manifest = _validate_archive_manifest(
+        _parse_json(
+            _secure_read(evidence / ROLLOVER_MANIFEST_FILE_NAME),
+            "rollover archive manifest",
+        ),
+        evidence,
+        terminal_run_id,
+        terminal_state_digest,
+    )
+    archived = _load(
+        root,
+        evidence / ARCHIVED_JOURNAL_DIRECTORY_NAME,
+        evidence / ARCHIVED_JOURNAL_DIRECTORY_NAME / STATE_FILE_NAME,
+        allow_rollover=True,
+    )
+    reconstructed_transaction = {
+        "acknowledgement": receipt["acknowledgement"],
+        "apiVersion": "edge.vivolution.ae/active-edge-reboot-rollover/v0.1",
+        "fromRunId": receipt["fromRunId"],
+        "fromStateDigest": receipt["fromStateDigest"],
+        "kind": "ActiveEdgeRebootQualificationRollover",
+        "newEvidenceDirectory": receipt["newEvidenceDirectory"],
+        "newRunId": receipt["newRunId"],
+        "newStateDigest": receipt["newStateDigest"],
+        "scope": receipt["scope"],
+        "transactionDigest": receipt["transactionDigest"],
+    }
+    if (
+        archived["status"] != "ABORTED_RECONCILED"
+        or archived["runId"] != terminal_run_id
+        or archived["stateDigest"] != terminal_state_digest
+        or receipt["acknowledgement"] != ROLLOVER_ACKNOWLEDGEMENT
+        or receipt["apiVersion"]
+        != "edge.vivolution.ae/active-edge-reboot-rollover-receipt/v0.1"
+        or receipt["kind"] != "ActiveEdgeRebootQualificationRolloverReceipt"
+        or receipt["scope"] != SCOPE
+        or receipt["status"]
+        != "ARCHIVED_RECONCILED_RUN_AND_ALLOCATED_FRESH_RUN"
+        or receipt["fromRunId"] != terminal_run_id
+        or receipt["fromStateDigest"] != terminal_state_digest
+        or receipt["archivedJournalPath"] != "journal/state.json"
+        or receipt["archiveManifestDigest"] != manifest["manifestDigest"]
+        or not isinstance(receipt["newRunId"], str)
+        or RUN_ID_RE.fullmatch(receipt["newRunId"]) is None
+        or receipt["newRunId"] == terminal_run_id
+        or receipt["newEvidenceDirectory"] != str(root / receipt["newRunId"])
+        or not isinstance(receipt["newStateDigest"], str)
+        or DIGEST_RE.fullmatch(receipt["newStateDigest"]) is None
+        or not isinstance(receipt["transactionDigest"], str)
+        or DIGEST_RE.fullmatch(receipt["transactionDigest"]) is None
+        or receipt["transactionDigest"]
+        != _self_digest(reconstructed_transaction, "transactionDigest")
+        or receipt["receiptDigest"] != _self_digest(receipt, "receiptDigest")
+    ):
+        raise JournalError("reboot rollover receipt authority is invalid")
+    return receipt
+
+
+def _rollover_result(receipt: Mapping[str, Any]) -> Mapping[str, Any]:
+    return {
+        "apiVersion": "edge.vivolution.ae/active-edge-reboot-rollover-result/v0.1",
+        "archiveManifestDigest": receipt["archiveManifestDigest"],
+        "archivedRunId": receipt["fromRunId"],
+        "archivedStateDigest": receipt["fromStateDigest"],
+        "newEvidenceDirectory": receipt["newEvidenceDirectory"],
+        "newRunId": receipt["newRunId"],
+        "newStateDigest": receipt["newStateDigest"],
+        "status": receipt["status"],
+    }
+
+
+def _rollover(args: argparse.Namespace) -> Mapping[str, Any]:
+    if args.acknowledgement != ROLLOVER_ACKNOWLEDGEMENT:
+        raise JournalError("rollover acknowledgement is not exact")
+    if (
+        RUN_ID_RE.fullmatch(args.terminal_run_id) is None
+        or DIGEST_RE.fullmatch(args.terminal_state_digest) is None
+    ):
+        raise JournalError("terminal rollover identity is invalid")
+
+    root, state_directory, state_path, lock_path = _paths(args.evidence_root)
+    lock_fd = _lock(lock_path)
+    try:
+        transaction_path = root / ROLLOVER_TRANSACTION_FILE_NAME
+        terminal_evidence = root / args.terminal_run_id
+        receipt_path = terminal_evidence / ROLLOVER_RECEIPT_FILE_NAME
+
+        if transaction_path.exists() or transaction_path.is_symlink():
+            _normalize_exclusive_target(transaction_path)
+        if receipt_path.exists() or receipt_path.is_symlink():
+            _normalize_exclusive_target(receipt_path)
+
+        if not (transaction_path.exists() or transaction_path.is_symlink()):
+            if receipt_path.exists() or receipt_path.is_symlink():
+                receipt = _validate_rollover_receipt(
+                    _parse_json(_secure_read(receipt_path), "reboot rollover receipt"),
+                    root,
+                    args.terminal_run_id,
+                    args.terminal_state_digest,
+                )
+                active = _load(root, state_directory, state_path)
+                if (
+                    active["runId"] != receipt["newRunId"]
+                    or active["stateDigest"] != receipt["newStateDigest"]
+                ):
+                    raise JournalError(
+                        "fresh active journal differs from its rollover receipt"
+                    )
+                return _rollover_result(receipt)
+
+            terminal = _load(root, state_directory, state_path)
+            if (
+                terminal["status"] != "ABORTED_RECONCILED"
+                or terminal["runId"] != args.terminal_run_id
+                or terminal["stateDigest"] != args.terminal_state_digest
+            ):
+                raise JournalError(
+                    "only the exact terminal reconciled journal can roll over"
+                )
+            for reserved in (
+                terminal_evidence / ARCHIVED_JOURNAL_DIRECTORY_NAME,
+                terminal_evidence / ROLLOVER_MANIFEST_FILE_NAME,
+                terminal_evidence / ROLLOVER_RECEIPT_FILE_NAME,
+                _exclusive_staging_path(
+                    terminal_evidence / ROLLOVER_MANIFEST_FILE_NAME
+                ),
+                _exclusive_staging_path(
+                    terminal_evidence / ROLLOVER_RECEIPT_FILE_NAME
+                ),
+            ):
+                if reserved.exists() or reserved.is_symlink():
+                    raise JournalError(
+                        f"terminal evidence already contains reserved {reserved.name}"
+                    )
+            new_state = _new_state(root, _new_run_id(root))
+            transaction = _rollover_transaction(root, terminal, new_state)
+            _atomic_write(
+                transaction_path, canonical_bytes(transaction), replace=False
+            )
+
+        transaction = _load_rollover_transaction(
+            transaction_path,
+            root,
+            args.terminal_run_id,
+            args.terminal_state_digest,
+        )
+        _ensure_rollover_resources(root, state_directory, transaction)
+        _archive_terminal_journal(
+            root,
+            state_directory,
+            args.terminal_run_id,
+            args.terminal_state_digest,
+            transaction["newRunId"],
+        )
+        manifest = _ensure_archive_manifest(
+            _secure_directory(
+                terminal_evidence, 0o700, "terminal evidence leaf"
+            ),
+            args.terminal_run_id,
+            args.terminal_state_digest,
+        )
+        active = _activate_rollover_journal(root, state_directory, transaction)
+        if active["stateDigest"] != transaction["newStateDigest"]:
+            raise JournalError("activated rollover journal differs from its transaction")
+
+        expected_receipt = _rollover_receipt(transaction, manifest)
+        if receipt_path.exists() or receipt_path.is_symlink():
+            _normalize_exclusive_target(receipt_path)
+            receipt = _validate_rollover_receipt(
+                _parse_json(_secure_read(receipt_path), "reboot rollover receipt"),
+                root,
+                args.terminal_run_id,
+                args.terminal_state_digest,
+            )
+            if receipt != expected_receipt:
+                raise JournalError("existing rollover receipt differs from transaction")
+        else:
+            _atomic_write(
+                receipt_path, canonical_bytes(expected_receipt), replace=False
+            )
+            receipt = _validate_rollover_receipt(
+                _parse_json(_secure_read(receipt_path), "reboot rollover receipt"),
+                root,
+                args.terminal_run_id,
+                args.terminal_state_digest,
+            )
+
+        _secure_read(transaction_path)
+        transaction_path.unlink()
+        _fsync_directory(root)
+        return _rollover_result(receipt)
     finally:
         os.close(lock_fd)
 
@@ -559,14 +1437,28 @@ def _mutate(args: argparse.Namespace, operation: str) -> Mapping[str, Any]:
             if item["phase"] != "PENDING":
                 raise JournalError("only a pending node can be armed")
             source = Path(args.preflight_file)
-            raw = _secure_read(source)
-            preflight = _validate_preflight(raw, args.node)
             destination = state_directory / f"{args.node}-preflight.json"
+            if source.absolute() == destination.absolute():
+                raise JournalError("preflight staging cannot be its journal destination")
+            source_exists = source.exists() or source.is_symlink()
+            if source_exists:
+                raw = _secure_read(source)
+            elif destination.exists() or destination.is_symlink():
+                _normalize_exclusive_target(destination)
+                raw = _secure_read(destination)
+            else:
+                raise JournalError(f"{args.node} preflight staging and journal are absent")
+            preflight = _validate_preflight(raw, args.node)
             if destination.exists() or destination.is_symlink():
-                _secure_read(destination)
-                destination.unlink()
-            _atomic_write(destination, raw, replace=False)
-            source.unlink()
+                _normalize_exclusive_target(destination)
+                if _secure_read(destination) != raw:
+                    raise JournalError(
+                        f"{args.node} orphan preflight differs from current staging"
+                    )
+            else:
+                _atomic_write(destination, raw, replace=False)
+            if source_exists:
+                source.unlink()
             item.update(
                 {
                     "bootIdBefore": preflight["target"]["bootId"],
@@ -613,6 +1505,7 @@ def _mutate(args: argparse.Namespace, operation: str) -> Mapping[str, Any]:
                 state_directory / f"{args.node}-peer-during-ssh-loss.json"
             )
             if peer_destination.exists() or peer_destination.is_symlink():
+                _normalize_exclusive_target(peer_destination)
                 existing = _secure_read(peer_destination)
                 if existing != peer_raw:
                     raise JournalError(
@@ -831,6 +1724,11 @@ def parser() -> argparse.ArgumentParser:
     begin = commands.add_parser("begin")
     begin.add_argument("--acknowledgement", required=True)
     begin.set_defaults(handler=_begin)
+    rollover = commands.add_parser("rollover")
+    rollover.add_argument("--acknowledgement", required=True)
+    rollover.add_argument("--terminal-run-id", required=True)
+    rollover.add_argument("--terminal-state-digest", required=True)
+    rollover.set_defaults(handler=_rollover)
     status = commands.add_parser("status")
     status.set_defaults(handler=_status)
     preflight = commands.add_parser("preflight")

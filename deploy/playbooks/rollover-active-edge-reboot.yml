@@ -1,0 +1,178 @@
+---
+- name: Archive one terminal reconciled active Edge reboot run and allocate a fresh request
+  hosts: localhost
+  gather_facts: false
+  any_errors_fatal: true
+
+  vars:
+    edge_active_reboot_rollover_inventory_dir: "{{ hostvars['sbc1']['inventory_dir'] }}"
+    edge_active_reboot_rollover_evidence_root: >-
+      {{ edge_active_reboot_rollover_inventory_dir }}/generated/active-edge-reboot
+    edge_active_reboot_rollover_journal: >-
+      {{ playbook_dir }}/../scripts/active_edge_reboot_journal.py
+
+  tasks:
+    - name: Require exact separate terminal archive and fresh-allocation authority
+      ansible.builtin.assert:
+        that:
+          - groups.get('edge_nodes', []) | sort == ['sbc1', 'sbc2']
+          - edge_active_reboot_rollover_inventory_dir is match('^/')
+          - >-
+            hostvars['sbc1']['inventory_dir'] ==
+            edge_active_reboot_rollover_inventory_dir
+          - >-
+            hostvars['sbc2']['inventory_dir'] ==
+            edge_active_reboot_rollover_inventory_dir
+          - >-
+            edge_active_reboot_rollover_evidence_root ==
+            edge_active_reboot_rollover_inventory_dir ~
+            '/generated/active-edge-reboot'
+          - >-
+            edge_active_reboot_rollover_acknowledgement | default('') ==
+            'ARCHIVE_RECONCILED_ACTIVE_EDGE_REBOOT_AND_ALLOCATE_FRESH_RUN'
+          - >-
+            edge_active_reboot_rollover_terminal_run_id | default('') is
+            match('^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$')
+          - >-
+            edge_active_reboot_rollover_terminal_state_digest | default('') is
+            match('^sha256:[0-9a-f]{64}$')
+          - >-
+            edge_active_reboot_rollover_journal ==
+            playbook_dir ~ '/../scripts/active_edge_reboot_journal.py'
+        fail_msg: >-
+          Rollover requires the exact separate archive acknowledgement plus
+          the exact terminal reconciled run ID and self-digest. This local
+          allocation play never carries reboot authority.
+
+    - name: Inspect the existing protected reboot evidence root
+      ansible.builtin.stat:
+        path: "{{ edge_active_reboot_rollover_evidence_root }}"
+        follow: false
+      register: edge_active_reboot_rollover_root_stat
+
+    - name: Require the existing private evidence authority
+      ansible.builtin.assert:
+        that:
+          - edge_active_reboot_rollover_root_stat.stat.exists
+          - edge_active_reboot_rollover_root_stat.stat.isdir | default(false)
+          - not (edge_active_reboot_rollover_root_stat.stat.islnk | default(false))
+          - edge_active_reboot_rollover_root_stat.stat.mode == '0700'
+        fail_msg: The protected active-reboot evidence root is absent or unsafe.
+
+    - name: Archive the exact reconciled run and allocate one fresh durable request
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ edge_active_reboot_rollover_journal }}"
+          - --evidence-root
+          - "{{ edge_active_reboot_rollover_evidence_root }}"
+          - rollover
+          - --acknowledgement
+          - ARCHIVE_RECONCILED_ACTIVE_EDGE_REBOOT_AND_ALLOCATE_FRESH_RUN
+          - --terminal-run-id
+          - "{{ edge_active_reboot_rollover_terminal_run_id }}"
+          - --terminal-state-digest
+          - "{{ edge_active_reboot_rollover_terminal_state_digest }}"
+      changed_when: true
+      register: edge_active_reboot_rollover_raw
+
+    - name: Bind the verified local rollover result
+      ansible.builtin.set_fact:
+        edge_active_reboot_rollover_result: >-
+          {{ edge_active_reboot_rollover_raw.stdout | from_json }}
+
+    - name: Require exact archive and fresh pending result
+      ansible.builtin.assert:
+        that:
+          - >-
+            edge_active_reboot_rollover_result.apiVersion ==
+            'edge.vivolution.ae/active-edge-reboot-rollover-result/v0.1'
+          - >-
+            edge_active_reboot_rollover_result.status ==
+            'ARCHIVED_RECONCILED_RUN_AND_ALLOCATED_FRESH_RUN'
+          - >-
+            edge_active_reboot_rollover_result.archivedRunId ==
+            edge_active_reboot_rollover_terminal_run_id
+          - >-
+            edge_active_reboot_rollover_result.archivedStateDigest ==
+            edge_active_reboot_rollover_terminal_state_digest
+          - >-
+            edge_active_reboot_rollover_result.archiveManifestDigest is
+            match('^sha256:[0-9a-f]{64}$')
+          - >-
+            edge_active_reboot_rollover_result.newRunId is
+            match('^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$')
+          - >-
+            edge_active_reboot_rollover_result.newRunId !=
+            edge_active_reboot_rollover_result.archivedRunId
+          - >-
+            edge_active_reboot_rollover_result.newEvidenceDirectory ==
+            edge_active_reboot_rollover_evidence_root ~ '/' ~
+            edge_active_reboot_rollover_result.newRunId
+          - >-
+            edge_active_reboot_rollover_result.newStateDigest is
+            match('^sha256:[0-9a-f]{64}$')
+        fail_msg: The local rollover did not return its exact bounded result.
+
+    - name: Re-read the newly allocated active journal
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ edge_active_reboot_rollover_journal }}"
+          - --evidence-root
+          - "{{ edge_active_reboot_rollover_evidence_root }}"
+          - status
+      changed_when: false
+      register: edge_active_reboot_rollover_status_raw
+
+    - name: Require one fresh pending request with no reboot progress
+      ansible.builtin.assert:
+        that:
+          - >-
+            (edge_active_reboot_rollover_status_raw.stdout | from_json).runId ==
+            edge_active_reboot_rollover_result.newRunId
+          - >-
+            (edge_active_reboot_rollover_status_raw.stdout | from_json).stateDigest ==
+            edge_active_reboot_rollover_result.newStateDigest
+          - >-
+            (edge_active_reboot_rollover_status_raw.stdout | from_json).status ==
+            'IN_PROGRESS'
+          - >-
+            (edge_active_reboot_rollover_status_raw.stdout | from_json).currentNode ==
+            'sbc1'
+          - >-
+            (edge_active_reboot_rollover_status_raw.stdout | from_json).nodes.sbc1.phase ==
+            'PENDING'
+          - >-
+            (edge_active_reboot_rollover_status_raw.stdout | from_json).nodes.sbc2.phase ==
+            'PENDING'
+        fail_msg: Fresh allocation contains unexpected reboot progress.
+
+    - name: Inspect immutable rollover archive metadata
+      ansible.builtin.stat:
+        path: "{{ edge_active_reboot_rollover_evidence_root }}/{{ edge_active_reboot_rollover_terminal_run_id }}/{{ item }}"
+        follow: false
+      loop:
+        - journal/state.json
+        - rollover-archive-manifest.json
+        - rollover-receipt.json
+      register: edge_active_reboot_rollover_archive_stats
+
+    - name: Require protected retained journal manifest and receipt
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg | default(false)
+          - not (item.stat.islnk | default(false))
+          - item.stat.nlink | int == 1
+          - item.stat.mode == '0600'
+        fail_msg: Rollover archive metadata is missing linked or unprotected.
+      loop: "{{ edge_active_reboot_rollover_archive_stats.results }}"
+
+    - name: Report local archive and fresh request allocation
+      ansible.builtin.debug:
+        msg: >-
+          ARCHIVED_RECONCILED_ACTIVE_EDGE_REBOOT_AND_ALLOCATED_FRESH_RUN
+          archived={{ edge_active_reboot_rollover_result.archivedRunId }}
+          fresh={{ edge_active_reboot_rollover_result.newRunId }}
+          noRebootAuthority=true
