@@ -1,0 +1,35 @@
+owner=vivolution-controller-installer
+schema=1
+scope=ubuntu-host
+firewall_mode={{ cp_firewall_mode }}
+timezone={{ cp_timezone }}
+ntp_mode={{ cp_ntp_mode }}
+managed_directory=/etc/vivolution
+managed_directory=/etc/vivolution/releases
+managed_directory=/var/lib/vivolution/releases
+managed_directory=/var/lib/vivolution/artifacts
+managed_directory=/var/lib/vivolution/backups
+managed_directory=/var/lib/vivolution/ownership
+managed_directory=/var/cache/vivolution-installer
+managed_file=/etc/vivolution/installation-owner
+managed_file=/var/lib/vivolution/ownership/chrony-preinstall.state
+{% if cp_ntp_mode == 'custom' %}
+managed_file=/etc/chrony/chrony.conf
+{% if cp_chrony_original_config_present | bool %}
+restore_file=/etc/chrony/chrony.conf:/var/lib/vivolution/artifacts/original-host/chrony.conf
+{% endif %}
+{% else %}
+preserved_file=/etc/chrony/chrony.conf
+{% endif %}
+managed_file=/etc/apt/sources.list.d/pgdg.sources
+managed_file=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+managed_file=/etc/systemd/resolved.conf.d/99-vivolution-hardening.conf
+managed_file=/etc/systemd/journald.conf.d/20-vivolution-limits.conf
+managed_file=/etc/apt/apt.conf.d/20auto-upgrades
+managed_file=/etc/apt/apt.conf.d/52vivolution-unattended-upgrades
+managed_line=/etc/hosts:127.0.1.1
+managed_setting=hostname
+managed_setting=timezone
+managed_setting=hardware-clock-utc
+managed_package=chrony
+managed_service=chrony.service

@@ -76,7 +76,7 @@
           ansible.builtin.include_role:
             name: ubuntu_ssh_safety
 
-        - name: Activate and verify the exact inbound firewall
+        - name: Apply or preserve the declared firewall ownership boundary
           ansible.builtin.include_role:
             name: ubuntu_firewall
       always:

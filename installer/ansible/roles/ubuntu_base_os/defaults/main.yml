@@ -3,3 +3,7 @@ cp_pgdg_signing_key_fingerprint: B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
 cp_pgdg_signing_key_url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
 cp_pgdg_keyring_path: /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
 cp_journal_max_use: 512M
+cp_firewall_mode: infrastructure
+cp_timezone: Etc/UTC
+cp_ntp_mode: automatic
+cp_ntp_servers: []

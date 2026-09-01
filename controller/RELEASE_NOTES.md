@@ -1,4 +1,76 @@
-# CP1 controller release notes
+# Controller release notes
+
+## v0.3.0-rc6 turnkey-installer beta
+
+This section records the rc6 prerelease scope. Static, regression, and security
+verification pass; fresh Ubuntu 24.04 installation and certificate issuance
+remain live acceptance gates.
+
+### Enabled beta paths
+
+- Replaces the role-name prompt with a neutral five-option launcher:
+  **Create a new Controller Plane**, **Join an existing Controller Plane**,
+  **Deploy an Edge Appliance (SBC)**, **Manage an existing installation**, and
+  **Diagnostics / network readiness test**.
+- Enables only new one-node Controller creation, non-mutating diagnostics, and
+  bounded Manage actions for status, redacted support bundle, resume,
+  reconcile, and safe discard of a run proven to be pre-mutation.
+- Keeps Controller join/HA and full SBC deployment visibly unavailable. The
+  bounded Ubuntu Edge enrollment client is not presented as an SBC, and the
+  complete private Debian 13 AMD64 voice POC is not presented as Ubuntu-ready.
+- Removes CP1/CP2/CP3/SBC1/SBC2 naming guidance from product UX. Immutable node
+  IDs and authoritative topology state are independent of operator-selected
+  FQDNs/display names.
+
+### Operator preflight contract
+
+- Best-effort public-IP prefill compares multiple short-timeout HTTPS sources,
+  warns that egress NAT may differ from the inbound service address, and
+  requires confirmation/manual override.
+- DNS validation retains entered answers and offers retry, bounded timed retry,
+  change, a propagation-check link, and safe exit while reporting resolver
+  lookup failure, wrong A, and unsupported AAAA; retries best-effort flush the
+  local systemd-resolved cache. Authoritative/recursive and CAA diagnosis remain
+  future work.
+- Adds explicit `Infrastructure-managed` (default, no UFW ownership) and
+  `Installer-managed` (previewed lockout-safe UFW) firewall modes.
+- Selects timezone from the IANA list and configures Chrony with
+  automatic/provider or validated custom NTP sources before Controller service
+  activation. Durable timestamps remain UTC.
+
+### Evidence, ownership, and failure cleanup
+
+- Advances new rc6 runs to ledger schema 5, moves installer transaction state
+  beneath `/var/lib/vivolution/installer`, moves installer evidence beneath
+  `/var/log/vivolution/installer`, and records exact host ownership beneath
+  `/var/lib/vivolution/ownership`.
+- The complete FHS target still separates immutable releases in `/opt`,
+  configuration/secrets in `/etc`, state in `/var/lib`, evidence in `/var/log`,
+  staging in `/var/cache`, and volatile files in `/run`; rc6 does not claim the
+  complete runtime/release migration.
+- Adds levelled `TRACE` through `FATAL` records plus `AUDIT` events, RFC 3339
+  UTC context, sanitized command metadata/output, 10 MiB/five-generation log
+  rotation, and bounded per-command output. There is no unredacted or
+  shell-trace mode; compression and longer-term export/retention remain future.
+- The support bundle remains allowlist-based and excludes credentials, grants,
+  private keys, database URLs, authorization headers, carrier secrets, and
+  customer-sensitive call data.
+- Adds only a fail-closed **schema-5 pre-mutation discard** contract: exact
+  allow-listed objects are previewed by dry-run and removed only after
+  `DISCARD-INCOMPLETE` when schema-5 evidence proves no mutation. Legacy state
+  is detection/preview-only. Post-mutation
+  uninstall, repair, rollback, upgrade, backup/restore, and node removal are not
+  implemented by this candidate.
+
+### rc5 migration boundary
+
+- rc6 does not claim in-place resume or upgrade of an rc5 schema-4 run.
+- It may detect and preview a recognized rc3-rc5 ledger when the exact legacy
+  allowlist and phase states prove that no mutation began, but it refuses
+  automated deletion because the legacy lock is not race-safe. Fresh Ubuntu
+  24.04 remains the rc6 acceptance path.
+- A possibly mutated rc5 host requires inspection and a separately qualified
+  migration/removal procedure; pre-mutation discard refuses it.
 
 ## Let's Encrypt-only Controller HTTPS
 
@@ -28,7 +100,8 @@
   isolation, permissions restrictions, and search-engine exclusion to both document surfaces.
 - Adds strictly selected, bounded PostgreSQL sessions to the standalone Ubuntu installer with
   immediate server-side logout revocation, while retaining the legacy-safe file default and
-  explicit signed-cookie compatibility. CP2/CP3 and round-robin remain planned, not released.
+  explicit signed-cookie compatibility. Additional Controller nodes and
+  round-robin remain planned, not released.
 - Allows the privileged operator reconciler to validate, normalize and idempotently maintain
   an optional contact email without exposing identity administration to the runtime console.
 

@@ -1,0 +1,27 @@
+# Managed by the Vivolution Turnkey Installer. Manual changes are overwritten.
+# This host is an NTP client only; it never accepts inbound NTP requests.
+# Operator-selected NTP sources. No public or DHCP source is added in custom mode.
+{% for server in cp_ntp_servers %}
+server {{ server }} iburst
+{% endfor %}
+
+keyfile /etc/chrony/chrony.keys
+driftfile /var/lib/chrony/chrony.drift
+ntsdumpdir /var/lib/chrony
+dumpdir /var/lib/chrony
+logdir /var/log/chrony
+
+# Permit an initial correction only during early source updates, before the
+# installer activates database, ingress, controller, or voice workloads.
+makestep 1.0 3
+maxupdateskew 100.0
+rtcsync
+leapsectz right/UTC
+
+# Disable the network server and UDP command ports. chronyc uses the protected
+# local Unix socket for installer health checks.
+port 0
+cmdport 0
+
+log tracking measurements statistics
+logchange 0.5

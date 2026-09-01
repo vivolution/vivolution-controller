@@ -158,6 +158,19 @@
     validate: /usr/sbin/sshd -t -f %s
   notify: Reload OpenSSH
 
+- name: Record the exact installer-owned OpenSSH artifact
+  ansible.builtin.copy:
+    dest: /var/lib/vivolution/ownership/ubuntu-ssh.manifest
+    owner: root
+    group: root
+    mode: '0600'
+    content: |
+      owner=vivolution-controller-installer
+      schema=1
+      scope=ubuntu-ssh
+      managed_file=/etc/ssh/sshd_config.d/00-vivolution-hardening.conf
+      managed_service=ssh.service
+
 - name: Validate the complete OpenSSH configuration
   ansible.builtin.command:
     argv: [/usr/sbin/sshd, -t]

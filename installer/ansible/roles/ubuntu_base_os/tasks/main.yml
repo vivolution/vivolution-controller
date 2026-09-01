@@ -63,7 +63,7 @@
     ((cp_pre_firewall_service_masks.stdout | default('')) ~
      (cp_pre_firewall_service_masks.stderr | default('')))
 
-- name: Install trusted repository and firewall bootstrap packages
+- name: Install trusted repository bootstrap packages
   ansible.builtin.apt:
     name:
       - ca-certificates
@@ -72,7 +72,6 @@
       - openssh-server
       - postgresql-common
       - python3
-      - ufw
     state: present
     update_cache: true
     cache_valid_time: 3600
@@ -111,6 +110,95 @@
     - /var/lib/vivolution/releases
     - /var/lib/vivolution/artifacts
     - /var/lib/vivolution/backups
+
+- name: Create protected host ownership manifest directory
+  ansible.builtin.file:
+    path: /var/lib/vivolution/ownership
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Record the immutable pre-install Chrony configuration state
+  ansible.builtin.copy:
+    dest: /var/lib/vivolution/ownership/chrony-preinstall.state
+    owner: root
+    group: root
+    mode: '0600'
+    force: false
+    content: |
+      owner=vivolution-controller-installer
+      schema=1
+      config_present={{ 'yes' if cp_chrony_config_preexisting | bool else 'no' }}
+
+- name: Read the immutable pre-install Chrony configuration state
+  ansible.builtin.slurp:
+    src: /var/lib/vivolution/ownership/chrony-preinstall.state
+  register: cp_chrony_preinstall_state
+
+- name: Validate the immutable pre-install Chrony configuration state
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cp_chrony_preinstall_state.content | b64decode) in
+        ['owner=vivolution-controller-installer\nschema=1\nconfig_present=yes\n',
+         'owner=vivolution-controller-installer\nschema=1\nconfig_present=no\n']
+    fail_msg: The saved pre-install Chrony ownership state is invalid.
+
+- name: Remember whether an original provider Chrony configuration must be preserved
+  ansible.builtin.set_fact:
+    cp_chrony_original_config_present: >-
+      {{ (cp_chrony_preinstall_state.content | b64decode).endswith('config_present=yes\n') }}
+
+- name: Create protected original-host backup directory when custom time is selected
+  ansible.builtin.file:
+    path: /var/lib/vivolution/artifacts/original-host
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  when:
+    - cp_ntp_mode == 'custom'
+    - cp_chrony_original_config_present | bool
+
+- name: Inspect an existing original provider Chrony backup
+  ansible.builtin.stat:
+    path: /var/lib/vivolution/artifacts/original-host/chrony.conf
+    follow: false
+  register: cp_original_chrony_backup
+  when:
+    - cp_ntp_mode == 'custom'
+    - cp_chrony_original_config_present | bool
+
+- name: Reject an unsafe original provider Chrony backup object
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cp_original_chrony_backup.stat.exists or
+        (cp_original_chrony_backup.stat.isreg | default(false) and
+         not (cp_original_chrony_backup.stat.islnk | default(false)) and
+         cp_original_chrony_backup.stat.uid | int == 0 and
+         cp_original_chrony_backup.stat.gid | int == 0 and
+         cp_original_chrony_backup.stat.mode == '0600' and
+         cp_original_chrony_backup.stat.nlink | int == 1)
+    fail_msg: The saved original provider Chrony configuration is unsafe.
+  when:
+    - cp_ntp_mode == 'custom'
+    - cp_chrony_original_config_present | bool
+
+- name: Preserve the original provider Chrony configuration before custom ownership
+  ansible.builtin.copy:
+    src: /etc/chrony/chrony.conf
+    remote_src: true
+    dest: /var/lib/vivolution/artifacts/original-host/chrony.conf
+    owner: root
+    group: root
+    mode: '0600'
+    force: false
+  when:
+    - cp_ntp_mode == 'custom'
+    - cp_chrony_original_config_present | bool
+    - not cp_original_chrony_backup.stat.exists
 
 - name: Create protected repository bootstrap workspace
   ansible.builtin.file:
@@ -233,6 +321,7 @@
     name:
       - acl
       - caddy
+      - chrony
       - curl
       - iproute2
       - jq
@@ -244,11 +333,152 @@
       - postgresql-contrib-17
       - python3-psycopg
       - unattended-upgrades
-      - ufw
     state: present
     update_cache: true
     cache_valid_time: 3600
     lock_timeout: 180
+
+- name: Install the host firewall only when the installer owns it
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 180
+  when: cp_firewall_mode == 'installer'
+
+- name: Inspect the configured host timezone
+  ansible.builtin.command:
+    argv: [timedatectl, show, --property=Timezone, --value]
+  register: cp_current_timezone
+  changed_when: false
+
+- name: Apply the selected canonical IANA timezone
+  ansible.builtin.command:
+    argv: [timedatectl, set-timezone, "{{ cp_timezone }}"]
+  when: cp_current_timezone.stdout | trim != cp_timezone
+  changed_when: true
+
+- name: Inspect the hardware clock mode
+  ansible.builtin.command:
+    argv: [timedatectl, show, --property=LocalRTC, --value]
+  register: cp_local_rtc_mode
+  changed_when: false
+
+- name: Keep the hardware clock in UTC
+  ansible.builtin.command:
+    argv: [timedatectl, set-local-rtc, '0', --adjust-system-clock]
+  when: cp_local_rtc_mode.stdout | trim != 'no'
+  changed_when: true
+
+- name: Install the declared Chrony client policy
+  ansible.builtin.template:
+    src: chrony.conf.j2
+    dest: /etc/chrony/chrony.conf
+    owner: root
+    group: root
+    mode: '0644'
+    validate: /usr/sbin/chronyd -p -f %s
+  register: cp_chrony_configuration
+  when: cp_ntp_mode == 'custom'
+
+- name: Validate the effective automatic or custom Chrony policy
+  ansible.builtin.command:
+    argv: [/usr/sbin/chronyd, -p, -f, /etc/chrony/chrony.conf]
+  register: cp_effective_chrony_configuration
+  changed_when: false
+  failed_when: false
+
+- name: Require a valid client-only Chrony policy
+  ansible.builtin.assert:
+    that:
+      - cp_effective_chrony_configuration.rc == 0
+      - >-
+        cp_effective_chrony_configuration.stdout |
+        regex_search('(?m)^allow(?:\\s|$)') is none
+    fail_msg: >-
+      The effective Chrony policy is invalid or permits inbound NTP clients.
+      Automatic mode preserves safe provider sources; custom mode owns the
+      exact selected sources.
+
+- name: Activate the managed Chrony time client
+  ansible.builtin.systemd_service:
+    name: chrony.service
+    enabled: true
+    state: >-
+      {{ 'restarted'
+         if (cp_chrony_configuration.changed | default(false))
+         else 'started' }}
+
+- name: Inspect the replaced systemd-timesyncd provider
+  ansible.builtin.command:
+    argv: [systemctl, is-active, systemd-timesyncd.service]
+  register: cp_systemd_timesyncd_state
+  changed_when: false
+  failed_when: false
+
+- name: Require Chrony to be the only active host time authority
+  ansible.builtin.assert:
+    that:
+      - cp_systemd_timesyncd_state.stdout | trim != 'active'
+    fail_msg: systemd-timesyncd remains active alongside Chrony; refusing competing clocks.
+
+- name: Wait for Chrony to select a bounded synchronized source
+  ansible.builtin.command:
+    argv:
+      - chronyc
+      - waitsync
+      - '60'
+      - '1.0'
+      - '100.0'
+      - '2'
+  environment:
+    LC_ALL: C
+  register: cp_chrony_waitsync
+  changed_when: false
+  failed_when: false
+
+- name: Inspect the effective Chrony synchronization state
+  ansible.builtin.command:
+    argv: [chronyc, -n, tracking]
+  environment:
+    LC_ALL: C
+  register: cp_chrony_tracking
+  changed_when: false
+  failed_when: false
+
+- name: Inspect systemd time synchronization after Chrony activation
+  ansible.builtin.command:
+    argv:
+      - timedatectl
+      - show
+      - --property=NTP
+      - --property=NTPSynchronized
+      - --property=Timezone
+      - --property=LocalRTC
+      - --no-pager
+  register: cp_managed_time_synchronization
+  changed_when: false
+
+- name: Require synchronized UTC-backed host time before controller services
+  ansible.builtin.assert:
+    that:
+      - cp_chrony_waitsync.rc == 0
+      - cp_chrony_tracking.rc == 0
+      - >-
+        cp_chrony_tracking.stdout |
+        regex_search('(?m)^Leap status\\s*:\\s*Normal$') is not none
+      - >-
+        cp_chrony_tracking.stdout |
+        regex_search('(?m)^Stratum\\s*:\\s*([1-9][0-9]*)$', '\\1') is not none
+      - "'NTP=yes' in cp_managed_time_synchronization.stdout_lines"
+      - "'NTPSynchronized=yes' in cp_managed_time_synchronization.stdout_lines"
+      - "'Timezone=' ~ cp_timezone in cp_managed_time_synchronization.stdout_lines"
+      - "'LocalRTC=no' in cp_managed_time_synchronization.stdout_lines"
+    fail_msg: >-
+      Chrony did not achieve a trusted synchronized state. Verify outbound UDP
+      123, DNS when hostnames are used, and the selected NTP sources before
+      retrying; controller, database, and ingress services remain masked.
 
 - name: Require PostgreSQL 17 packages from the verified repository
   ansible.builtin.command:
@@ -393,3 +623,11 @@
     - /var/cache/vivolution-installer/ACCC4CF8.asc
     - /var/cache/vivolution-installer/apt.postgresql.org.gpg
   changed_when: false
+
+- name: Record exact installer-owned Ubuntu host artifacts and settings
+  ansible.builtin.template:
+    src: ubuntu-host.manifest.j2
+    dest: /var/lib/vivolution/ownership/ubuntu-host.manifest
+    owner: root
+    group: root
+    mode: '0600'
