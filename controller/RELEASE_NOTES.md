@@ -1,5 +1,22 @@
 # Controller release notes
 
+## v0.3.0-rc7 Ubuntu time-provider qualification fix
+
+- Fixes a deterministic Ubuntu 24.04 failure where the temporary package
+  service-start guard allowed `systemd-timesyncd` to remain active after its
+  package unit was replaced by Chrony. The handoff now handles both a normally
+  loaded unit and the package-replaced `LoadState=not-found`/`ActiveState=active`
+  state before Controller services are activated.
+- Keeps the strict Chrony readiness contract for bounded clock correction,
+  normal leap status, valid stratum, and systemd NTP synchronization, while no
+  longer rejecting a newly synchronized host solely because its initial
+  frequency-skew estimate has not yet converged.
+- A clean Ubuntu 24.04.4 ARM64 UTM run now passes the host base, SSH safety,
+  PostgreSQL, PgBouncer, Podman image build, migrations, Controller activation,
+  and session-maintenance stages. It then fails closed at trusted HTTPS exactly
+  as expected on a NAT-only network where public TCP 80/443 cannot reach Caddy.
+  Public certificate issuance on Azure remains the live acceptance gate.
+
 ## v0.3.0-rc6 turnkey-installer beta
 
 This section records the rc6 prerelease scope. Static, regression, and security

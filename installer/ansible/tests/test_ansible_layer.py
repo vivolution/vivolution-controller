@@ -136,7 +136,7 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
             tasks.index("Install standalone controller foundation packages"),
         )
         self.assertIn("/var/run/reboot-required", tasks)
-        self.assertIn("/v0.3.0-rc6/install.sh", tasks)
+        self.assertIn("/v0.3.0-rc7/install.sh", tasks)
         self.assertIn("sudo sh -s -- resume", tasks)
         for unit in (
             "caddy.service",
@@ -272,8 +272,24 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
         self.assertIn("timedatectl, set-local-rtc, '0'", tasks)
         self.assertIn("chronyc", tasks)
         self.assertIn("waitsync", tasks)
+        self.assertIn(
+            "      - '60'\n      - '1.0'\n      - '0'\n      - '2'",
+            tasks,
+        )
+        self.assertNotIn("      - '100.0'", tasks)
         self.assertIn("systemd-timesyncd", tasks)
+        self.assertIn("--property=LoadState", tasks)
+        self.assertIn("--property=ActiveState", tasks)
+        self.assertIn("Stop and disable a loaded systemd-timesyncd provider", tasks)
+        self.assertIn("Stop an active package-replaced systemd-timesyncd provider", tasks)
+        self.assertIn("argv: [systemctl, stop, systemd-timesyncd.service]", tasks)
+        self.assertIn("'ActiveState=active'", tasks)
+        self.assertIn("'LoadState=loaded' not in", tasks)
+        self.assertIn("enabled: false", tasks)
+        self.assertIn("state: stopped", tasks)
         self.assertIn("only active host time authority", tasks)
+        self.assertIn("cp_systemd_timesyncd_state.rc in [3, 4]", tasks)
+        self.assertIn("['active', 'activating', 'reloading', 'deactivating']", tasks)
         self.assertIn("NTPSynchronized=yes", tasks)
         self.assertIn("controller, database, and ingress services remain masked", tasks)
         self.assertLess(tasks.index("waitsync"), tasks.index("Require PostgreSQL 17"))
@@ -291,6 +307,20 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
         self.assertIn("Automatic mode preserves safe provider sources", tasks)
         self.assertIn("chrony-preinstall.state", tasks)
         self.assertIn("original-host/chrony.conf", tasks)
+        chrony_policy = tasks.index("Require a valid client-only Chrony policy")
+        loaded_handoff = tasks.index("Stop and disable a loaded systemd-timesyncd provider")
+        replaced_handoff = tasks.index(
+            "Stop an active package-replaced systemd-timesyncd provider"
+        )
+        chrony_activation = tasks.index("Activate the managed Chrony time client")
+        timesyncd_postcondition = tasks.index(
+            "Require Chrony to be the only active host time authority"
+        )
+        self.assertLess(chrony_policy, loaded_handoff)
+        self.assertLess(loaded_handoff, chrony_activation)
+        self.assertLess(chrony_policy, replaced_handoff)
+        self.assertLess(replaced_handoff, chrony_activation)
+        self.assertLess(chrony_activation, timesyncd_postcondition)
 
     def test_owned_host_artifacts_have_protected_scoped_manifests(self):
         base = read("roles/ubuntu_base_os/tasks/main.yml")
@@ -307,6 +337,7 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
             self.assertIn("mode: '0600'", content)
         self.assertIn("managed_file=/etc/chrony/chrony.conf", manifest)
         self.assertIn("managed_setting=hardware-clock-utc", manifest)
+        self.assertIn("managed_setting=systemd-timesyncd-inactive", manifest)
 
     def test_caddy_serves_both_fqdns_and_disables_admin_api(self):
         caddyfile = read("roles/ubuntu_ingress/templates/Caddyfile.j2")

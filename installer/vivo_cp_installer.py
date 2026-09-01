@@ -35,7 +35,7 @@ import zoneinfo
 from pathlib import Path
 
 
-INSTALLER_VERSION = "0.3.0-rc6"
+INSTALLER_VERSION = "0.3.0-rc7"
 LEDGER_SCHEMA_VERSION = 5
 SUPPORTED_OS_ID = "ubuntu"
 SUPPORTED_OS_VERSION = "24.04"

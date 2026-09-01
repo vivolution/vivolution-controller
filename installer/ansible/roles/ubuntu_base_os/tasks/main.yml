@@ -315,7 +315,7 @@
     fail_msg: >-
       Ubuntu updates require a reboot. Reboot this VM, then run
       curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https'
-      --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc6/install.sh
+      --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc7/install.sh
       | sudo sh -s -- resume; Controller network services remain masked.
 
 - name: Install standalone controller foundation packages
@@ -403,6 +403,41 @@
       Automatic mode preserves safe provider sources; custom mode owns the
       exact selected sources.
 
+- name: Inspect the replaced systemd-timesyncd unit before provider handoff
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - --property=LoadState
+      - --property=ActiveState
+      - --no-pager
+      - systemd-timesyncd.service
+  register: cp_systemd_timesyncd_before_handoff
+  changed_when: false
+  failed_when: false
+
+- name: Stop and disable a loaded systemd-timesyncd provider
+  ansible.builtin.systemd_service:
+    name: systemd-timesyncd.service
+    enabled: false
+    state: stopped
+  when: "'LoadState=loaded' in cp_systemd_timesyncd_before_handoff.stdout_lines"
+
+- name: Stop an active package-replaced systemd-timesyncd provider
+  ansible.builtin.command:
+    argv: [systemctl, stop, systemd-timesyncd.service]
+  when:
+    - "'LoadState=loaded' not in cp_systemd_timesyncd_before_handoff.stdout_lines"
+    - >-
+      cp_systemd_timesyncd_before_handoff.stdout_lines |
+      intersect([
+        'ActiveState=active',
+        'ActiveState=activating',
+        'ActiveState=reloading',
+        'ActiveState=deactivating'
+      ]) | length > 0
+  changed_when: true
+
 - name: Activate the managed Chrony time client
   ansible.builtin.systemd_service:
     name: chrony.service
@@ -422,7 +457,10 @@
 - name: Require Chrony to be the only active host time authority
   ansible.builtin.assert:
     that:
-      - cp_systemd_timesyncd_state.stdout | trim != 'active'
+      - cp_systemd_timesyncd_state.rc in [3, 4]
+      - >-
+        cp_systemd_timesyncd_state.stdout | trim not in
+        ['active', 'activating', 'reloading', 'deactivating']
     fail_msg: systemd-timesyncd remains active alongside Chrony; refusing competing clocks.
 
 - name: Wait for Chrony to select a bounded synchronized source
@@ -432,7 +470,7 @@
       - waitsync
       - '60'
       - '1.0'
-      - '100.0'
+      - '0'
       - '2'
   environment:
     LC_ALL: C

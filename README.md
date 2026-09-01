@@ -1,8 +1,10 @@
 # Vivolution Control Plane and SBC
 
-Status: `v0.3.0-rc6` is the approved universal-launcher beta source for public
-prerelease packaging. Static and security gates pass; real PostgreSQL, fresh
-Ubuntu, and live Teams/SIP acceptance remain pending.
+Status: `v0.3.0-rc7` is the approved universal-launcher beta source for public
+prerelease packaging. Static and security gates pass. A clean Ubuntu 24.04.4
+ARM64 run now reaches Controller activation and stops only at the expected
+public ACME boundary when inbound TCP 80/443 is unavailable; Azure certificate
+issuance and live Teams/SIP acceptance remain pending.
 
 ## Turnkey Controller installer
 
@@ -22,15 +24,15 @@ public bootstrap:
 curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/main/install.sh | sudo sh
 ```
 
-The rc6 wizard validates the host and public DNS, detects and confirms the
+The rc7 wizard validates the host and public DNS, detects and confirms the
 public IPv4, asks for the node/shared FQDNs, firewall ownership, initial
 operator, Let's Encrypt ACME contact, IANA timezone, and Chrony policy,
 generates protected credentials, installs PostgreSQL/PgBouncer/Podman/Caddy,
 deploys the Controller, runs health checks, and prints the console URL.
-Interrupted rc6 runs must use the exact version-pinned bootstrap:
+Interrupted rc7 runs must use the exact version-pinned bootstrap:
 
 ```sh
-curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc6/install.sh | sudo sh -s -- resume
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc7/install.sh | sudo sh -s -- resume
 ```
 
 - [Installer guide](installer/README.md)
@@ -38,7 +40,7 @@ curl --fail --show-error --silent --location --proto '=https' --proto-redir '=ht
 - [Controller application and operator guide](controller/README.md)
 
 The separate public `vivolution-install` repository uses immutable tags and
-minimal checksum-pinned assets. The `v0.3.0-rc6` prerelease promotes one
+minimal checksum-pinned assets. The `v0.3.0-rc7` prerelease promotes one
 permanent universal-launcher command and retains a separate enrollment-only
 Edge archive for compatibility. The latter does not install an SBC, SIP/RTP,
 Teams, or a carrier profile, and neither artifact claims Controller high
@@ -51,12 +53,12 @@ shared FQDN; trusted HTTPS readiness fails closed if issuance is unavailable.
 This Controller certificate flow is separate from future Teams/SBC signaling
 certificates.
 
-The rc6 beta requires a fresh installation and does not claim to convert an
+The rc7 beta requires a fresh installation and does not claim to convert an
 rc5 ledger or a certificate already cached by an older host.
 
-### v0.3.0-rc6 beta boundary
+### v0.3.0-rc7 beta boundary
 
-The rc6 launcher provides one permanent installer command and this neutral
+The rc7 launcher provides one permanent installer command and this neutral
 menu:
 
 ```text
@@ -73,14 +75,15 @@ It does not suggest CP1/CP2/CP3/SBC1/SBC2 hostnames. The enabled scope is one
 new standalone Controller, non-mutating diagnostics, and Manage actions for
 status, a redacted support bundle, resume, reconcile, and discard only when
 schema-5 evidence proves that an incomplete run never crossed the mutation
-boundary. Recognized rc3-rc5 state is detected and can be previewed, but rc6
+boundary. Recognized rc3-rc5 state is detected and can be previewed, but rc7
 refuses to delete it because the older removable lock cannot provide the same
 race-free safety guarantee.
 
 The candidate adds multi-source HTTPS public-IP prefill with operator
 confirmation, interactive DNS wait/retry, explicit infrastructure-managed or
 installer-managed firewall ownership, IANA timezone selection, Chrony
-automatic/custom NTP configuration, and audit-grade redacted logging. It begins
+automatic/custom NTP configuration, an explicit systemd-timesyncd-to-Chrony
+provider handoff, and audit-grade redacted logging. It begins
 the secured-namespace migration with installer state/logs and scoped host
 ownership evidence beneath `/var/lib/vivolution` and `/var/log/vivolution`.
 Moving releases to `/opt/vivolution/releases` and completing the broader FHS
@@ -89,11 +92,11 @@ migration and mutation manifest remain future lifecycle work.
 Controller joining/HA, full Edge voice installation, upgrade, rollback,
 repair, backup/restore, and post-mutation uninstall remain design-only. The
 private complete voice-plane POC currently expects Debian 13 AMD64; the public
-Controller and bounded enrollment-only Edge expect Ubuntu 24.04. Therefore rc6
+Controller and bounded enrollment-only Edge expect Ubuntu 24.04. Therefore rc7
 must keep **Deploy an Edge Appliance (SBC)** unavailable until one declared
 Edge OS contract is ported and independently qualified.
 
-rc6 does not claim in-place migration or resume from the rc5 schema-4 ledger.
+rc7 does not claim in-place migration or resume from the rc5 schema-4 ledger.
 It can detect and preview an exact recognized legacy state set, but automated
 legacy deletion is deliberately refused. Fresh Ubuntu 24.04 remains the
 acceptance path. Any rc5 host requires either replacement or a separately
@@ -127,11 +130,13 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 
 ## Current boundary
 
-- The `v0.3.0-rc6` source has separate deterministic Controller and Edge
+- The `v0.3.0-rc7` source has separate deterministic Controller and Edge
   enrollment archives, checksum-pinned bootstraps, exact allowlists, and tamper
-  tests. It corrects the stock Ubuntu 24.04 `/etc/os-release` symlink preflight
-  and adds a non-installing packaged host-OS check. A complete fresh-host run
-  remains an acceptance gate.
+  tests. It corrects the stock Ubuntu 24.04 `/etc/os-release` symlink preflight,
+  safely retires a package-replaced but still-running systemd-timesyncd process,
+  and avoids rejecting a newly synchronized Chrony client solely because its
+  initial frequency-skew estimate has not converged. Public ACME validation on
+  the Azure test VM remains the next fresh-host acceptance gate.
 - The bounded Edge enrollment client accepts the canonical Controller shared
   HTTPS URL plus a display-once grant, creates a local Ed25519 identity, enters
   pending approval, and reports signed heartbeat visibility after fingerprint

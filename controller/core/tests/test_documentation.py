@@ -109,7 +109,7 @@ class OperatorDocumentationTests(TestCase):
         self.assertContains(response, "Configuration version")
         self.assertContains(response, "One standalone Controller")
         self.assertContains(response, "Multi-controller HA")
-        self.assertContains(response, "/v0.3.0-rc6/install.sh")
+        self.assertContains(response, "/v0.3.0-rc7/install.sh")
         self.assertContains(response, "External HTTPS load balancer")
         self.assertContains(response, "support-bundle")
         self.assertContains(response, "unavailable / planned")

@@ -1,8 +1,9 @@
 # Vivolution Turnkey Installer
 
-Status: `v0.3.0-rc6` beta implementation contract. Static, regression, and
-security gates pass; live services and a fresh Ubuntu 24.04 qualification run
-remain outstanding.
+Status: `v0.3.0-rc7` beta implementation contract. Static, regression, and
+security gates pass. A clean Ubuntu 24.04.4 ARM64 run reaches Controller
+activation and the trusted-HTTPS gate; public ACME validation on the Azure test
+VM remains outstanding.
 
 ## Product boundary
 
@@ -19,7 +20,7 @@ complete Vivolution lifecycle:
 - status, repair, backup, restore, upgrade, rollback, remove-node, and uninstall.
 
 Only a mode that has passed its own clean-machine and failure tests may appear
-as enabled in the released interactive menu. The rc6 beta enables creation
+as enabled in the released interactive menu. The rc7 beta enables creation
 of a new one-node Controller Plane, non-mutating diagnostics, and a bounded
 Manage surface for status, support bundle, resume, reconcile, and safe
 pre-mutation discard. Join, HA, complete SBC deployment, backup/restore,
@@ -43,7 +44,7 @@ entry point with a checksum-pinned, reviewed release bootstrap:
 sudo ./installer/install.sh
 ```
 
-The rc6 beta begins with this neutral menu:
+The rc7 beta begins with this neutral menu:
 
 ```text
 Vivolution Turnkey Installer
@@ -89,14 +90,14 @@ operator sees any disagreement, is warned that outbound NAT may differ from
 the inbound/load-balancer address, and must confirm or enter the service IPv4.
 Failure offers Retry, manual entry, requirements, or safe exit.
 
-The rc6 implementation validates the system resolver's A/AAAA results. It
+The rc7 implementation validates the system resolver's A/AAAA results. It
 reports lookup failure, wrong A answers, and unsupported AAAA answers without
 discarding the collected form. The operator can retry, run a bounded timed
 retry, change the FQDN/address, follow a direct propagation-check link, or exit
 and resume later. Retry paths make a bounded best-effort call to flush the local
 systemd-resolved cache first. Direct authoritative-versus-recursive
 classification, split-view analysis, and CAA diagnosis remain later diagnostics
-work and must not be claimed by rc6.
+work and must not be claimed by rc7.
 
 ## Supported platform
 
@@ -107,7 +108,7 @@ memory, and disk envelope.
 
 That Ubuntu contract currently covers the Controller and bounded
 enrollment-only Edge client. The complete private OpenSIPS/RTPengine voice-plane
-preflight currently declares Debian 13 AMD64. rc6 must keep **Deploy an Edge
+preflight currently declares Debian 13 AMD64. rc7 must keep **Deploy an Edge
 Appliance (SBC)** unavailable on Ubuntu; neither the Debian POC nor the bounded
 enrollment client may be presented as a qualified Ubuntu SBC. A future Edge
 release must declare one role-specific OS contract and pass its own clean-host,
@@ -129,15 +130,19 @@ The initial standalone controller uses:
   application image;
 - PgBouncer on loopback;
 - PostgreSQL 17 on loopback;
-- an explicit firewall ownership mode. `Infrastructure-managed` is the rc6
+- an explicit firewall ownership mode. `Infrastructure-managed` is the rc7
   default: the installer does not enable/reset UFW and the operator's
   NSG/cloud/on-premises firewall owns exposure. `Installer-managed` previews
   and applies inbound default-deny, HTTPS/ACME access, and SSH restricted to
   validated administrator sources while preserving the active session. This
   release publishes IPv4 only and creates no IPv6 inbound allow rule;
-- Chrony with a selected IANA timezone, UTC RTC, and automatic/provider or
-  validated custom NTP sources. Database, CDR, API, inter-node, and audit
-  timestamps remain timezone-aware UTC regardless of host display timezone;
+- Chrony with a selected IANA timezone, UTC RTC, and automatic packaged/existing
+  Chrony policy or validated custom NTP sources. The validated handoff stops
+  systemd-timesyncd even when package removal left its process active without a
+  loaded unit file. Readiness requires bounded correction, normal leap state,
+  valid stratum, and systemd NTP synchronization without waiting for a fresh
+  frequency-skew estimate to converge. Database, CDR, API, inter-node, and
+  audit timestamps remain timezone-aware UTC regardless of host display timezone;
 - systemd/journald and unattended Ubuntu security updates.
 
 Automatic container-image updates remain disabled. The candidate binds the
@@ -148,7 +153,7 @@ public-key distribution remain mandatory gates before production publication.
 
 ## Secured FHS namespace and persistent records
 
-rc6 starts the namespace migration with transaction state under
+rc7 starts the namespace migration with transaction state under
 `/var/lib/vivolution/installer`, evidence under
 `/var/log/vivolution/installer`, and exact host ownership records beneath
 `/var/lib/vivolution/ownership`. It does not yet migrate every existing
@@ -163,14 +168,14 @@ Controller runtime path. The complete approved FHS target is:
 /run/vivolution/           volatile sockets, locks and runtime files
 ```
 
-rc6 records scoped host/time, SSH, and firewall ownership evidence plus package
+rc7 records scoped host/time, SSH, and firewall ownership evidence plus package
 intent. A complete per-object mutation manifest covering every systemd, apt,
 Caddy, PostgreSQL, and runtime change is still required before post-mutation
 removal can be offered. Cleanup must eventually operate on exact records, never
 a broad prefix/glob.
 
 The `/opt/vivolution/releases` move and remaining runtime/cache consolidation
-are future, separately tested lifecycle work and are not an rc6 completion
+are future, separately tested lifecycle work and are not an rc7 completion
 claim.
 
 ### Installer and lifecycle logging
@@ -197,7 +202,7 @@ action.
 
 ### Failed-run discard and uninstall
 
-The rc6 beta's only destructive lifecycle action is a schema-5
+The rc7 beta's only destructive lifecycle action is a schema-5
 pre-mutation discard. It is available only when the schema-5 ledger/ownership
 manifest proves that no apt, firewall, service, database, certificate, or
 application mutation began. A dry-run previews exact allow-listed objects;
@@ -212,10 +217,10 @@ manifest cleanup, and safe package-ownership checks. The installer must never
 delete foreign data, shared packages, unrelated firewall rules, external DNS,
 cloud resources, Microsoft objects, carrier objects, or off-host backups.
 
-The schema-5 rc6 beta does not claim in-place resume/upgrade or automated
+The schema-5 rc7 beta does not claim in-place resume/upgrade or automated
 deletion of an rc5 schema-4 ledger. It can detect and preview recognized legacy
 state, but execution is refused because the older lock cannot provide race-free
-cleanup. A fresh Ubuntu VM remains the rc6 acceptance path; an old host requires
+cleanup. A fresh Ubuntu VM remains the rc7 acceptance path; an old host requires
 a separately reviewed offline cleanup/migration plan.
 
 ## Web console and documentation
