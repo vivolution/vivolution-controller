@@ -23,6 +23,9 @@ preserved_file=/etc/chrony/chrony.conf
 {% endif %}
 managed_file=/etc/apt/sources.list.d/pgdg.sources
 managed_file=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+managed_file=/etc/apt/sources.list.d/caddy-stable.sources
+managed_file=/etc/apt/preferences.d/vivolution-caddy
+managed_file=/usr/share/keyrings/caddy-stable-archive-keyring.gpg
 managed_file=/etc/systemd/resolved.conf.d/99-vivolution-hardening.conf
 managed_file=/etc/systemd/journald.conf.d/20-vivolution-limits.conf
 managed_file=/etc/apt/apt.conf.d/20auto-upgrades
@@ -32,5 +35,7 @@ managed_setting=hostname
 managed_setting=timezone
 managed_setting=hardware-clock-utc
 managed_setting=systemd-timesyncd-inactive
+managed_package=caddy:2.11.4
 managed_package=chrony
+managed_package=runc
 managed_service=chrony.service

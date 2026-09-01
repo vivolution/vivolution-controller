@@ -1,9 +1,10 @@
 # Vivolution Turnkey Installer
 
-Status: `v0.3.0-rc7` beta implementation contract. Static, regression, and
+Status: `v0.3.0-rc8` beta implementation contract. Static, regression, and
 security gates pass. A clean Ubuntu 24.04.4 ARM64 run reaches Controller
-activation and the trusted-HTTPS gate; public ACME validation on the Azure test
-VM remains outstanding.
+activation and the expected NAT-only trusted-HTTPS boundary. A separate clean
+Ubuntu 24.04 AMD64 Azure run completes installation with publicly trusted
+Let's Encrypt certificates for both Controller FQDNs.
 
 ## Product boundary
 
@@ -20,7 +21,7 @@ complete Vivolution lifecycle:
 - status, repair, backup, restore, upgrade, rollback, remove-node, and uninstall.
 
 Only a mode that has passed its own clean-machine and failure tests may appear
-as enabled in the released interactive menu. The rc7 beta enables creation
+as enabled in the released interactive menu. The rc8 beta enables creation
 of a new one-node Controller Plane, non-mutating diagnostics, and a bounded
 Manage surface for status, support bundle, resume, reconcile, and safe
 pre-mutation discard. Join, HA, complete SBC deployment, backup/restore,
@@ -44,7 +45,7 @@ entry point with a checksum-pinned, reviewed release bootstrap:
 sudo ./installer/install.sh
 ```
 
-The rc7 beta begins with this neutral menu:
+The rc8 beta begins with this neutral menu:
 
 ```text
 Vivolution Turnkey Installer
@@ -90,14 +91,14 @@ operator sees any disagreement, is warned that outbound NAT may differ from
 the inbound/load-balancer address, and must confirm or enter the service IPv4.
 Failure offers Retry, manual entry, requirements, or safe exit.
 
-The rc7 implementation validates the system resolver's A/AAAA results. It
+The rc8 implementation validates the system resolver's A/AAAA results. It
 reports lookup failure, wrong A answers, and unsupported AAAA answers without
 discarding the collected form. The operator can retry, run a bounded timed
 retry, change the FQDN/address, follow a direct propagation-check link, or exit
 and resume later. Retry paths make a bounded best-effort call to flush the local
 systemd-resolved cache first. Direct authoritative-versus-recursive
 classification, split-view analysis, and CAA diagnosis remain later diagnostics
-work and must not be claimed by rc7.
+work and must not be claimed by rc8.
 
 ## Supported platform
 
@@ -108,29 +109,33 @@ memory, and disk envelope.
 
 That Ubuntu contract currently covers the Controller and bounded
 enrollment-only Edge client. The complete private OpenSIPS/RTPengine voice-plane
-preflight currently declares Debian 13 AMD64. rc7 must keep **Deploy an Edge
+preflight currently declares Debian 13 AMD64. rc8 must keep **Deploy an Edge
 Appliance (SBC)** unavailable on Ubuntu; neither the Debian POC nor the bounded
 enrollment client may be presented as a qualified Ubuntu SBC. A future Edge
 release must declare one role-specific OS contract and pass its own clean-host,
 media, failure, and live-call qualification.
 
-The first online bundle uses Ubuntu-signed packages plus the PostgreSQL Global
-Development Group repository for PostgreSQL 17. The complete PGDG signing-key
-fingerprint is verified before the repository is trusted. An offline signed
-bundle is a later release artifact, not an implicit promise of the online
-installer.
+The first online bundle uses Ubuntu-signed packages, the PostgreSQL Global
+Development Group repository for PostgreSQL 17, and Caddy's official stable
+repository for exact Caddy `2.11.4`. The complete PGDG and Caddy primary-key
+fingerprints are verified before either repository is trusted; the immutable
+Caddy key-file digest and exact package version are also pinned. An offline
+signed bundle is a later release artifact, not an implicit promise of the
+online installer.
 
 ## Runtime baseline
 
 The initial standalone controller uses:
 
 - Caddy pinned to the Let's Encrypt production ACME directory as its single
-  Controller-web certificate issuer, with automatic public-certificate renewal;
+  Controller-web certificate issuer, with exact Caddy `2.11.4` and automatic
+  public-certificate renewal;
 - a rootful, systemd-managed Podman Quadlet for the immutable Django/Gunicorn
-  application image;
+  application image, explicitly using Ubuntu `runc` so the enforced
+  `containers-default` AppArmor profile and no-new-privileges work together;
 - PgBouncer on loopback;
 - PostgreSQL 17 on loopback;
-- an explicit firewall ownership mode. `Infrastructure-managed` is the rc7
+- an explicit firewall ownership mode. `Infrastructure-managed` is the rc8
   default: the installer does not enable/reset UFW and the operator's
   NSG/cloud/on-premises firewall owns exposure. `Installer-managed` previews
   and applies inbound default-deny, HTTPS/ACME access, and SSH restricted to
@@ -153,7 +158,7 @@ public-key distribution remain mandatory gates before production publication.
 
 ## Secured FHS namespace and persistent records
 
-rc7 starts the namespace migration with transaction state under
+rc8 starts the namespace migration with transaction state under
 `/var/lib/vivolution/installer`, evidence under
 `/var/log/vivolution/installer`, and exact host ownership records beneath
 `/var/lib/vivolution/ownership`. It does not yet migrate every existing
@@ -168,14 +173,14 @@ Controller runtime path. The complete approved FHS target is:
 /run/vivolution/           volatile sockets, locks and runtime files
 ```
 
-rc7 records scoped host/time, SSH, and firewall ownership evidence plus package
+rc8 records scoped host/time, SSH, and firewall ownership evidence plus package
 intent. A complete per-object mutation manifest covering every systemd, apt,
 Caddy, PostgreSQL, and runtime change is still required before post-mutation
 removal can be offered. Cleanup must eventually operate on exact records, never
 a broad prefix/glob.
 
 The `/opt/vivolution/releases` move and remaining runtime/cache consolidation
-are future, separately tested lifecycle work and are not an rc7 completion
+are future, separately tested lifecycle work and are not an rc8 completion
 claim.
 
 ### Installer and lifecycle logging
@@ -202,7 +207,7 @@ action.
 
 ### Failed-run discard and uninstall
 
-The rc7 beta's only destructive lifecycle action is a schema-5
+The rc8 beta's only destructive lifecycle action is a schema-5
 pre-mutation discard. It is available only when the schema-5 ledger/ownership
 manifest proves that no apt, firewall, service, database, certificate, or
 application mutation began. A dry-run previews exact allow-listed objects;
@@ -217,10 +222,10 @@ manifest cleanup, and safe package-ownership checks. The installer must never
 delete foreign data, shared packages, unrelated firewall rules, external DNS,
 cloud resources, Microsoft objects, carrier objects, or off-host backups.
 
-The schema-5 rc7 beta does not claim in-place resume/upgrade or automated
+The schema-5 rc8 beta does not claim in-place resume/upgrade or automated
 deletion of an rc5 schema-4 ledger. It can detect and preview recognized legacy
 state, but execution is refused because the older lock cannot provide race-free
-cleanup. A fresh Ubuntu VM remains the rc7 acceptance path; an old host requires
+cleanup. A fresh Ubuntu VM remains the rc8 acceptance path; an old host requires
 a separately reviewed offline cleanup/migration plan.
 
 ## Web console and documentation

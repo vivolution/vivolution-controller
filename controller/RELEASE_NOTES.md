@@ -1,5 +1,33 @@
 # Controller release notes
 
+## v0.3.0-rc8 Azure runtime and trusted-HTTPS qualification fix
+
+- Pins the Controller Quadlet to Ubuntu's `/usr/sbin/runc` runtime while
+  preserving the enforced `containers-default` AppArmor profile,
+  `NoNewPrivileges=true`, a read-only root filesystem, and a fully dropped
+  capability set. This fixes the Azure Ubuntu 24.04 AppArmor/profile-stacking
+  failure where `crun` denied Gunicorn's AF_INET socket creation even though
+  the application bound only to loopback TCP 8000.
+- Installs and verifies the official Caddy stable package at exact version
+  `2.11.4`. The immutable repository bootstrap verifies the complete primary
+  signing-key fingerprint
+  `65760C51EDEA2017CEA2CA15155B6D79CA56EA34` and signing-key file SHA-256
+  `783dfee04b19e851a928cd87b34710213ebbe7628f98d9f34595ab83be578c00`,
+  pins the package through APT policy, and verifies the installed package,
+  binary, and repository origin before ingress activation.
+- Replaces Ubuntu Noble's Caddy `2.6.2`, which accepted both live
+  TLS-ALPN-01 challenges but failed current Let's Encrypt production order
+  finalization, with the exact qualified release. Caddy `2.11.4` obtained
+  trusted production certificates for both temporary Azure qualification
+  FQDNs and served verified HTTPS successfully.
+- A patched rc7 recovery run first proved both corrections, and a subsequently
+  rebuilt clean Ubuntu 24.04 Azure VM completed the rc8 installer from zero
+  state. The fresh run passed the Controller health gate, session maintenance,
+  trusted local/shared HTTPS, public recovery, node-FQDN readiness, protected
+  documentation redirect, and the complete Ansible activation with zero
+  failures. Both FQDNs returned HTTP 200 with publicly trusted Let's Encrypt
+  certificates.
+
 ## v0.3.0-rc7 Ubuntu time-provider qualification fix
 
 - Fixes a deterministic Ubuntu 24.04 failure where the temporary package

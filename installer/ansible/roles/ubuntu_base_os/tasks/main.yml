@@ -291,6 +291,100 @@
     lock_timeout: 180
   when: cp_pgdg_keyring.changed or cp_pgdg_repository.changed
 
+- name: Download the pinned Caddy stable repository signing key
+  ansible.builtin.get_url:
+    url: "{{ cp_caddy_signing_key_url }}"
+    dest: /var/cache/vivolution-installer/caddy-stable.gpg.key
+    owner: root
+    group: root
+    mode: '0600'
+    force: true
+    timeout: 30
+    checksum: "sha256:{{ cp_caddy_signing_key_sha256 }}"
+  changed_when: false
+
+- name: Inspect the complete Caddy signing-key identity
+  ansible.builtin.command:
+    argv:
+      - gpg
+      - --batch
+      - --with-colons
+      - --show-keys
+      - /var/cache/vivolution-installer/caddy-stable.gpg.key
+  register: cp_caddy_key_identity
+  changed_when: false
+
+- name: Require the single expected full Caddy primary-key fingerprint
+  ansible.builtin.assert:
+    that:
+      - cp_caddy_key_identity.stdout | regex_findall('(?m)^pub:') | length == 1
+      - >-
+        (cp_caddy_key_identity.stdout |
+         regex_findall('(?m)^fpr:::::::::([0-9A-F]{40}):$') | first) ==
+        cp_caddy_signing_key_fingerprint
+      - cp_caddy_signing_key_fingerprint == '65760C51EDEA2017CEA2CA15155B6D79CA56EA34'
+      - cp_caddy_signing_key_sha256 == '783dfee04b19e851a928cd87b34710213ebbe7628f98d9f34595ab83be578c00'
+    fail_msg: >-
+      The downloaded Caddy repository key does not match the approved full
+      primary-key fingerprint and immutable key-file digest.
+
+- name: Convert the verified Caddy key into an APT keyring candidate
+  ansible.builtin.command:
+    argv:
+      - gpg
+      - --batch
+      - --yes
+      - --dearmor
+      - --output
+      - /var/cache/vivolution-installer/caddy-stable-archive-keyring.gpg
+      - /var/cache/vivolution-installer/caddy-stable.gpg.key
+  changed_when: false
+
+- name: Install the verified Caddy APT keyring
+  ansible.builtin.copy:
+    src: /var/cache/vivolution-installer/caddy-stable-archive-keyring.gpg
+    remote_src: true
+    dest: "{{ cp_caddy_keyring_path }}"
+    owner: root
+    group: root
+    mode: '0644'
+  register: cp_caddy_keyring
+
+- name: Configure the official Caddy stable repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/caddy-stable.sources
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      Types: deb
+      URIs: {{ cp_caddy_repository_url }}
+      Suites: any-version
+      Components: main
+      Signed-By: {{ cp_caddy_keyring_path }}
+  register: cp_caddy_repository
+
+- name: Pin the exact qualified Caddy package version
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/vivolution-caddy
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      Package: caddy
+      Pin: version {{ cp_caddy_package_version }}
+      Pin-Priority: 1001
+  register: cp_caddy_package_pin
+
+- name: Refresh APT metadata after verified Caddy repository changes
+  ansible.builtin.apt:
+    update_cache: true
+    lock_timeout: 180
+  when: >-
+    cp_caddy_keyring.changed or
+    cp_caddy_repository.changed or
+    cp_caddy_package_pin.changed
+
 - name: Apply available Ubuntu updates without package removals
   ansible.builtin.apt:
     upgrade: safe
@@ -315,14 +409,13 @@
     fail_msg: >-
       Ubuntu updates require a reboot. Reboot this VM, then run
       curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https'
-      --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc7/install.sh
+      --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc8/install.sh
       | sudo sh -s -- resume; Controller network services remain masked.
 
 - name: Install standalone controller foundation packages
   ansible.builtin.apt:
     name:
       - acl
-      - caddy
       - chrony
       - curl
       - iproute2
@@ -334,11 +427,68 @@
       - postgresql-client-17
       - postgresql-contrib-17
       - python3-psycopg
+      - runc
       - unattended-upgrades
     state: present
     update_cache: true
     cache_valid_time: 3600
     lock_timeout: 180
+
+- name: Install the exact qualified Caddy release
+  ansible.builtin.apt:
+    name: "caddy={{ cp_caddy_package_version }}"
+    state: present
+    allow_downgrade: true
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 180
+
+- name: Verify the selected OCI runtime is available
+  ansible.builtin.command:
+    argv: [/usr/sbin/runc, --version]
+  register: cp_runc_version
+  changed_when: false
+
+- name: Require the Ubuntu runc runtime before Controller activation
+  ansible.builtin.assert:
+    that:
+      - cp_runc_version.rc == 0
+      - cp_runc_version.stdout is match('^runc version [0-9]+\\.[0-9]+\\.[0-9]+')
+    fail_msg: >-
+      The Ubuntu runc OCI runtime is unavailable; refusing to fall back to a
+      runtime that cannot preserve both AppArmor confinement and
+      no-new-privileges for the Controller container.
+
+- name: Inspect the installed Caddy package version
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, "-f=${Version}", caddy]
+  register: cp_caddy_installed_package_version
+  changed_when: false
+
+- name: Inspect the installed Caddy binary version
+  ansible.builtin.command:
+    argv: [/usr/bin/caddy, version]
+  register: cp_caddy_installed_binary_version
+  changed_when: false
+
+- name: Inspect the installed Caddy package policy
+  ansible.builtin.command:
+    argv: [apt-cache, policy, caddy]
+  register: cp_caddy_installed_package_policy
+  changed_when: false
+
+- name: Require the exact qualified Caddy package and binary
+  ansible.builtin.assert:
+    that:
+      - cp_caddy_installed_package_version.stdout | trim == cp_caddy_package_version
+      - >-
+        cp_caddy_installed_binary_version.stdout is
+        match('^v' ~ (cp_caddy_package_version | regex_escape) ~ '([ +]|$)')
+      - "'Installed: ' ~ cp_caddy_package_version in cp_caddy_installed_package_policy.stdout"
+      - "cp_caddy_repository_url in cp_caddy_installed_package_policy.stdout"
+    fail_msg: >-
+      Caddy does not match the exact qualified release required for current
+      Let's Encrypt order finalization.
 
 - name: Install the host firewall only when the installer owns it
   ansible.builtin.apt:
@@ -662,6 +812,8 @@
   loop:
     - /var/cache/vivolution-installer/ACCC4CF8.asc
     - /var/cache/vivolution-installer/apt.postgresql.org.gpg
+    - /var/cache/vivolution-installer/caddy-stable.gpg.key
+    - /var/cache/vivolution-installer/caddy-stable-archive-keyring.gpg
   changed_when: false
 
 - name: Record exact installer-owned Ubuntu host artifacts and settings

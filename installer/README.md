@@ -4,24 +4,27 @@ This directory contains the provider-neutral entry point for configuring a
 Vivolution role on an administrator-supplied host. It does not create Azure,
 AWS, GCP, VMware, DNS, NAT, load-balancer, Microsoft 365, or carrier resources.
 
-The `v0.3.0-rc7` beta exposes the neutral universal launcher, but enables only
+The `v0.3.0-rc8` beta exposes the neutral universal launcher, but enables only
 creation of one standalone Controller plus bounded diagnostics and management.
 It does not make Controller joining, Controller HA, or the complete SBC voice
 role available. Those paths remain visibly unavailable until their own
 implementation and qualification gates pass.
 
-This is a release candidate for clean-VM qualification. A real Ubuntu 24.04.4
-ARM64 run now passes host mutation, Chrony handoff, PostgreSQL, PgBouncer,
-Podman image build, Controller activation, and local service setup before the
-expected public-certificate failure on a NAT-only UTM network. The source bundle
-does not yet carry a detached Vivolution publisher signature. Use it for the
-planned Azure qualification, not an unreviewed production deployment.
+This is a qualified clean-VM beta rather than a production release. A real
+Ubuntu 24.04.4 ARM64 run passes host mutation, Chrony handoff, PostgreSQL,
+PgBouncer, Podman image build, Controller activation, and local service setup
+before the expected public-certificate boundary on a NAT-only UTM network. A
+separate clean Ubuntu 24.04 AMD64 Azure run completes the installation and
+serves both FQDNs through publicly trusted Let's Encrypt certificates. The
+source bundle does not yet carry a detached Vivolution publisher signature and
+must not be treated as an unreviewed production deployment.
 
-## v0.3.0-rc7 beta boundary
+## v0.3.0-rc8 beta boundary
 
-The following is the rc7 beta contract. Package/static/security verification is
-complete, but this remains a prerelease rather than a fresh-Ubuntu or
-production qualification claim.
+The following is the rc8 beta contract. Package/static/security verification
+and a clean Azure Ubuntu Controller installation are complete, but this remains
+a prerelease rather than a production, HA, SBC, or live-call qualification
+claim.
 
 ```text
 Vivolution Turnkey Installer
@@ -38,7 +41,7 @@ elsewhere. It never suggests `CP1`, `CP2`, `CP3`, `SBC1`, or `SBC2` as a
 hostname. A node receives an immutable internal ID and uses the FQDN/display
 name chosen by the operator.
 
-The rc7 beta enables only:
+The rc8 beta enables only:
 
 - creation of a new one-node Controller Plane on Ubuntu Server 24.04;
 - non-mutating diagnostics/network-readiness checks; and
@@ -55,11 +58,11 @@ enrollment-only client while calling it an SBC.
 
 The full private voice-plane deployment currently has a Debian 13 AMD64 host
 contract. The public Controller and enrollment-only Edge artifacts target
-Ubuntu 24.04. The rc7 Ubuntu menu must therefore keep the complete SBC path
+Ubuntu 24.04. The rc8 Ubuntu menu must therefore keep the complete SBC path
 unavailable until the OpenSIPS/RTPengine runtime is ported and independently
 qualified on the declared role-specific OS.
 
-### rc7 interactive preflight
+### rc8 interactive preflight
 
 - Public IPv4 discovery uses short-timeout HTTPS queries to independent
   address-echo sources, validates and compares their answers, labels the result
@@ -78,18 +81,18 @@ qualified on the declared role-specific OS.
   a deny-by-default UFW policy while preserving verified administrator access.
   Neither mode silently opens SSH to `0.0.0.0/0`.
 - Timezone is selected from the host's IANA list rather than free text. Chrony
-  is the rc7 Controller time service. Automatic mode preserves a safe existing
+  is the rc8 Controller time service. Automatic mode preserves a safe existing
   Chrony provider policy or uses Ubuntu's packaged defaults; it does not claim
   to translate a timesyncd-only source policy. After validating the candidate
   policy, the installer stops the replaced systemd-timesyncd authority and
   proves bounded correction, normal leap state, valid stratum, and systemd NTP
   synchronization before certificates, database, or Controller activation.
 
-### rc7 commands from a retained source checkout
+### rc8 commands from a retained source checkout
 
 These commands are for developers or operators who deliberately retain an exact
-reviewed rc7 source checkout. Hosts installed through the public one-liner must
-use the exact `v0.3.0-rc7` bootstrap for lifecycle operations because the
+reviewed rc8 source checkout. Hosts installed through the public one-liner must
+use the exact `v0.3.0-rc8` bootstrap for lifecycle operations because the
 bootstrap's temporary extraction directory is removed after each run.
 
 ```sh
@@ -126,8 +129,11 @@ schema-4 ledger enables a cleanup preview only; deletion is refused.
 - Ubuntu Server 24.04 LTS on AMD64 or ARM64, booted with systemd.
 - At least 2 vCPU, 4 GiB RAM, and a 40 GB root disk.
 - Working outbound Internet/DNS access, no pending reboot, and an approximately
-  correct clock so the initial HTTPS bootstrap can be authenticated. The rc7
+  correct clock so the initial HTTPS bootstrap can be authenticated. The rc8
   candidate configures and verifies Chrony before service activation.
+- The installer verifies Caddy's official stable-repository primary key and
+  immutable key-file digest, pins exact Caddy `2.11.4`, and pins Ubuntu `runc`
+  for the Controller Quadlet so AppArmor and no-new-privileges remain enforced.
 - A non-root sudo/SSH administrator with at least one ordinary, option-free
   public key. The home directory must not be group/world writable; `.ssh` must
   be `0700` and `authorized_keys` must be `0600`.
@@ -143,7 +149,7 @@ schema-4 ledger enables a cleanup preview only; deletion is refused.
 ## Published rc5 behavior (legacy reference)
 
 The following commands and schema apply only to the immutable
-`v0.3.0-rc5` source/release, not `v0.3.0-rc7`:
+`v0.3.0-rc5` source/release, not `v0.3.0-rc8`:
 
 ```sh
 sudo ./installer/install.sh
@@ -257,9 +263,9 @@ Network-service units remain masked until the exact firewall and their managed
 configuration are ready, so a failed package phase cannot expose a default
 service after reboot.
 
-## rc7 secured namespace and evidence contract
+## rc8 secured namespace and evidence contract
 
-rc7 begins the secured-namespace migration by moving its transaction state to
+rc8 begins the secured-namespace migration by moving its transaction state to
 `/var/lib/vivolution/installer`, logs to `/var/log/vivolution/installer`, and
 exact host-ownership records beneath `/var/lib/vivolution/ownership`. It does
 not yet claim that every existing Controller runtime path has migrated.
@@ -292,19 +298,19 @@ logs, and sockets together:
 ```
 
 Only bounded integration files may be written to standard systemd, apt, SSH,
-Caddy, PostgreSQL, and firewall locations. The rc7 host manifest records the
+Caddy, PostgreSQL, and firewall locations. The rc8 host manifest records the
 installed role, release identity, selected firewall/time settings, and the
 Vivolution namespace roots. It is ownership evidence and a foundation for a
-future complete mutation manifest; rc7 does not claim post-mutation automatic
+future complete mutation manifest; rc8 does not claim post-mutation automatic
 uninstall. Configuration, secrets, state, and logs use least-privilege
 ownership/modes; private keys and credentials are never stored in release or
 cache trees.
 
 Moving immutable releases to `/opt/vivolution/releases` and completing the
 remaining runtime/cache migration is a later, separately tested lifecycle
-change. rc7 documentation must not imply that this full move has occurred.
+change. rc8 documentation must not imply that this full move has occurred.
 
-The rc7 beta implements detailed redacted evidence in the protected human
+The rc8 beta implements detailed redacted evidence in the protected human
 log and JSONL event log:
 
 - levels `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, and `FATAL`, with a separate
@@ -330,7 +336,7 @@ secrets even when the command itself looks harmless.
 
 ## Failed-run cleanup and uninstall boundary
 
-The rc7 Manage path offers **Discard incomplete deployment** only when the
+The rc8 Manage path offers **Discard incomplete deployment** only when the
 schema-5 ledger and ownership manifest prove that the run stopped before the
 first mutation. The operator can create a schema-5 redacted support bundle
 separately. `discard-incomplete --dry-run` previews every exact allow-listed object;
@@ -348,7 +354,7 @@ different inode while the discard command is still finishing; Ubuntu clears
 exact displayed plan.
 
 If apt, firewall, service, database, certificate, or application mutation may
-have begun, rc7 must preserve the evidence and offer resume/support guidance.
+have begun, rc8 must preserve the evidence and offer resume/support guidance.
 It must not claim or attempt a general uninstall. A future uninstall requires a
 manifest-driven plan, backup/export option, service drain, credential and node
 identity revocation, exact integration-file removal, and safe package ownership
@@ -357,7 +363,7 @@ firewall rule, customer DNS/cloud object, or external backup implicitly.
 
 ### Moving from rc5
 
-rc7 does not resume, upgrade, or automatically delete an rc5 schema-4 ledger.
+rc8 does not resume, upgrade, or automatically delete an rc5 schema-4 ledger.
 It can detect a recognized rc3-rc5 schema-4 ledger and produce a cleanup preview
 only when the exact legacy allowlist is present and `bootstrap`, `secrets`,
 `ansible`, and `summary` all remain pending. Execution is refused because the

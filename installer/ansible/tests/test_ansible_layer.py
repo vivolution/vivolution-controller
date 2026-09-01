@@ -113,19 +113,47 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
         self.assertIn("noble-pgdg", tasks)
         self.assertIn("Signed-By: {{ cp_pgdg_keyring_path }}", tasks)
 
+    def test_caddy_repository_key_and_exact_release_are_pinned(self):
+        defaults = read("roles/ubuntu_base_os/defaults/main.yml")
+        tasks = read("roles/ubuntu_base_os/tasks/main.yml")
+
+        fingerprint = "65760C51EDEA2017CEA2CA15155B6D79CA56EA34"
+        key_sha256 = "783dfee04b19e851a928cd87b34710213ebbe7628f98d9f34595ab83be578c00"
+        self.assertIn(f"cp_caddy_signing_key_fingerprint: {fingerprint}", defaults)
+        self.assertIn(f"cp_caddy_signing_key_sha256: {key_sha256}", defaults)
+        self.assertIn("cp_caddy_package_version: '2.11.4'", defaults)
+        self.assertIn("https://dl.cloudsmith.io/public/caddy/stable/gpg.key", defaults)
+        self.assertIn("checksum: \"sha256:{{ cp_caddy_signing_key_sha256 }}\"", tasks)
+        self.assertIn(fingerprint, tasks)
+        self.assertIn(key_sha256, tasks)
+        self.assertIn("/etc/apt/sources.list.d/caddy-stable.sources", tasks)
+        self.assertIn("/etc/apt/preferences.d/vivolution-caddy", tasks)
+        self.assertIn("Pin-Priority: 1001", tasks)
+        self.assertIn('name: "caddy={{ cp_caddy_package_version }}"', tasks)
+        self.assertIn("allow_downgrade: true", tasks)
+        self.assertIn("argv: [/usr/bin/caddy, version]", tasks)
+        self.assertIn("current", tasks)
+        self.assertIn("order finalization", tasks)
+        self.assertIn("cp_caddy_repository_url in cp_caddy_installed_package_policy.stdout", tasks)
+        self.assertIn("caddy-stable.gpg.key", tasks)
+        self.assertIn("caddy-stable-archive-keyring.gpg", tasks)
+
     def test_required_packages_are_installed_while_auto_start_is_blocked(self):
         tasks = read("roles/ubuntu_base_os/tasks/main.yml")
         for package in (
-            "caddy",
             "chrony",
             "podman",
             "pgbouncer",
             "postgresql-17",
             "postgresql-client-17",
             "postgresql-contrib-17",
+            "runc",
             "unattended-upgrades",
         ):
             self.assertRegex(tasks, rf"(?m)^\s+- {re.escape(package)}$")
+        self.assertIn("argv: [/usr/sbin/runc, --version]", tasks)
+        self.assertIn("preserve both AppArmor confinement", tasks)
+        self.assertIn('name: "caddy={{ cp_caddy_package_version }}"', tasks)
         self.assertIn("name: ufw", tasks)
         self.assertIn("when: cp_firewall_mode == 'installer'", tasks)
         self.assertLess(tasks.index("/usr/sbin/policy-rc.d"), tasks.index("postgresql-17"))
@@ -136,7 +164,7 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
             tasks.index("Install standalone controller foundation packages"),
         )
         self.assertIn("/var/run/reboot-required", tasks)
-        self.assertIn("/v0.3.0-rc7/install.sh", tasks)
+        self.assertIn("/v0.3.0-rc8/install.sh", tasks)
         self.assertIn("sudo sh -s -- resume", tasks)
         for unit in (
             "caddy.service",
@@ -338,6 +366,25 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
         self.assertIn("managed_file=/etc/chrony/chrony.conf", manifest)
         self.assertIn("managed_setting=hardware-clock-utc", manifest)
         self.assertIn("managed_setting=systemd-timesyncd-inactive", manifest)
+        self.assertIn("managed_package=caddy:2.11.4", manifest)
+        self.assertIn("managed_package=runc", manifest)
+
+    def test_controller_runtime_pins_runc_without_weakening_sandboxing(self):
+        quadlet = (
+            ANSIBLE_ROOT.parents[1]
+            / "deploy/roles/controller_services/templates/vivolution-cp-web.container.j2"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Network=host", quadlet)
+        self.assertIn("ReadOnly=true", quadlet)
+        self.assertIn("DropCapability=all", quadlet)
+        self.assertIn("PodmanArgs=--runtime=/usr/sbin/runc", quadlet)
+        self.assertIn("NoNewPrivileges=true", quadlet)
+        self.assertNotIn("apparmor=unconfined", quadlet)
+        self.assertLess(
+            quadlet.index("PodmanArgs=--runtime=/usr/sbin/runc"),
+            quadlet.index("NoNewPrivileges=true"),
+        )
 
     def test_caddy_serves_both_fqdns_and_disables_admin_api(self):
         caddyfile = read("roles/ubuntu_ingress/templates/Caddyfile.j2")

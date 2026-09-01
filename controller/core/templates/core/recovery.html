@@ -28,10 +28,10 @@
       bootstrap below for lifecycle operations. Resume only an interrupted installation and
       reconcile only a completed installation. Inspect every support bundle before sharing it.
     </p>
-    <pre><code>curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc7/install.sh | sudo sh -s -- status
-curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc7/install.sh | sudo sh -s -- resume
-curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc7/install.sh | sudo sh -s -- reconcile
-curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc7/install.sh | sudo sh -s -- support-bundle</code></pre>
+    <pre><code>curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc8/install.sh | sudo sh -s -- status
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc8/install.sh | sudo sh -s -- resume
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc8/install.sh | sudo sh -s -- reconcile
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc8/install.sh | sudo sh -s -- support-bundle</code></pre>
     <p>
       The initial credential remains in the root-only
       <code>/var/lib/vivolution/installer/credentials.txt</code> file.

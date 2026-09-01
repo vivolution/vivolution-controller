@@ -1,10 +1,11 @@
 # Vivolution Control Plane and SBC
 
-Status: `v0.3.0-rc7` is the approved universal-launcher beta source for public
-prerelease packaging. Static and security gates pass. A clean Ubuntu 24.04.4
-ARM64 run now reaches Controller activation and stops only at the expected
-public ACME boundary when inbound TCP 80/443 is unavailable; Azure certificate
-issuance and live Teams/SIP acceptance remain pending.
+Status: `v0.3.0-rc8` is the approved universal-launcher beta source for public
+prerelease packaging. Static and security gates pass. Clean Ubuntu 24.04.4
+ARM64 qualification reaches the expected NAT/ACME boundary, and a clean Ubuntu
+24.04 AMD64 Azure run completes the standalone Controller installation with
+trusted Let's Encrypt certificates for both FQDNs. Production, Controller HA,
+complete SBC deployment, and live Teams/SIP acceptance remain pending.
 
 ## Turnkey Controller installer
 
@@ -24,15 +25,15 @@ public bootstrap:
 curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/main/install.sh | sudo sh
 ```
 
-The rc7 wizard validates the host and public DNS, detects and confirms the
+The rc8 wizard validates the host and public DNS, detects and confirms the
 public IPv4, asks for the node/shared FQDNs, firewall ownership, initial
 operator, Let's Encrypt ACME contact, IANA timezone, and Chrony policy,
 generates protected credentials, installs PostgreSQL/PgBouncer/Podman/Caddy,
 deploys the Controller, runs health checks, and prints the console URL.
-Interrupted rc7 runs must use the exact version-pinned bootstrap:
+Interrupted rc8 runs must use the exact version-pinned bootstrap:
 
 ```sh
-curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc7/install.sh | sudo sh -s -- resume
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc8/install.sh | sudo sh -s -- resume
 ```
 
 - [Installer guide](installer/README.md)
@@ -40,25 +41,26 @@ curl --fail --show-error --silent --location --proto '=https' --proto-redir '=ht
 - [Controller application and operator guide](controller/README.md)
 
 The separate public `vivolution-install` repository uses immutable tags and
-minimal checksum-pinned assets. The `v0.3.0-rc7` prerelease promotes one
+minimal checksum-pinned assets. The `v0.3.0-rc8` prerelease promotes one
 permanent universal-launcher command and retains a separate enrollment-only
 Edge archive for compatibility. The latter does not install an SBC, SIP/RTP,
 Teams, or a carrier profile, and neither artifact claims Controller high
 availability.
 
-The standalone Controller pins Caddy to the Let's Encrypt production ACME
-directory as its only certificate issuer. Caddy requests and automatically
-renews public certificates for both the unique Controller VM FQDN and stable
-shared FQDN; trusted HTTPS readiness fails closed if issuance is unavailable.
-This Controller certificate flow is separate from future Teams/SBC signaling
+The standalone Controller installs exact Caddy `2.11.4` from its verified
+official stable repository and pins the Let's Encrypt production ACME directory
+as its only certificate issuer. Caddy requests and automatically renews public
+certificates for both the unique Controller VM FQDN and stable shared FQDN;
+trusted HTTPS readiness fails closed if issuance is unavailable. This
+Controller certificate flow is separate from future Teams/SBC signaling
 certificates.
 
-The rc7 beta requires a fresh installation and does not claim to convert an
+The rc8 beta requires a fresh installation and does not claim to convert an
 rc5 ledger or a certificate already cached by an older host.
 
-### v0.3.0-rc7 beta boundary
+### v0.3.0-rc8 beta boundary
 
-The rc7 launcher provides one permanent installer command and this neutral
+The rc8 launcher provides one permanent installer command and this neutral
 menu:
 
 ```text
@@ -75,7 +77,7 @@ It does not suggest CP1/CP2/CP3/SBC1/SBC2 hostnames. The enabled scope is one
 new standalone Controller, non-mutating diagnostics, and Manage actions for
 status, a redacted support bundle, resume, reconcile, and discard only when
 schema-5 evidence proves that an incomplete run never crossed the mutation
-boundary. Recognized rc3-rc5 state is detected and can be previewed, but rc7
+boundary. Recognized rc3-rc5 state is detected and can be previewed, but rc8
 refuses to delete it because the older removable lock cannot provide the same
 race-free safety guarantee.
 
@@ -92,11 +94,11 @@ migration and mutation manifest remain future lifecycle work.
 Controller joining/HA, full Edge voice installation, upgrade, rollback,
 repair, backup/restore, and post-mutation uninstall remain design-only. The
 private complete voice-plane POC currently expects Debian 13 AMD64; the public
-Controller and bounded enrollment-only Edge expect Ubuntu 24.04. Therefore rc7
+Controller and bounded enrollment-only Edge expect Ubuntu 24.04. Therefore rc8
 must keep **Deploy an Edge Appliance (SBC)** unavailable until one declared
 Edge OS contract is ported and independently qualified.
 
-rc7 does not claim in-place migration or resume from the rc5 schema-4 ledger.
+rc8 does not claim in-place migration or resume from the rc5 schema-4 ledger.
 It can detect and preview an exact recognized legacy state set, but automated
 legacy deletion is deliberately refused. Fresh Ubuntu 24.04 remains the
 acceptance path. Any rc5 host requires either replacement or a separately
@@ -130,13 +132,16 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 
 ## Current boundary
 
-- The `v0.3.0-rc7` source has separate deterministic Controller and Edge
+- The `v0.3.0-rc8` source has separate deterministic Controller and Edge
   enrollment archives, checksum-pinned bootstraps, exact allowlists, and tamper
   tests. It corrects the stock Ubuntu 24.04 `/etc/os-release` symlink preflight,
   safely retires a package-replaced but still-running systemd-timesyncd process,
   and avoids rejecting a newly synchronized Chrony client solely because its
-  initial frequency-skew estimate has not converged. Public ACME validation on
-  the Azure test VM remains the next fresh-host acceptance gate.
+  initial frequency-skew estimate has not converged. It also pins Ubuntu's
+  `runc` runtime so AppArmor and no-new-privileges remain enforced, and pins
+  verified Caddy `2.11.4` for current Let's Encrypt order finalization. A clean
+  disposable Azure VM completed installation and trusted public HTTPS for both
+  FQDNs.
 - The bounded Edge enrollment client accepts the canonical Controller shared
   HTTPS URL plus a display-once grant, creates a local Ed25519 identity, enters
   pending approval, and reports signed heartbeat visibility after fingerprint
@@ -149,8 +154,8 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 - The common Teams process is restricted to RTP `30000-30063`; the isolated
   provider-egress process is restricted to `30064-30127`. Each receives only
   its own root-owned `0440` certificate copy and UID-scoped nftables authority.
-- Offline verification passes 58 carrier tests, 249 deployment tests, 83
-  Controller tests (12 PostgreSQL-only skips), 86 installer tests, 18 installer
+- Offline verification passes 58 carrier tests, 252 deployment tests, 83
+  Controller tests (12 PostgreSQL-only skips), 87 installer tests, 20 installer
   Ansible tests, and 42 Edge enrollment tests (one root-only tmpfs skip), plus
   syntax, digest-compatibility, whitespace, and independent security gates.
   This is source readiness, not a live-call or production claim.
