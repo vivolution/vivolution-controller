@@ -310,10 +310,21 @@ BEGIN
                 'core_tenantcontext',
                 'core_edgecluster',
                 'core_edgenode',
+                'core_enrollmentgrant',
+                'core_enrollmentclaim',
                 'core_configurationversion'
             ]) THEN
                 EXECUTE format(
                     'GRANT SELECT, INSERT, UPDATE ON TABLE %I.%I TO %I',
+                    existing_relation.nspname,
+                    existing_relation.relname,
+                    '{{ cp_db_runtime_user }}'
+                );
+            ELSIF existing_relation.relname = 'core_enrollmentchallenge' THEN
+                -- Challenges are deliberately ephemeral. The API prunes only
+                -- per-node rows older than its fixed replay-retention window.
+                EXECUTE format(
+                    'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO %I',
                     existing_relation.nspname,
                     existing_relation.relname,
                     '{{ cp_db_runtime_user }}'
@@ -760,6 +771,8 @@ BEGIN
             'core_tenantcontext',
             'core_edgecluster',
             'core_edgenode',
+            'core_enrollmentgrant',
+            'core_enrollmentclaim',
             'core_configurationversion'
         ]) THEN
             IF NOT has_table_privilege(
@@ -773,6 +786,27 @@ BEGIN
             END IF;
             FOREACH privilege_name IN ARRAY ARRAY[
                 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN'
+            ] LOOP
+                IF has_table_privilege(
+                    '{{ cp_db_runtime_user }}', relation.oid, privilege_name
+                ) THEN
+                    RAISE EXCEPTION 'forbidden % privilege exists on %',
+                    privilege_name, relation.relname;
+                END IF;
+            END LOOP;
+        ELSIF relation.relname = 'core_enrollmentchallenge' THEN
+            FOREACH privilege_name IN ARRAY ARRAY[
+                'SELECT', 'INSERT', 'UPDATE', 'DELETE'
+            ] LOOP
+                IF NOT has_table_privilege(
+                    '{{ cp_db_runtime_user }}', relation.oid, privilege_name
+                ) THEN
+                    RAISE EXCEPTION 'required % privilege is absent on %',
+                        privilege_name, relation.relname;
+                END IF;
+            END LOOP;
+            FOREACH privilege_name IN ARRAY ARRAY[
+                'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN'
             ] LOOP
                 IF has_table_privilege(
                     '{{ cp_db_runtime_user }}', relation.oid, privilege_name
@@ -1169,6 +1203,6 @@ SELECT (:'cp_acl_before' <> :'cp_acl_after') AS cp_acl_changed
 \if :cp_acl_changed
 \echo VIVOLUTION_DB_CHANGED:runtime-privileges
 \endif
-\echo CP_RUNTIME_PRIVILEGES_OK=shared-db-sessions-auth-readonly-core-dml
+\echo CP_RUNTIME_PRIVILEGES_OK=shared-db-sessions-challenge-retention-auth-readonly-core-dml
 
 COMMIT;

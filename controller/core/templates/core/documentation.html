@@ -95,8 +95,19 @@
       <h3>3.5 Edge nodes</h3>
       <p>
         Register each expected Edge node under its cluster. Select the real architecture
-        and its unique HA slot. An <strong>Expected</strong> record describes desired inventory;
-        change it to an online state only after enrollment and independent health evidence.
+        and its unique HA slot. Select exactly that node and use
+        <strong>Issue a display-once enrollment grant</strong>. Copy the shown Controller shared
+        URL and grant directly into the Edge installer's protected prompt; never place the grant
+        in argv, a URL, shell history, an environment variable, a log, or a reusable image.
+      </p>
+      <p>
+        The node proves its locally generated Ed25519 key and enters
+        <strong>Pending approval</strong>. Independently compare the exact fingerprint shown by
+        the VM/cloud console, then use <strong>Approve pending enrollment claim</strong>. Status,
+        generation, placement identity, and heartbeat observations are enrollment-driven and
+        read-only after creation. Use <strong>Revoke current node identity</strong> to block all
+        further node API requests. This release reports enrollment and heartbeat visibility only;
+        it does not deliver SBC configuration or secrets.
       </p>
 
       <h3>3.6 Configuration version</h3>
@@ -205,6 +216,7 @@ sudo ./installer/install.sh support-bundle</code></pre>
       <h2>8. Security boundary</h2>
       <ul>
         <li>Use HTTPS only; do not access the loopback Gunicorn listener directly.</li>
+        <li>Use the stable Controller shared URL printed with the grant; Edge nodes do not bind to a brand-specific domain.</li>
         <li>Keep the controller, node and shared FQDN records stable and certificate-matched.</li>
         <li>Grant operator access individually and remove it through the supported privileged workflow.</li>
         <li>Never store tenant Global Administrator credentials in the controller.</li>

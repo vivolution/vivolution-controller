@@ -71,6 +71,7 @@ SECRET_KEYS = {
     "cp_db_owner_password",
     "cp_db_runtime_password",
     "cp_django_secret_key",
+    "cp_edge_enrollment_token_pepper",
     "cp_rls_context_key",
 }
 SENSITIVE_KEY_PARTS = ("password", "secret", "token", "private_key", "credential")
@@ -646,6 +647,7 @@ def generate_secrets():
         "cp_db_owner_password": secrets.token_urlsafe(48),
         "cp_db_runtime_password": secrets.token_urlsafe(48),
         "cp_django_secret_key": secrets.token_urlsafe(64),
+        "cp_edge_enrollment_token_pepper": secrets.token_hex(32),
         "cp_rls_context_key": secrets.token_hex(32),
     }
     if set(generated) != SECRET_KEYS:
@@ -663,6 +665,17 @@ def validate_secrets(secret_values):
             raise InstallerError("Protected installer secret has unsafe characters: %s" % key)
     if not re.fullmatch(r"[0-9a-f]{64}", secret_values["cp_rls_context_key"]):
         raise InstallerError("cp_rls_context_key must be exactly 64 lowercase hexadecimal characters")
+    if not re.fullmatch(
+        r"[0-9a-f]{64}", secret_values["cp_edge_enrollment_token_pepper"]
+    ):
+        raise InstallerError(
+            "cp_edge_enrollment_token_pepper must be exactly 64 lowercase hexadecimal characters"
+        )
+    if secrets.compare_digest(
+        secret_values["cp_edge_enrollment_token_pepper"],
+        secret_values["cp_rls_context_key"],
+    ):
+        raise InstallerError("Enrollment and RLS keys must be independent")
     return secret_values
 
 

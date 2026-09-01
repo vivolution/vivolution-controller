@@ -1,7 +1,8 @@
 # Vivolution Control Plane and SBC
 
-Status: standalone Ubuntu CP1 public beta published; provider-neutral Hosted
-SBC code offline-qualified; clean Ubuntu and live Teams/SIP acceptance pending.
+Status: standalone Ubuntu CP1 public beta available; the v0.3.0-rc2 Controller
+and enrollment-only Edge candidate is locally qualified. Real PostgreSQL, fresh
+Ubuntu, and live Teams/SIP acceptance remain pending.
 
 ## Turnkey Controller installer
 
@@ -30,9 +31,11 @@ runs health checks, and prints the console URL. Interrupted runs use
 - [Turnkey architecture and HA contract](architecture/turnkey-installer.md)
 - [Controller application and operator guide](controller/README.md)
 
-The separate public `vivolution-install` repository publishes the pinned
-`v0.3.0-rc1` bootstrap and release archive. That bootstrap installs standalone
-CP1 only; it does not install an SBC Edge or claim CP2/CP3 high availability.
+The separate public `vivolution-install` repository uses immutable tags and
+minimal checksum-pinned assets. The `v0.3.0-rc2` design keeps two commands and
+archives separate: standalone CP1, and an enrollment-only Edge
+client/placeholder. The latter does not install an SBC, SIP/RTP, Teams, or a
+carrier profile, and neither command claims CP2/CP3 high availability.
 
 The Hosted SBC material below is a separate guarded POC module. Its invariant
 is **Microsoft Teams -> Common Teams Leg -> SBC routing/media -> Generic SIP
@@ -62,9 +65,14 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 
 ## Current boundary
 
-- The public controller release candidate is `v0.3.0-rc1`. Its deterministic
-  archive, checksum-pinned bootstrap, tamper tests, and 54 installer/static
-  tests pass. A fresh Ubuntu 24.04 host run remains an acceptance gate.
+- The `v0.3.0-rc2` candidate has separate deterministic Controller and Edge
+  enrollment archives, checksum-pinned bootstraps, exact allowlists, and tamper
+  tests. A real PostgreSQL and fresh Ubuntu 24.04 run remains an acceptance gate.
+- The bounded Edge enrollment client accepts the canonical Controller shared
+  HTTPS URL plus a display-once grant, creates a local Ed25519 identity, enters
+  pending approval, and reports signed heartbeat visibility after fingerprint
+  approval. It provides no desired-state delivery, remote actions, mTLS, or
+  voice data plane.
 - The Hosted SBC implementation includes fail-closed OpenSIPS/RTPengine Edge
   bootstrap, signed desired state, transactional activation and rollback,
   certificate automation, a private no-PSTN fixture, a guarded one-call broker,
@@ -72,10 +80,11 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 - The common Teams process is restricted to RTP `30000-30063`; the isolated
   provider-egress process is restricted to `30064-30127`. Each receives only
   its own root-owned `0440` certificate copy and UID-scoped nftables authority.
-- Offline verification passes 58 carrier tests and 238 deployment tests, five
-  carrier Ansible syntax gates, rendered Python/shell parsing, whitespace
-  checks, and independent secret/security review. This is source readiness,
-  not a live-call or production claim.
+- Offline verification passes 58 carrier tests, 249 deployment tests, 82
+  Controller tests (12 PostgreSQL-only skips), 43 installer tests, 16 installer
+  Ansible tests, and 42 Edge enrollment tests (one root-only tmpfs skip), plus
+  syntax, digest-compatibility, whitespace, and independent security gates.
+  This is source readiness, not a live-call or production claim.
 - A 2026-09-01 Azure audit found no current Vivolution POC resource group, VM,
   or compute resource. The existing DNS zones remain, but the planned
   controller, SBC, and carrier records are absent. Historical UTM/Azure evidence

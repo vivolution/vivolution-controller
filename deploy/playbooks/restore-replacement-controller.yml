@@ -315,6 +315,9 @@
           ansible.builtin.assert:
             that:
               - "'TABLE public core_tenantcontext' in cp_import_archive_list.stdout"
+              - "'TABLE public core_enrollmentgrant' in cp_import_archive_list.stdout"
+              - "'TABLE public core_enrollmentclaim' in cp_import_archive_list.stdout"
+              - "'TABLE public core_enrollmentchallenge' in cp_import_archive_list.stdout"
               - "'TABLE DATA public auth_user' in cp_import_archive_list.stdout"
               - "'TABLE cp_security rls_signing_key' in cp_import_archive_list.stdout"
             fail_msg: The supplied archive is not the qualified CP1 backup shape.

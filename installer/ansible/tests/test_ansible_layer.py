@@ -235,6 +235,9 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
         self.assertIn("https://{{ cp_shared_fqdn }}:443", caddyfile)
         self.assertIn("https://{{ cp_node_fqdn }}:443", caddyfile)
         self.assertIn("admin off", caddyfile)
+        self.assertIn("@edge_api path /api/edge/*", caddyfile)
+        self.assertIn("request_body @edge_api", caddyfile)
+        self.assertIn("max_size 16384B", caddyfile)
         self.assertIn("':2019' not in cp_caddy_listeners.stdout", tasks)
 
     def test_post_install_checks_readiness_recovery_docs_and_node_name(self):

@@ -2,10 +2,12 @@
 
 This directory contains the first runnable management-plane slice: Django 5.2 LTS,
 PostgreSQL-only deployment settings, operator administration, liveness/readiness probes,
-the narrow tenant/edge/configuration model, and PostgreSQL row-level security (RLS).
+the narrow tenant/edge/configuration model, PostgreSQL row-level security (RLS), and the
+bounded provider-neutral Edge enrollment/heartbeat v1 API.
 
-Enrollment, PKI, edge-agent commands, route compilation, customer-facing APIs, background
-jobs, artifact signing, and the SIP/media data plane are intentionally out of scope here.
+PKI/mTLS issuance, desired-state or secret delivery, route compilation, customer-facing APIs,
+background jobs, artifact signing, and the SIP/media data plane are intentionally out of scope
+here. See [Bounded Edge enrollment v1](EDGE_ENROLLMENT.md) for the exact implemented boundary.
 
 The bounded Azure POC can reconcile its first-tenant catalog with the owner-only
 `reconcile_vivolution_poc` management command. It creates Vivolution Technologies
@@ -35,6 +37,10 @@ Copy `.env.example` only as a reference; do not commit a real `.env` file.
 - `DJANGO_SECRET_KEY`: random deployment secret; required.
 - `VIVOLUTION_RELEASE_ID`: immutable, display-safe installed release identifier; defaults to
   `unversioned` until the installer supplies one.
+- `VIVOLUTION_CONTROLLER_ORIGIN`: canonical public Controller shared URL. It must be one HTTPS
+  DNS origin on port 443 with no path, credentials, query, fragment, or IP literal.
+- `EDGE_ENROLLMENT_TOKEN_PEPPER`: independent 32-byte HMAC key encoded as 64 lowercase hex
+  characters. It protects display-once grant digests and must not equal the RLS key.
 - `DJANGO_ALLOWED_HOSTS`: comma-separated hostnames; required with debug disabled.
 - `DATABASE_URL`: `postgresql://` URL. Percent-encode reserved characters in credentials.
 - `RLS_CONTEXT_SIGNING_KEY`: an independent 32-byte key encoded as 64 lowercase hex
@@ -61,11 +67,17 @@ The URL parser passes through only PostgreSQL's `sslmode`, `sslrootcert`, `sslce
 
 Migrations `0002_enable_rls`, `0003_signed_rls_context`, and
 `0004_signed_only_rls_context` enable RLS, install the signed-context validator,
-and remove the temporary legacy authorization clauses on:
+and remove the temporary legacy authorization clauses. Migrations
+`0005_edge_enrollment` and `0006_enrollment_rls` add the hash-only grants,
+key-bound claims, ephemeral challenges, and operator-only RLS policies.
 
+The protected catalog includes:
+
+- `CustomerAccount` and `M365Tenant` metadata;
 - `TenantContext` (scope column is its immutable UUID primary key);
-- `ConfigurationVersion`;
-- `AuditEvent` (global events have a null tenant and are operator-only).
+- `EdgeCluster` and `EdgeNode` inventory;
+- `EnrollmentGrant`, `EnrollmentClaim`, and `EnrollmentChallenge` (operator-only).
+- `ConfigurationVersion` and `AuditEvent` (global audit events are operator-only).
 
 A tenant operation must execute inside `core.rls.tenant_scope(tenant_context_id)`. It opens
 a transaction and installs a short-lived HMAC-signed PostgreSQL context. The current admin UI
@@ -84,8 +96,8 @@ access.
 Tenant contexts can read only the `CustomerAccount` and `M365Tenant` rows linked to their
 own visible context so normal ORM joins remain usable. Those metadata policies and tenant
 access to `TenantContext` are `SELECT`-only; every tenant-context/customer/M365 write and all
-edge-inventory access require a valid signed operator context. The catalog contract is ten
-explicit policies across seven tables.
+edge-inventory access require a valid signed operator context. The catalog contract is thirteen
+explicit policies across ten tables.
 
 After migrations, the schema owner must synchronize the database copy of the independent key
 before starting the runtime process:
@@ -148,9 +160,11 @@ gunicorn cp1.wsgi:application --bind 127.0.0.1:8000
 Endpoints:
 
 - `GET /health/live` proves the process can answer without touching PostgreSQL.
-- `GET /health/ready` proves PostgreSQL is reachable, migration `0004` is recorded, the
-  application signing key matches the owner-only database copy, and the exact ten-policy
+- `GET /health/ready` proves PostgreSQL is reachable, migration `0006` is recorded, the
+  application signing key matches the owner-only database copy, and the exact thirteen-policy
   signed-only catalog is intact.
+- The five `POST /api/edge/v1/...` endpoints implement bounded challenge, claim, approval-status,
+  and heartbeat traffic described in [Bounded Edge enrollment v1](EDGE_ENROLLMENT.md).
 - `/admin/` is the initial operator UI.
 - `/docs/` is release-matched configuration guidance restricted to authenticated staff.
 - `/recovery/` is a minimal, database-independent public recovery page. It exposes no

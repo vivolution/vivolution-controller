@@ -1,0 +1,4 @@
+---
+edge_enrollment_poll_seconds: 30
+edge_enrollment_service_enabled: true
+edge_enrollment_release_digest: sha256:daeba18e15379f61c2be331389e8307fb4c7ad69ed4e06a9e11be89a42612dd0

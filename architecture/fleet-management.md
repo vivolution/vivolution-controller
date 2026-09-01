@@ -158,6 +158,22 @@ Agents bootstrap through one stable control URL, then receive a signed endpoint 
 
 Use step-ca behind the control plane as the lean POC CA and evaluate SPIFFE/SPIRE for production workload identity/attestation plugins. Cosign can sign artifacts; TUF-style metadata supplies update roles, freshness, threshold trust, and rollback/freeze protection. A POC may use signed manifests plus protected monotonic state, but production update security must not assume artifact signatures alone solve rollback/freeze attacks.
 
+### Bounded enrollment v1 implementation note
+
+The same-day v1 implementation stops deliberately before the full protocol
+above. It uses the shared Controller HTTPS origin plus short-lived,
+single-use Controller challenges and a node-local Ed25519 key for signed claim,
+status, and heartbeat requests. The display-once grant is accepted only from an
+echo-disabled terminal, stdin, or a root-owned `0600` tmpfs file and is never
+persisted. mTLS/CA issuance remains deferred and must not be claimed for v1.
+
+This increment proves provider-neutral join, Pending approval, fingerprint
+approval/revocation, exact lost-response replay, and outbound fleet visibility
+for node scope, agent/link health, boot/sequence, and inventory/release digests.
+It does not yet upload detailed capabilities, deliver desired state or secrets,
+or make the node fully manageable from the Controller. The exact implemented
+boundary is documented in `edge/enrollment/API_CONTRACT.md`.
+
 ## Reconciliation and rollback
 
 The agent pulls declarative desired state. It does not accept arbitrary commands, scripts, or uploaded shell fragments. Typed intents are limited to operations such as:

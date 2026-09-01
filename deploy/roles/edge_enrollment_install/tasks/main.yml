@@ -1,0 +1,248 @@
+---
+- name: Require the qualified Ubuntu 24.04 Edge enrollment baseline
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'Debian'
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_version'] == '24.04'
+      - ansible_facts['pkg_mgr'] == 'apt'
+      - ansible_facts['service_mgr'] == 'systemd'
+      - ansible_facts['python']['version']['major'] | int == 3
+      - ansible_facts['python']['version']['minor'] | int >= 10
+      - ansible_facts['architecture'] in ['x86_64', 'aarch64']
+      - edge_enrollment_poll_seconds | int >= 10
+      - edge_enrollment_poll_seconds | int <= 3600
+      - edge_enrollment_release_digest is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: >-
+      Edge enrollment v1 is qualified only on Ubuntu 24.04 LTS amd64/arm64
+      with apt, systemd, Python 3.10 or newer, and a bounded polling interval.
+
+- name: Install the native enrollment runtime and public TLS roots
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - python3
+      - python3-cryptography
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 120
+
+- name: Create the dedicated unprivileged Edge Agent group
+  ansible.builtin.group:
+    name: vivolution-edge-agent
+    system: true
+    state: present
+
+- name: Create the dedicated non-login Edge Agent account
+  ansible.builtin.user:
+    name: vivolution-edge-agent
+    group: vivolution-edge-agent
+    home: /var/lib/vivolution-edge/agent-home
+    create_home: false
+    shell: /usr/sbin/nologin
+    system: true
+    password_lock: true
+    state: present
+
+- name: Create the root-owned Edge state root
+  ansible.builtin.file:
+    path: /var/lib/vivolution-edge
+    state: directory
+    owner: root
+    group: root
+    mode: '0751'
+    follow: false
+
+- name: Create the protected enrollment state owned only by the Agent
+  ansible.builtin.file:
+    path: /var/lib/vivolution-edge/enrollment
+    state: directory
+    owner: vivolution-edge-agent
+    group: vivolution-edge-agent
+    mode: '0700'
+    follow: false
+
+- name: Create the immutable enrollment Python package path
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+    follow: false
+  loop:
+    - /usr/lib/vivolution-edge
+    - /usr/lib/vivolution-edge/python
+    - /usr/lib/vivolution-edge/python/edge
+    - /usr/lib/vivolution-edge/python/edge/enrollment
+    - /usr/lib/vivolution-edge/config
+
+- name: Install the reviewed Edge enrollment sources
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../edge/enrollment/{{ item }}"
+    dest: "/usr/lib/vivolution-edge/python/edge/enrollment/{{ item }}"
+    owner: root
+    group: root
+    mode: '0444'
+    force: true
+  loop:
+    - __init__.py
+    - __main__.py
+    - cli.py
+    - client.py
+    - core.py
+    - http_client.py
+    - protocol.py
+    - release.py
+
+- name: Calculate the exact installed enrollment source release digest
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -I
+      - -B
+      - -c
+      - >-
+        import sys;
+        sys.path.insert(0, '/usr/lib/vivolution-edge/python');
+        from edge.enrollment.release import calculate_release_digest;
+        print(calculate_release_digest(__import__('pathlib').Path('/usr/lib/vivolution-edge/python/edge/enrollment'), expected_uid=0, expected_mode=0o444))
+  register: edge_enrollment_calculated_release_digest
+  changed_when: false
+
+- name: Require the installed source bundle to match the pinned release digest
+  ansible.builtin.assert:
+    that:
+      - edge_enrollment_calculated_release_digest.stdout | trim == edge_enrollment_release_digest
+    fail_msg: The installed Edge enrollment sources differ from the pinned release digest.
+
+- name: Install the root-owned immutable enrollment release identity
+  ansible.builtin.copy:
+    content: "{{ edge_enrollment_release_digest }}\n"
+    dest: /usr/lib/vivolution-edge/config/enrollment-release-digest
+    owner: root
+    group: root
+    mode: '0444'
+    force: true
+
+- name: Make the installed enrollment package immutable to the Agent
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0555'
+    follow: false
+  loop:
+    - /usr/lib/vivolution-edge/python/edge/enrollment
+    - /usr/lib/vivolution-edge/python/edge
+    - /usr/lib/vivolution-edge/python
+    - /usr/lib/vivolution-edge/config
+    - /usr/lib/vivolution-edge
+
+- name: Install the environment-scrubbed enrollment CLI wrapper
+  ansible.builtin.template:
+    src: vivolution-edge-join.j2
+    dest: /usr/local/bin/vivolution-edge-join
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install the hardened outbound enrollment service
+  ansible.builtin.template:
+    src: vivolution-edge-enrollment.service.j2
+    dest: /etc/systemd/system/vivolution-edge-enrollment.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd for Edge enrollment
+
+- name: Install the bounded enrollment polling timer
+  ansible.builtin.template:
+    src: vivolution-edge-enrollment.timer.j2
+    dest: /etc/systemd/system/vivolution-edge-enrollment.timer
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd for Edge enrollment
+
+- name: Flush systemd handlers before timer activation
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the installed enrollment service and timer syntax
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemd-analyze
+      - verify
+      - /etc/systemd/system/vivolution-edge-enrollment.service
+      - /etc/systemd/system/vivolution-edge-enrollment.timer
+  changed_when: false
+
+- name: Audit the effective enrollment service sandbox
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemd-analyze
+      - security
+      - --no-pager
+      - vivolution-edge-enrollment.service
+  register: edge_enrollment_systemd_security
+  changed_when: false
+
+- name: Prove the service identity and proc sandbox can read the Linux boot ID
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemd-run
+      - --quiet
+      - --wait
+      - --pipe
+      - --collect
+      - --service-type=oneshot
+      - --unit=vivolution-edge-boot-id-probe
+      - --property=User=vivolution-edge-agent
+      - --property=Group=vivolution-edge-agent
+      - --property=NoNewPrivileges=true
+      - --property=PrivateDevices=true
+      - --property=ProtectProc=invisible
+      - --property=ProtectSystem=strict
+      - --property=RestrictAddressFamilies=AF_UNIX
+      - --property=CapabilityBoundingSet=
+      - /usr/bin/cat
+      - /proc/sys/kernel/random/boot_id
+  register: edge_enrollment_boot_id_probe
+  changed_when: false
+
+- name: Require a canonical boot ID from the hardened transient probe
+  ansible.builtin.assert:
+    that:
+      - >-
+        edge_enrollment_boot_id_probe.stdout | trim is match(
+          '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+        )
+    fail_msg: The hardened enrollment service cannot read the canonical Linux boot ID.
+
+- name: Enable the outbound enrollment timer without starting an unclaimed node
+  ansible.builtin.systemd_service:
+    name: vivolution-edge-enrollment.timer
+    enabled: "{{ edge_enrollment_service_enabled | bool }}"
+    state: "{{ 'started' if (edge_enrollment_service_enabled | bool) else 'stopped' }}"
+
+- name: Verify the installed CLI has no argv or environment token option
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/vivolution-edge-join
+      - --help
+  register: edge_enrollment_help
+  changed_when: false
+
+- name: Require only tty stdin or root-file display-once grant sources
+  ansible.builtin.assert:
+    that:
+      - "'--token-stdin' not in edge_enrollment_help.stdout"
+      - "'--token-file' not in edge_enrollment_help.stdout"
+      - "'--token ' not in edge_enrollment_help.stdout"
+      - "'VIVO_' not in edge_enrollment_help.stdout"
+    fail_msg: The top-level CLI exposed an unexpected enrollment grant path.
+  # Subcommand options are intentionally documented by `enroll --help`; this
+  # gate proves no global token option or environment shortcut was added.

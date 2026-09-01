@@ -1,9 +1,12 @@
+import ipaddress
 import os
 import re
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from django.core.exceptions import ImproperlyConfigured
+
+from .edge_release import SUPPORTED_EDGE_ENROLLMENT_RELEASE_DIGEST
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -47,6 +50,45 @@ def env_release_id(name="VIVOLUTION_RELEASE_ID", default="unversioned"):
             f"{name} must be a safe release identifier of at most 128 characters"
         )
     return value
+
+
+def env_controller_origin(name="VIVOLUTION_CONTROLLER_ORIGIN"):
+    value = os.environ.get(name, "https://controller.example.test" if TESTING else "").strip()
+    if not value:
+        raise ImproperlyConfigured(f"{name} is required")
+    parsed = urlparse(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"{name} contains an invalid port") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ("", "/")
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or port not in (None, 443)
+    ):
+        raise ImproperlyConfigured(
+            f"{name} must be one HTTPS origin on port 443 with no path, query, or fragment"
+        )
+    hostname = parsed.hostname.rstrip(".").lower()
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        raise ImproperlyConfigured(f"{name} must use a DNS hostname, not an IP address")
+    if not re.fullmatch(
+        r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+        r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?",
+        hostname,
+    ):
+        raise ImproperlyConfigured(f"{name} must contain a valid ASCII DNS hostname")
+    return f"https://{hostname}"
 
 
 def env_session_engine(name="DJANGO_SESSION_ENGINE", default="file"):
@@ -95,6 +137,23 @@ def database_config(database_url):
 TESTING = env_bool("DJANGO_TESTING", False)
 DEBUG = env_bool("DJANGO_DEBUG", False)
 VIVOLUTION_RELEASE_ID = env_release_id()
+VIVOLUTION_CONTROLLER_ORIGIN = env_controller_origin()
+
+EDGE_ENROLLMENT_TOKEN_PEPPER = os.environ.get(
+    "EDGE_ENROLLMENT_TOKEN_PEPPER",
+    "00" * 32 if TESTING else "",
+)
+if not re.fullmatch(r"[0-9a-f]{64}", EDGE_ENROLLMENT_TOKEN_PEPPER):
+    raise ImproperlyConfigured(
+        "EDGE_ENROLLMENT_TOKEN_PEPPER must be an independent 32-byte key encoded as "
+        "64 lowercase hex characters"
+    )
+EDGE_API_MAX_BODY_BYTES = env_int(
+    "EDGE_API_MAX_BODY_BYTES", 16384, minimum=4096, maximum=65536
+)
+DATA_UPLOAD_MAX_MEMORY_SIZE = EDGE_API_MAX_BODY_BYTES
+EDGE_CHALLENGE_TTL_SECONDS = 60
+EDGE_ENROLLMENT_RELEASE_DIGEST = SUPPORTED_EDGE_ENROLLMENT_RELEASE_DIGEST
 
 RLS_CONTEXT_SIGNING_KEY = os.environ.get("RLS_CONTEXT_SIGNING_KEY", "")
 if RLS_CONTEXT_SIGNING_KEY:

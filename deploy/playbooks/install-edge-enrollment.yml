@@ -1,0 +1,7 @@
+---
+- name: Install the provider-neutral Vivolution Edge enrollment client
+  hosts: edge_nodes
+  become: true
+  gather_facts: true
+  roles:
+    - role: edge_enrollment_install

@@ -1,6 +1,16 @@
 # Provider-Neutral Cluster Enrollment POC
 
-Status: Planning only. No VM, DNS, certificate, or external tenant change is authorized.
+Status: Bounded local enrollment/visibility v1 implemented; no VM, DNS,
+certificate, or external tenant change has been made or authorized.
+
+Implementation checkpoint (2026-09-01): the provider-neutral Edge join client,
+hardened outbound service, and Controller API/admin flow now implement local
+Ed25519 identity, display-once grant handling, authoritative scope claim,
+fingerprint-bound Pending approval, signed status/heartbeat, exact lost-response
+replay, bounded challenge retention, and hard revocation. This checkpoint is
+enrollment/visibility only; mTLS, detailed capability inventory,
+desired-state/secrets delivery, and broader lifecycle management remain open POC
+gates. No VM, DNS, certificate, tenant, or carrier change was made.
 
 ## Objective
 

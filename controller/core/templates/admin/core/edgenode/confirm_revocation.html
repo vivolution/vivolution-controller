@@ -1,0 +1,24 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<h1>Confirm node identity revocation</h1>
+<p>Revocation immediately blocks new status challenges and heartbeats for the selected identities.</p>
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="action" value="{{ action_name }}">
+  <input type="hidden" name="confirmation" value="yes">
+  {% for row in rows %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ row.node.pk }}">
+    {% if row.claim %}
+      <input type="hidden" name="claim_binding"
+             value="{{ row.node.id }}|{{ row.claim.id }}|{{ row.node.generation }}|{{ row.claim.public_key_fingerprint }}">
+      <p><strong>{{ row.node }}</strong>, generation {{ row.node.generation }}:<br>
+        <code>{{ row.claim.public_key_fingerprint }}</code></p>
+    {% else %}
+      <p><strong>{{ row.node }}</strong>: no current claim exists.</p>
+    {% endif %}
+  {% endfor %}
+  <button type="submit">Revoke selected identities</button>
+  <a href="{% url 'admin:core_edgenode_changelist' %}">Cancel</a>
+</form>
+{% endblock %}

@@ -85,7 +85,7 @@ def readiness(request):
                     "SELECT 1 FROM django_migrations "
                     "WHERE app = %s AND name = %s"
                     ")",
-                    ["core", "0004_signed_only_rls_context"],
+                    ["core", "0006_enrollment_rls"],
                 )
                 migrated = cursor.fetchone()[0]
             signed_context_ready = True
@@ -98,8 +98,8 @@ def readiness(request):
                     cursor.execute(
                         """
                         SELECT
-                            count(*) = 10
-                            AND count(DISTINCT c.relname) = 7
+                            count(*) = 13
+                            AND count(DISTINCT c.relname) = 10
                             AND bool_and(COALESCE(
                                 p.polpermissive
                                 AND p.polroles = ARRAY[0]::oid[]
@@ -133,7 +133,10 @@ def readiness(request):
                                         'core_customeraccount',
                                         'core_m365tenant',
                                         'core_edgecluster',
-                                        'core_edgenode'
+                                        'core_edgenode',
+                                        'core_enrollmentgrant',
+                                        'core_enrollmentclaim',
+                                        'core_enrollmentchallenge'
                                      ) AND p.polname = 'operator_context_only'
                                        AND p.polcmd = '*'
                                        AND regexp_replace(
@@ -180,6 +183,9 @@ def readiness(request):
                                 "core_m365tenant",
                                 "core_edgecluster",
                                 "core_edgenode",
+                                "core_enrollmentgrant",
+                                "core_enrollmentclaim",
+                                "core_enrollmentchallenge",
                             ],
                         ],
                     )

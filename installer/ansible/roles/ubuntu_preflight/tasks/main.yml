@@ -158,10 +158,21 @@
       - cp_django_secret_key | length >= 48
       - cp_rls_context_key is defined
       - cp_rls_context_key is match('^[0-9a-f]{64}$')
+      - cp_edge_enrollment_token_pepper is defined
+      - cp_edge_enrollment_token_pepper is match('^[0-9a-f]{64}$')
+      - cp_edge_enrollment_token_pepper != cp_rls_context_key
       - cp_controller_admin_password is defined
       - cp_controller_admin_password | length >= 32
     fail_msg: Required database, Django, RLS, or initial administrator secrets are invalid.
   no_log: true
+
+- name: Validate the canonical controller shared origin
+  ansible.builtin.assert:
+    that:
+      - cp_controller_origin is defined
+      - cp_controller_origin == 'https://' ~ cp_shared_fqdn
+      - cp_controller_origin is match('^https://(?=.{1,261}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+    fail_msg: The controller shared origin must be the canonical HTTPS shared FQDN on port 443.
 
 - name: Resolve both public controller FQDNs before certificate enrollment
   ansible.builtin.command:

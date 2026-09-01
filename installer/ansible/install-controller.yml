@@ -14,6 +14,7 @@
     cp_pgbouncer_host: 127.0.0.1
     cp_pgbouncer_port: 6432
     cp_ingress_server_name: "{{ cp_shared_fqdn | default('invalid.local') }}"
+    cp_controller_origin: "https://{{ cp_shared_fqdn | default('invalid.local') }}"
     cp_ingress_https_port: 443
     cp_ingress_local_tls: false
     cp_ingress_loopback_resolution: false

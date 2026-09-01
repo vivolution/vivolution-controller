@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 \
+  /usr/bin/python3 -I -B -c 'import sys; sys.path.insert(0,"/usr/lib/vivolution-edge/python"); from edge.enrollment.cli import main; raise SystemExit(main())' "$@"

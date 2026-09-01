@@ -707,12 +707,25 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(status["status"], "dry-run-complete")
             self.assertTrue(all(value == "completed" for value in status["phases"].values()))
 
-    def test_generated_rls_context_key_is_exact_lowercase_hex(self):
+    def test_generated_security_keys_are_exact_lowercase_hex_and_independent(self):
         generated = installer.generate_secrets()
         self.assertRegex(generated["cp_rls_context_key"], r"^[0-9a-f]{64}$")
+        self.assertRegex(
+            generated["cp_edge_enrollment_token_pepper"],
+            r"^[0-9a-f]{64}$",
+        )
+        self.assertNotEqual(
+            generated["cp_rls_context_key"],
+            generated["cp_edge_enrollment_token_pepper"],
+        )
         installer.validate_secrets(generated)
         generated["cp_rls_context_key"] = "A" * 64
         with self.assertRaisesRegex(installer.InstallerError, "64 lowercase hexadecimal"):
+            installer.validate_secrets(generated)
+
+        generated = installer.generate_secrets()
+        generated["cp_edge_enrollment_token_pepper"] = generated["cp_rls_context_key"]
+        with self.assertRaisesRegex(installer.InstallerError, "must be independent"):
             installer.validate_secrets(generated)
 
 

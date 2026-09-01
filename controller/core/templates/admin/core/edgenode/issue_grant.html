@@ -1,0 +1,19 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<h1>Issue enrollment grant</h1>
+<p>
+  This grant is pinned to the exact enrollment-client source digest configured for this
+  Controller. Confirm that the node installer reports that exact digest before continuing.
+</p>
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="action" value="issue_grant">
+  <input type="hidden" name="issue_confirmation" value="yes">
+  <input type="hidden" name="{{ action_checkbox_name }}" value="{{ node.pk }}">
+  <p><strong>{{ node }}</strong>, generation {{ node.generation }}</p>
+  <p>Pinned enrollment-client source digest:<br><code>{{ release_digest }}</code></p>
+  <p><button type="submit">Issue display-once grant</button>
+     <a href="{% url 'admin:core_edgenode_changelist' %}">Cancel</a></p>
+</form>
+{% endblock %}
