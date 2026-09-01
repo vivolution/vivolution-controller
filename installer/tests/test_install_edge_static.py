@@ -37,7 +37,18 @@ class EdgeInstallerStaticTests(unittest.TestCase):
             script.index(comparison), script.index("/usr/bin/ansible-playbook")
         )
         self.assertIn("--verify-only", script)
+        self.assertIn("--check-host-os", script)
         self.assertIn("--dry-run", script)
+
+    def test_accepts_only_the_canonical_ubuntu_os_release_symlink(self) -> None:
+        script = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('os.readlink(source) != "../usr/lib/os-release"', script)
+        self.assertIn('read_path = "/usr/lib/os-release"', script)
+        self.assertIn('os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK', script)
+        self.assertIn('not stat.S_ISREG(opened_metadata.st_mode)', script)
+        self.assertIn('opened_metadata.st_uid != 0', script)
+        self.assertIn('opened_metadata.st_mode & 0o022', script)
+        self.assertIn('os.open(read_path, flags)', script)
 
     def test_local_playbook_uses_only_the_enrollment_role(self) -> None:
         playbook = (

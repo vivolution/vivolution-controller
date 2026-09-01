@@ -38,6 +38,7 @@ Run as root on a fresh Ubuntu Server 24.04 LTS host:
 
 ```sh
 sudo ./installer/install.sh
+sudo ./installer/install.sh check-host-os
 sudo ./installer/install.sh status
 sudo ./installer/install.sh resume
 sudo ./installer/install.sh reconcile
@@ -71,11 +72,19 @@ an older protected answer file it defaults to the validated `admin_email`, but
 every new interactive installation asks for it explicitly and offers the
 administrator email as the default.
 
-The rc3 ledger schema deliberately refuses resume/reconcile of an rc2-managed
-installation. An rc2 host may already have an alternate-CA certificate cached;
+The rc4 ledger schema remains version 4, so it can safely resume an rc3 run that
+failed during the initial read-only preflight. It deliberately refuses
+resume/reconcile of an rc2-managed installation. An rc2 host may already have
+an alternate-CA certificate cached;
 silently reusing that leaf would not prove the new Let's Encrypt-only contract.
-This candidate therefore requires a fresh rc3 host until a separately reviewed
+This candidate therefore requires a fresh rc3-or-later host until a separately reviewed
 certificate migration exists.
+
+Ubuntu 24.04 normally publishes `/etc/os-release` as the relative symlink
+`../usr/lib/os-release`. The host check accepts only that canonical link or a
+direct regular file, then opens the selected root-owned metadata file without
+following a final symlink. `check-host-os` exercises this packaged compatibility
+gate without creating installer state or changing the host.
 
 Unknown keys and non-standalone modes fail closed. Passwords and application
 secrets are generated locally and are never accepted through the answer file.

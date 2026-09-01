@@ -75,9 +75,11 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 
 ## Current boundary
 
-- The `v0.3.0-rc3` source candidate has separate deterministic Controller and Edge
+- The `v0.3.0-rc4` source candidate has separate deterministic Controller and Edge
   enrollment archives, checksum-pinned bootstraps, exact allowlists, and tamper
-  tests. A real PostgreSQL and fresh Ubuntu 24.04 run remains an acceptance gate.
+  tests. It corrects the stock Ubuntu 24.04 `/etc/os-release` symlink preflight
+  and adds a non-installing packaged host-OS check. A complete fresh-host run
+  remains an acceptance gate.
 - The bounded Edge enrollment client accepts the canonical Controller shared
   HTTPS URL plus a display-once grant, creates a local Ed25519 identity, enters
   pending approval, and reports signed heartbeat visibility after fingerprint
@@ -91,7 +93,7 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
   provider-egress process is restricted to `30064-30127`. Each receives only
   its own root-owned `0440` certificate copy and UID-scoped nftables authority.
 - Offline verification passes 58 carrier tests, 249 deployment tests, 83
-  Controller tests (12 PostgreSQL-only skips), 48 installer tests, 16 installer
+  Controller tests (12 PostgreSQL-only skips), 57 installer tests, 16 installer
   Ansible tests, and 42 Edge enrollment tests (one root-only tmpfs skip), plus
   syntax, digest-compatibility, whitespace, and independent security gates.
   This is source readiness, not a live-call or production claim.

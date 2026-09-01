@@ -317,6 +317,122 @@ class PreflightAndLoggingTests(unittest.TestCase):
             with self.assertRaisesRegex(installer.InstallerError, "existing Vivolution"):
                 installer.run_preflight(fixture.paths)
 
+    def test_preflight_accepts_ubuntu_canonical_os_release_symlink(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symbolic links are unavailable")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = InstallerFixture(temporary)
+            etc_os_release = fixture.fake_root / "etc" / "os-release"
+            usr_os_release = fixture.fake_root / "usr" / "lib" / "os-release"
+            usr_os_release.parent.mkdir(parents=True)
+            usr_os_release.write_bytes(etc_os_release.read_bytes())
+            etc_os_release.unlink()
+            os.symlink("../usr/lib/os-release", etc_os_release)
+
+            result = installer.run_preflight(fixture.paths)
+
+            self.assertEqual(result["os_id"], "ubuntu")
+            self.assertEqual(result["os_version"], "24.04")
+
+    def test_host_os_check_accepts_canonical_link_without_installer_state(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symbolic links are unavailable")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = InstallerFixture(temporary)
+            etc_os_release = fixture.fake_root / "etc" / "os-release"
+            usr_os_release = fixture.fake_root / "usr" / "lib" / "os-release"
+            usr_os_release.parent.mkdir(parents=True)
+            usr_os_release.write_bytes(etc_os_release.read_bytes())
+            etc_os_release.unlink()
+            os.symlink("../usr/lib/os-release", etc_os_release)
+
+            identity = installer.validate_host_os(fixture.paths)
+
+            self.assertEqual(identity, {"os_id": "ubuntu", "os_version": "24.04"})
+            self.assertFalse(fixture.paths.ledger.exists())
+
+    def test_preflight_rejects_noncanonical_os_release_symlink(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symbolic links are unavailable")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = InstallerFixture(temporary)
+            etc_os_release = fixture.fake_root / "etc" / "os-release"
+            alternate = fixture.fake_root / "var" / "tmp" / "os-release"
+            alternate.parent.mkdir(parents=True)
+            alternate.write_bytes(etc_os_release.read_bytes())
+            etc_os_release.unlink()
+            os.symlink("../var/tmp/os-release", etc_os_release)
+
+            with self.assertRaisesRegex(installer.InstallerError, "missing or unsafe"):
+                installer.run_preflight(fixture.paths)
+
+    def test_preflight_rejects_canonical_link_to_symlink_target(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symbolic links are unavailable")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = InstallerFixture(temporary)
+            etc_os_release = fixture.fake_root / "etc" / "os-release"
+            usr_os_release = fixture.fake_root / "usr" / "lib" / "os-release"
+            alternate = fixture.fake_root / "var" / "tmp" / "os-release"
+            usr_os_release.parent.mkdir(parents=True)
+            alternate.parent.mkdir(parents=True)
+            alternate.write_bytes(etc_os_release.read_bytes())
+            etc_os_release.unlink()
+            os.symlink("../usr/lib/os-release", etc_os_release)
+            os.symlink("../../../var/tmp/os-release", usr_os_release)
+
+            with self.assertRaisesRegex(installer.InstallerError, "Could not read"):
+                installer.run_preflight(fixture.paths)
+
+    def test_preflight_rejects_canonical_link_with_missing_target(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symbolic links are unavailable")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = InstallerFixture(temporary)
+            etc_os_release = fixture.fake_root / "etc" / "os-release"
+            etc_os_release.unlink()
+            os.symlink("../usr/lib/os-release", etc_os_release)
+
+            with self.assertRaisesRegex(installer.InstallerError, "Could not read"):
+                installer.run_preflight(fixture.paths)
+
+    def test_preflight_rejects_canonical_link_to_nonregular_target(self):
+        if not hasattr(os, "symlink") or not hasattr(os, "mkfifo"):
+            self.skipTest("required filesystem primitives are unavailable")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = InstallerFixture(temporary)
+            etc_os_release = fixture.fake_root / "etc" / "os-release"
+            usr_os_release = fixture.fake_root / "usr" / "lib" / "os-release"
+            usr_os_release.parent.mkdir(parents=True)
+            etc_os_release.unlink()
+            os.symlink("../usr/lib/os-release", etc_os_release)
+            os.mkfifo(usr_os_release)
+
+            with self.assertRaisesRegex(installer.InstallerError, "missing or unsafe"):
+                installer.run_preflight(fixture.paths)
+
+    def test_preflight_rejects_duplicate_os_identity_key(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = InstallerFixture(temporary)
+            os_release = fixture.fake_root / "etc" / "os-release"
+            os_release.write_text(
+                'ID=ubuntu\nID=debian\nVERSION_ID="24.04"\n', encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(installer.InstallerError, "duplicate key: ID"):
+                installer.run_preflight(fixture.paths)
+
+    def test_preflight_rejects_oversized_os_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = InstallerFixture(temporary)
+            os_release = fixture.fake_root / "etc" / "os-release"
+            os_release.write_bytes(
+                b"ID=ubuntu\nVERSION_ID=24.04\n" + (b"X" * 65536)
+            )
+
+            with self.assertRaisesRegex(installer.InstallerError, "missing or unsafe"):
+                installer.run_preflight(fixture.paths)
+
     def test_logs_redact_values_and_sensitive_keys(self):
         with tempfile.TemporaryDirectory() as temporary:
             secret = "very-secret-value"

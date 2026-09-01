@@ -368,20 +368,63 @@ class InstallerPaths:
 def parse_os_release(path):
     values = {}
     path = Path(path)
-    if path.is_symlink() or not path.is_file():
-        raise InstallerError("OS metadata is missing or unsafe: %s" % path)
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise InstallerError("Could not read %s: %s" % (path, exc))
+        path_metadata = path.lstat()
+    except OSError:
+        raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+
+    read_path = path
+    if stat.S_ISLNK(path_metadata.st_mode):
+        try:
+            link_target = os.readlink(path)
+        except OSError:
+            raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+        if link_target == "../usr/lib/os-release":
+            read_path = path.parent.parent / "usr/lib/os-release"
+        else:
+            raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+    elif not stat.S_ISREG(path_metadata.st_mode):
+        raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    descriptor = None
+    try:
+        descriptor = os.open(read_path, flags)
+        opened_metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_metadata.st_mode) or opened_metadata.st_size > 65536:
+            raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+        if path == Path("/etc/os-release") and (
+            opened_metadata.st_uid != 0 or opened_metadata.st_mode & 0o022
+        ):
+            raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+        chunks = []
+        remaining = 65537
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        if len(content) > 65536 or b"\x00" in content:
+            raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+        lines = content.decode("utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise InstallerError("Could not read %s: %s" % (read_path, exc))
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     for line in lines:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, raw_value = line.split("=", 1)
+        key = key.strip()
+        if key in values:
+            raise InstallerError("OS metadata contains a duplicate key: %s" % key)
         value = raw_value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        values[key.strip()] = value
+        values[key] = value
     return values
 
 
@@ -1053,14 +1096,22 @@ def run_runtime_preflight(paths, runner=subprocess.run, command_finder=shutil.wh
     }
 
 
-def run_preflight(paths, runner=subprocess.run, command_finder=shutil.which):
-    if paths.root == Path("/") and os.geteuid() != 0:
-        raise InstallerError("Run the installer as root (for example, sudo ./install.sh)")
+def validate_host_os(paths):
     os_release = parse_os_release(paths.host_path("/etc/os-release"))
     if os_release.get("ID", "").lower() != SUPPORTED_OS_ID:
         raise InstallerError("Only Ubuntu Server is supported")
     if os_release.get("VERSION_ID") != SUPPORTED_OS_VERSION:
         raise InstallerError("Only Ubuntu Server 24.04 LTS is supported")
+    return {
+        "os_id": os_release.get("ID"),
+        "os_version": os_release.get("VERSION_ID"),
+    }
+
+
+def run_preflight(paths, runner=subprocess.run, command_finder=shutil.which):
+    if paths.root == Path("/") and os.geteuid() != 0:
+        raise InstallerError("Run the installer as root (for example, sudo ./install.sh)")
+    os_identity = validate_host_os(paths)
     if paths.root == Path("/") and not paths.host_path("/run/systemd/system").is_dir():
         raise InstallerError("The target must be booted with systemd")
     markers = (
@@ -1078,8 +1129,7 @@ def run_preflight(paths, runner=subprocess.run, command_finder=shutil.which):
             % ", ".join(found)
         )
     result = {
-        "os_id": os_release.get("ID"),
-        "os_version": os_release.get("VERSION_ID"),
+        **os_identity,
         "architecture": platform.machine(),
         "effective_user": getpass.getuser(),
     }
@@ -1765,6 +1815,10 @@ def build_parser():
     support = subparsers.add_parser("support-bundle", help="create a redacted support archive")
     add_common_arguments(support, allow_dry_run=True)
     support.add_argument("--output", help="new support archive path")
+    host_os = subparsers.add_parser(
+        "check-host-os", help="verify supported host OS metadata without installing"
+    )
+    add_common_arguments(host_os)
     return parser
 
 
@@ -1818,6 +1872,12 @@ def main(argv=None):
         elif args.command == "support-bundle":
             output = create_support_bundle(paths, output_path=args.output)
             print("Support bundle: %s" % output)
+        elif args.command == "check-host-os":
+            identity = validate_host_os(paths)
+            print(
+                "Host OS verified: %s %s"
+                % (identity["os_id"], identity["os_version"])
+            )
         return 0
     except InstallerError as exc:
         print("ERROR: %s" % exc, file=sys.stderr)
