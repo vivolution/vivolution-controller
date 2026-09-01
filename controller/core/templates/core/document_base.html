@@ -1,0 +1,30 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>{% block title %}Vivolution Control Plane{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'core/docs.css' %}">
+</head>
+<body class="vivo-docs">
+  <header class="vivo-docs__header">
+    <div>
+      <a class="vivo-docs__brand" href="{% url 'admin:index' %}">Vivolution Control Plane</a>
+      <p class="vivo-docs__release">Installed release: <code>{{ vivolution_release_id }}</code></p>
+    </div>
+    <nav aria-label="Controller resources">
+      <a href="{% url 'admin:index' %}">Configuration console</a>
+      <a href="{% url 'documentation' %}">Documentation</a>
+      <a href="{% url 'recovery' %}">Recovery</a>
+    </nav>
+  </header>
+  <main class="vivo-docs__main">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="vivo-docs__footer">
+    <p>Vivolution Control Plane · Release <code>{{ vivolution_release_id }}</code></p>
+  </footer>
+</body>
+</html>

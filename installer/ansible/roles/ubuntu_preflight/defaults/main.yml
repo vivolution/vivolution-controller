@@ -1,0 +1,6 @@
+---
+cp_min_vcpus: 2
+cp_min_memory_mb: 4096
+cp_min_root_disk_gb: 40
+cp_firewall_ssh_source_ipv4_cidrs: []
+cp_require_public_dns: true

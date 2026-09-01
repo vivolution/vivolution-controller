@@ -1,7 +1,43 @@
-# Vivolution SBC
+# Vivolution Control Plane and SBC
 
-Status: Azure generation-2 synthetic POC qualified; generation-3 Direct
-Routing/Twilio path under remediation and not yet live-accepted
+Status: standalone Ubuntu CP1 public beta published; provider-neutral Hosted
+SBC code offline-qualified; clean Ubuntu and live Teams/SIP acceptance pending.
+
+## Turnkey Controller installer
+
+The product installer configures an administrator-supplied Ubuntu Server VM or
+physical host. It does **not** create Azure, AWS, GCP, VMware, DNS, NAT, public
+IP, or load-balancer resources.
+
+The first released mode is standalone CP1. CP2 and CP3 are deliberately hidden
+until replication, fencing, quorum, failover, and rejoin acceptance tests pass;
+the installer will never disguise independent databases as an HA cluster.
+
+On a fresh Ubuntu Server 24.04 LTS host, clone or unpack the reviewed source and
+run:
+
+```sh
+sudo ./installer/install.sh
+```
+
+The wizard validates the host and public DNS, preserves the active SSH source,
+asks for the node/shared FQDNs and initial operator, generates protected
+credentials, installs PostgreSQL/PgBouncer/Podman/Caddy, deploys the controller,
+runs health checks, and prints the console URL. Interrupted runs use
+`sudo ./installer/install.sh resume`.
+
+- [Installer guide](installer/README.md)
+- [Turnkey architecture and HA contract](architecture/turnkey-installer.md)
+- [Controller application and operator guide](controller/README.md)
+
+The separate public `vivolution-install` repository publishes the pinned
+`v0.3.0-rc1` bootstrap and release archive. That bootstrap installs standalone
+CP1 only; it does not install an SBC Edge or claim CP2/CP3 high availability.
+
+The Hosted SBC material below is a separate guarded POC module. Its invariant
+is **Microsoft Teams -> Common Teams Leg -> SBC routing/media -> Generic SIP
+Trunk Leg -> customer-selected provider**. Twilio is the first example profile,
+not a hard-coded product dependency.
 
 ## Working hypothesis
 
@@ -26,66 +62,32 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 
 ## Current boundary
 
-- Jay authorized a disposable local CP1 lab on this Mac. Debian 13.6 ARM64 runs
-  in UTM, and the first Django/PostgreSQL controller vertical slice is deployed
-  through the repeatable Ansible kit.
-- Clean UTM rebuilds and the local functional suite passed on August 27 and 28,
-  including HTTPS/admin access, backup/restore, controlled database outage,
-  failed-release recovery, reboot recovery, and two-minute readiness soaks.
-  The latest untouched-OS run recorded 904 successful requests, zero failures,
-  101.46 MiB peak controller memory, and 3.01% peak CPU.
-- An independent August 28 audit withdrew the broader “qualified” conclusion.
-  It proved the prior `changed=0` result hid changing PostgreSQL SCRAM state and
-  found material RLS, Caddy-admin, mutable-image, credential, evidence, and
-  coverage gaps. Those historical runs remain credible bounded functional
-  evidence, not current security/release acceptance.
-- Remediation was promoted through a one-release signed-RLS compatibility
-  bridge to the signed-only/least-privilege Lab release. The UTM kit can now
-  create the protected primary from a truly empty registry without a template
-  VM, then run the signed current-release and distinct N-1 gates. The latest
-  verified evidence, rather than this narrative, is authoritative for pass/fail
-  status; the bridge itself is not the final isolation boundary.
-- The authorized Azure POC group is live in UAE North with replacement CP1 and
-  two generation-2 Edge nodes. Signed synthetic TLS/SIP/RTP calls, SBC failover,
-  reboot recovery, and replacement-CP1 restore have passed. The preserved
-  legacy controller remains the DNS target and rollback source until cutover.
-- The implementation includes a fail-closed
-  OpenSIPS/RTPengine Edge bootstrap, signed desired-state verifier/compiler,
-  transactional activation and rollback, public-certificate automation, a
-  private no-PSTN SIP/TLS/RTP fixture, first-tenant CP1 catalog reconciliation,
-  replacement-controller restore automation, and a guarded Microsoft 365
-  onboarding package. A parallel generation-3 Direct Routing profile adds the
-  CP1 carrier gateway and Twilio termination path. It remains a guarded draft
-  until its public-NAT/media, certificate, authorization/CDR, rollback, and
-  teardown gates pass independent review and live host qualification.
-- Trivy is pinned for the replacement qualification. The signed gate blocks
-  every fixable HIGH/CRITICAL finding in the committed source, exact running
-  OCI image, and guest package database. It also retains the complete unfixed
-  HIGH/CRITICAL inventory as signed evidence; findings for which Trivy reports
-  no fixed version remain explicit residual risk rather than being hidden or
-  mislabeled as remediated.
-- The Azure acceptance kit includes a deliberately self-contained
-  `azure-single` profile: one Debian 13 AMD64 VM runs PostgreSQL, PgBouncer,
-  Caddy, Podman, and the immutable CP1 application. It does not depend on Azure
-  Database for PostgreSQL or another managed runtime service. The separately
-  retained `azure` profile continues to require an external PostgreSQL service.
-  Signed evidence, rather than this narrative, is authoritative for the latest
-  Azure qualification result.
-- No vendor purchase, customer pilot, production traffic, or production
-  deployment is authorized. Jay accepted OpenSIPS/RTPengine as an explicitly
-  non-certified POC boundary. Microsoft supportability, carrier agreements,
-  and UAE regulatory feasibility remain mandatory production gates.
-- The private synthetic gate cannot be described as a live Teams/PSTN pass.
-  The first live profile uses the root FQDNs `sbc1.vivolution.ae`,
-  `sbc2.vivolution.ae`, and `carrier.vivolution.ae` for the single Vivolution
-  tenant. Jay reports that `jay@vivolution.ae` has Microsoft 365 E5/Teams Phone;
-  live tenant verification must be repeated after normal browser sign-in.
-  Twilio is outbound-only for this POC because no DID exists, and its account,
-  verified caller ID, permitted destination, TLS/SRTP, and live call evidence
-  remain pending.
-- Four VMs are presently powered, including the preserved legacy controller.
-  Their retail baseline is approximately USD 8.48/day, so the live acceptance
-  window must be short and idle compute deallocated promptly.
+- The public controller release candidate is `v0.3.0-rc1`. Its deterministic
+  archive, checksum-pinned bootstrap, tamper tests, and 54 installer/static
+  tests pass. A fresh Ubuntu 24.04 host run remains an acceptance gate.
+- The Hosted SBC implementation includes fail-closed OpenSIPS/RTPengine Edge
+  bootstrap, signed desired state, transactional activation and rollback,
+  certificate automation, a private no-PSTN fixture, a guarded one-call broker,
+  provider-neutral CDR adapters, and a generic outbound SIP-provider profile.
+- The common Teams process is restricted to RTP `30000-30063`; the isolated
+  provider-egress process is restricted to `30064-30127`. Each receives only
+  its own root-owned `0440` certificate copy and UID-scoped nftables authority.
+- Offline verification passes 58 carrier tests and 238 deployment tests, five
+  carrier Ansible syntax gates, rendered Python/shell parsing, whitespace
+  checks, and independent secret/security review. This is source readiness,
+  not a live-call or production claim.
+- A 2026-09-01 Azure audit found no current Vivolution POC resource group, VM,
+  or compute resource. The existing DNS zones remain, but the planned
+  controller, SBC, and carrier records are absent. Historical UTM/Azure evidence
+  remains bounded historical evidence only.
+- Live acceptance still requires fresh hosts, reviewed DNS and certificates, a
+  Microsoft Teams administrator session and test identity, a protected customer
+  SIP profile, and an explicitly approved destination and spend ceiling for the
+  controlled call. No live Teams-to-provider call has yet been claimed.
+- OpenSIPS/RTPengine remains explicitly non-Microsoft-certified. No vendor
+  purchase, customer pilot, production traffic, or production deployment is
+  implied; supportability, carrier agreements, and UAE regulatory feasibility
+  remain production gates.
 
 ## Working documents
 

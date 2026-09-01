@@ -1,0 +1,236 @@
+---
+- name: Require a local standalone installation
+  ansible.builtin.assert:
+    that:
+      - ansible_connection == 'local'
+      - inventory_hostname == 'localhost'
+      - cp_profile == 'ubuntu-standalone'
+      - cp_install_local_postgres | bool
+    fail_msg: This playbook may install only the local Ubuntu controller host.
+
+- name: Validate supported Ubuntu release and CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_version == '24.04'
+      - ansible_facts.architecture in ['x86_64', 'aarch64']
+    fail_msg: The standalone controller requires fresh Ubuntu Server 24.04 on AMD64 or ARM64.
+
+- name: Inspect host time synchronization before configuration
+  ansible.builtin.command:
+    argv:
+      - timedatectl
+      - show
+      - --property=NTP
+      - --property=NTPSynchronized
+      - --no-pager
+  register: cp_host_time_synchronization
+  changed_when: false
+
+- name: Inspect pending reboot state before configuration
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+    follow: false
+  register: cp_preflight_reboot_required
+
+- name: Require synchronized time and a fully booted package state
+  ansible.builtin.assert:
+    that:
+      - "'NTP=yes' in cp_host_time_synchronization.stdout_lines"
+      - "'NTPSynchronized=yes' in cp_host_time_synchronization.stdout_lines"
+      - not cp_preflight_reboot_required.stat.exists
+    fail_msg: >-
+      NTP must be enabled and synchronized and no Ubuntu reboot may be pending;
+      correct the host state before continuing or resuming installation.
+
+- name: Validate controller identity and public ingress variables
+  ansible.builtin.assert:
+    that:
+      - cp_expected_hostname is defined
+      - cp_expected_hostname is match('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+      - cp_node_fqdn is defined
+      - cp_node_fqdn is match(cp_public_fqdn_pattern)
+      - cp_shared_fqdn is defined
+      - cp_shared_fqdn is match(cp_public_fqdn_pattern)
+      - cp_node_fqdn != cp_shared_fqdn
+      - cp_public_ipv4 is defined
+      - cp_public_ipv4 is match(cp_ipv4_address_pattern)
+      - cp_ingress_server_name == cp_shared_fqdn
+      - cp_ingress_https_port | int == 443
+      - not (cp_ingress_local_tls | bool)
+      - cp_controller_allowed_hosts.split(',') | map('trim') | list | unique | length == 4
+      - "'127.0.0.1' in (cp_controller_allowed_hosts.split(',') | map('trim') | list)"
+      - "'localhost' in (cp_controller_allowed_hosts.split(',') | map('trim') | list)"
+      - cp_node_fqdn in (cp_controller_allowed_hosts.split(',') | map('trim') | list)
+      - cp_shared_fqdn in (cp_controller_allowed_hosts.split(',') | map('trim') | list)
+      - >-
+        cp_controller_csrf_origins.split(',') | map('trim') | list | sort ==
+        (['https://' ~ cp_node_fqdn, 'https://' ~ cp_shared_fqdn] | sort)
+    fail_msg: Hostname, public FQDN, HTTPS, Allowed-Hosts, or CSRF settings are invalid.
+  vars:
+    cp_public_fqdn_pattern: '^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+    cp_ipv4_address_pattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})$'
+
+- name: Require a globally routable controller IPv4 address
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - >-
+        import ipaddress,sys;
+        address=ipaddress.ip_address(sys.argv[1]);
+        raise SystemExit(0 if isinstance(address, ipaddress.IPv4Address) and address.is_global else 1)
+      - "{{ cp_public_ipv4 }}"
+  changed_when: false
+
+- name: Validate source-restricted SSH inputs
+  ansible.builtin.assert:
+    that:
+      - cp_ssh_allowed_user is defined
+      - cp_ssh_allowed_user != 'root'
+      - cp_ssh_allowed_user is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - cp_firewall_ssh_source_ipv4_cidrs | length >= 1
+      - cp_firewall_ssh_source_ipv4_cidrs | length <= 16
+      - >-
+        (cp_firewall_ssh_source_ipv4_cidrs |
+         select('match', cp_ipv4_host_cidr_pattern) | list | length) ==
+        (cp_firewall_ssh_source_ipv4_cidrs | length)
+      - >-
+        cp_firewall_ssh_source_ipv4_cidrs | unique | length ==
+        cp_firewall_ssh_source_ipv4_cidrs | length
+    fail_msg: Supply a non-root SSH user and one to sixteen unique IPv4 /32 administration CIDRs.
+  vars:
+    cp_ipv4_host_cidr_pattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})/32$'
+
+- name: Validate capacity thresholds
+  ansible.builtin.assert:
+    that:
+      - cp_min_vcpus | int >= 2
+      - cp_min_memory_mb | int >= 4096
+      - cp_min_root_disk_gb | int >= 40
+    fail_msg: Declared capacity minima may not be lower than 2 vCPU, 4 GiB RAM, and 40 GB disk.
+
+- name: Locate the root filesystem fact
+  ansible.builtin.set_fact:
+    cp_ubuntu_root_mounts: >-
+      {{ ansible_facts.mounts | selectattr('mount', 'equalto', '/') | list }}
+
+- name: Require one root filesystem fact
+  ansible.builtin.assert:
+    that: cp_ubuntu_root_mounts | length == 1
+    fail_msg: The installer could not identify the root filesystem safely.
+
+- name: Validate available host capacity
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.processor_vcpus | int >= cp_min_vcpus | int
+      - ansible_facts.memtotal_mb | int >= cp_min_memory_mb | int
+      - >-
+        cp_ubuntu_root_mounts[0].size_total | int >=
+        (cp_min_root_disk_gb | int * 1000 * 1000 * 1000)
+    fail_msg: The host does not meet the declared CPU, memory, or root-disk minimum.
+
+- name: Validate database and controller release inputs
+  ansible.builtin.assert:
+    that:
+      - cp_database_name is match('^(?!pg_)[a-z_][a-z0-9_]{0,62}$')
+      - cp_db_owner is match('^(?!pg_)[a-z_][a-z0-9_]{0,62}$')
+      - cp_db_runtime_user is match('^(?!pg_)[a-z_][a-z0-9_]{0,62}$')
+      - cp_db_owner != cp_db_runtime_user
+      - cp_db_upstream_host == '127.0.0.1'
+      - cp_db_upstream_port | int == 5432
+      - cp_pgbouncer_host == '127.0.0.1'
+      - cp_pgbouncer_port | int == 6432
+      - cp_controller_release_id is defined
+      - cp_controller_release_id is match('^cp1-[0-9a-f]{64}$')
+      - cp_controller_base_image is defined
+      - cp_controller_base_image is match('^[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-f]{64}$')
+    fail_msg: Database, release digest, or immutable base-image inputs are invalid.
+
+- name: Validate protected deployment secrets
+  ansible.builtin.assert:
+    that:
+      - cp_db_owner_password is defined
+      - cp_db_owner_password is match('^[A-Za-z0-9_-]{32,128}$')
+      - cp_db_runtime_password is defined
+      - cp_db_runtime_password is match('^[A-Za-z0-9_-]{32,128}$')
+      - cp_django_secret_key is defined
+      - cp_django_secret_key | length >= 48
+      - cp_rls_context_key is defined
+      - cp_rls_context_key is match('^[0-9a-f]{64}$')
+      - cp_controller_admin_password is defined
+      - cp_controller_admin_password | length >= 32
+    fail_msg: Required database, Django, RLS, or initial administrator secrets are invalid.
+  no_log: true
+
+- name: Resolve both public controller FQDNs before certificate enrollment
+  ansible.builtin.command:
+    argv: [getent, ahostsv4, "{{ item }}"]
+  loop:
+    - "{{ cp_node_fqdn }}"
+    - "{{ cp_shared_fqdn }}"
+  register: cp_public_fqdn_resolutions
+  changed_when: false
+  when: cp_require_public_dns | bool
+
+- name: Require both FQDNs to resolve only to this controller public IPv4 address
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - item.stdout | trim | length > 0
+      - >-
+        (item.stdout_lines | map('regex_replace', '\\s+.*$', '') | unique | list) ==
+        [cp_public_ipv4]
+    fail_msg: >-
+      {{ item.item }} must resolve exclusively to {{ cp_public_ipv4 }} before
+      public certificate enrollment.
+  loop: "{{ cp_public_fqdn_resolutions.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: cp_require_public_dns | bool
+
+- name: Inspect fresh-host ownership boundaries
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /etc/vivolution
+    - /var/lib/vivolution
+    - /etc/vivolution/installation-owner
+    - /etc/postgresql/17/main/postgresql.conf
+    - /etc/pgbouncer/pgbouncer.ini
+    - /etc/caddy/Caddyfile
+    - /etc/containers/systemd/vivolution-cp-web.container
+  register: cp_fresh_host_paths
+
+- name: Read an existing installer ownership marker
+  ansible.builtin.slurp:
+    src: /etc/vivolution/installation-owner
+  register: cp_installation_owner_marker
+  when: cp_fresh_host_paths.results[2].stat.exists
+
+- name: Validate fresh host or an installer-owned reconciliation
+  ansible.builtin.assert:
+    that:
+      - >-
+        (not cp_fresh_host_paths.results[2].stat.exists and
+         not cp_fresh_host_paths.results[0].stat.exists and
+         not cp_fresh_host_paths.results[1].stat.exists and
+         not cp_fresh_host_paths.results[3].stat.exists and
+         not cp_fresh_host_paths.results[4].stat.exists and
+         not cp_fresh_host_paths.results[5].stat.exists and
+         not cp_fresh_host_paths.results[6].stat.exists) or
+        (cp_fresh_host_paths.results[2].stat.isreg | default(false) and
+         not (cp_fresh_host_paths.results[2].stat.islnk | default(false)) and
+         cp_fresh_host_paths.results[2].stat.uid | int == 0 and
+         cp_fresh_host_paths.results[2].stat.gid | int == 0 and
+         cp_fresh_host_paths.results[2].stat.mode == '0600' and
+         (cp_installation_owner_marker.content | b64decode) ==
+         'owner=vivolution-controller-installer\nschema=1\n')
+    fail_msg: >-
+      Initial installation requires a fresh host. Existing controller, PostgreSQL,
+      Caddy, or Vivolution state is accepted only with the exact installer marker.
+
+- name: Remember whether this is an installer-owned reconciliation
+  ansible.builtin.set_fact:
+    cp_existing_managed_install: "{{ cp_fresh_host_paths.results[2].stat.exists }}"

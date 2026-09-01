@@ -1,0 +1,16 @@
+{
+    admin off
+}
+
+https://{{ cp_shared_fqdn }}:443, https://{{ cp_node_fqdn }}:443 {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:{{ cp_controller_web_port }}
+
+    header {
+        -Server
+        Strict-Transport-Security "max-age={{ cp_controller_hsts_seconds }}"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "same-origin"
+    }
+}

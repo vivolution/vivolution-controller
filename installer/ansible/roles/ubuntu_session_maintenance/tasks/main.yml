@@ -1,0 +1,66 @@
+---
+- name: Install bounded expired-session cleanup service
+  ansible.builtin.template:
+    src: vivolution-cp-clearsessions.service.j2
+    dest: /etc/systemd/system/vivolution-cp-clearsessions.service
+    owner: root
+    group: root
+    mode: '0644'
+  register: cp_clearsessions_service_unit
+
+- name: Install bounded daily expired-session cleanup timer
+  ansible.builtin.template:
+    src: vivolution-cp-clearsessions.timer.j2
+    dest: /etc/systemd/system/vivolution-cp-clearsessions.timer
+    owner: root
+    group: root
+    mode: '0644'
+  register: cp_clearsessions_timer_unit
+
+- name: Reload systemd after maintenance-unit changes
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: cp_clearsessions_service_unit.changed or cp_clearsessions_timer_unit.changed
+
+- name: Exercise expired-session cleanup once after activation
+  ansible.builtin.systemd_service:
+    name: vivolution-cp-clearsessions.service
+    state: started
+  changed_when: false
+
+- name: Enable and start the daily expired-session cleanup timer
+  ansible.builtin.systemd_service:
+    name: vivolution-cp-clearsessions.timer
+    enabled: true
+    state: started
+
+- name: Require the cleanup timer to be enabled
+  ansible.builtin.command:
+    argv: [systemctl, is-enabled, vivolution-cp-clearsessions.timer]
+  register: cp_clearsessions_timer_enabled
+  changed_when: false
+
+- name: Require the cleanup timer to be active
+  ansible.builtin.command:
+    argv: [systemctl, is-active, vivolution-cp-clearsessions.timer]
+  register: cp_clearsessions_timer_active
+  changed_when: false
+
+- name: Inspect scheduled cleanup timer
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - list-timers
+      - --all
+      - --no-pager
+      - vivolution-cp-clearsessions.timer
+  register: cp_clearsessions_timer_schedule
+  changed_when: false
+
+- name: Validate scheduled cleanup timer
+  ansible.builtin.assert:
+    that:
+      - cp_clearsessions_timer_enabled.stdout | trim == 'enabled'
+      - cp_clearsessions_timer_active.stdout | trim == 'active'
+      - "'vivolution-cp-clearsessions.timer' in cp_clearsessions_timer_schedule.stdout"
+    fail_msg: The bounded daily database-session cleanup timer is not scheduled.

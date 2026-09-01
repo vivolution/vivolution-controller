@@ -11,6 +11,10 @@ from .models import (
     TenantContext,
 )
 
+admin.site.site_header = "Vivolution Control Plane"
+admin.site.site_title = "Vivolution CP"
+admin.site.index_title = "Controller configuration"
+
 # Operator identity is provisioned only by the owner-credential deployment
 # command. The runtime database role cannot mutate passwords, superuser/staff
 # flags, groups, or permissions, so those models must not be exposed here.

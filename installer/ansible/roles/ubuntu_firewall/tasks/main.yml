@@ -1,0 +1,193 @@
+---
+- name: Detect the active SSH client's source address
+  ansible.builtin.set_fact:
+    cp_active_ssh_client_ipv4: >-
+      {{ (lookup('ansible.builtin.env', 'SSH_CONNECTION').split() | first)
+         if (lookup('ansible.builtin.env', 'SSH_CONNECTION') | trim | length > 0)
+         else '' }}
+
+- name: Validate the active SSH client before firewall activation
+  ansible.builtin.assert:
+    that:
+      - >-
+        cp_active_ssh_client_ipv4 | length == 0 or
+        cp_active_ssh_client_ipv4 is match(cp_ipv4_address_pattern)
+      - >-
+        cp_active_ssh_client_ipv4 | length == 0 or
+        (cp_active_ssh_client_ipv4 ~ '/32') in cp_firewall_ssh_source_ipv4_cidrs
+    fail_msg: >-
+      The active SSH client is not covered by the explicit /32 administration
+      CIDRs; refusing to risk disconnecting the administrator.
+  vars:
+    cp_ipv4_address_pattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})$'
+
+- name: Inspect pre-existing UFW commands
+  ansible.builtin.command:
+    argv: [ufw, show, added]
+  environment:
+    LC_ALL: C
+  register: cp_ufw_preexisting_rules
+  changed_when: false
+
+- name: Reject a non-installer firewall policy on a fresh host
+  ansible.builtin.assert:
+    that:
+      - >-
+        cp_existing_managed_install | bool or
+        (cp_ufw_preexisting_rules.stdout_lines |
+         reject('match', '^Added user rules') |
+         reject('match', '^$') | list | length == 0)
+    fail_msg: A fresh host must not contain pre-existing UFW user rules.
+
+- name: Set deny-by-default inbound policy
+  ansible.builtin.command:
+    argv: [ufw, default, deny, incoming]
+  register: cp_ufw_default_incoming
+  changed_when: "'Default incoming policy changed' in cp_ufw_default_incoming.stdout"
+
+- name: Set allow-by-default outbound policy
+  ansible.builtin.command:
+    argv: [ufw, default, allow, outgoing]
+  register: cp_ufw_default_outgoing
+  changed_when: "'Default outgoing policy changed' in cp_ufw_default_outgoing.stdout"
+
+- name: Allow public HTTP for ACME and HTTPS for the controller
+  ansible.builtin.command:
+    argv:
+      - ufw
+      - allow
+      - from
+      - 0.0.0.0/0
+      - to
+      - any
+      - port
+      - "{{ item.port }}"
+      - proto
+      - tcp
+      - comment
+      - "{{ item.comment }}"
+  loop:
+    - {port: 80, comment: Vivolution CP HTTP ACME}
+    - {port: 443, comment: Vivolution CP HTTPS}
+  register: cp_ufw_web_rules
+  changed_when: "'Skipping adding existing rule' not in cp_ufw_web_rules.stdout"
+
+- name: Allow SSH only from explicit IPv4 host CIDRs
+  ansible.builtin.command:
+    argv:
+      - ufw
+      - allow
+      - from
+      - "{{ item }}"
+      - to
+      - any
+      - port
+      - '22'
+      - proto
+      - tcp
+      - comment
+      - Vivolution CP SSH
+  loop: "{{ cp_firewall_ssh_source_ipv4_cidrs }}"
+  register: cp_ufw_ssh_rules
+  changed_when: "'Skipping adding existing rule' not in cp_ufw_ssh_rules.stdout"
+
+- name: Enable low-volume UFW logging
+  ansible.builtin.command:
+    argv: [ufw, logging, low]
+  register: cp_ufw_logging
+  changed_when: "'Logging enabled' in cp_ufw_logging.stdout"
+
+- name: Inspect UFW activation state
+  ansible.builtin.command:
+    argv: [ufw, status]
+  environment:
+    LC_ALL: C
+  register: cp_ufw_before_activation
+  changed_when: false
+
+- name: Activate UFW only after all preservation rules exist
+  ansible.builtin.command:
+    argv: [ufw, --force, enable]
+  when: "'Status: active' not in cp_ufw_before_activation.stdout"
+  changed_when: true
+
+- name: Enable the UFW system service
+  ansible.builtin.systemd_service:
+    name: ufw.service
+    enabled: true
+    state: started
+
+- name: Inspect the effective UFW policy
+  ansible.builtin.command:
+    argv: [ufw, status, verbose]
+  environment:
+    LC_ALL: C
+  register: cp_ufw_effective_policy
+  changed_when: false
+
+- name: Select effective IPv4 and forbidden IPv6 inbound allow rules
+  ansible.builtin.set_fact:
+    cp_ufw_inbound_allow_rules: >-
+      {{ cp_ufw_effective_policy.stdout_lines |
+         select('search', 'ALLOW IN') | list }}
+    cp_ufw_ipv6_inbound_allow_rules: >-
+      {{ cp_ufw_effective_policy.stdout_lines |
+         select('search', 'ALLOW IN') |
+         select('search', '\\(v6\\)') | list }}
+    cp_ufw_ipv4_http_rules: >-
+      {{ cp_ufw_effective_policy.stdout_lines |
+         select('match', '^80/tcp\\s+ALLOW IN\\s+Anywhere(?:\\s|$)') | list }}
+    cp_ufw_ipv4_https_rules: >-
+      {{ cp_ufw_effective_policy.stdout_lines |
+         select('match', '^443/tcp\\s+ALLOW IN\\s+Anywhere(?:\\s|$)') | list }}
+    cp_ufw_broad_ssh_rules: >-
+      {{ cp_ufw_effective_policy.stdout_lines |
+         select('match', '^22/tcp\\s+ALLOW IN\\s+Anywhere(?:\\s|$)') | list }}
+
+- name: Require exact bounded inbound UFW surface
+  ansible.builtin.assert:
+    that:
+      - "'Status: active' in cp_ufw_effective_policy.stdout"
+      - "'Default: deny (incoming), allow (outgoing)' in cp_ufw_effective_policy.stdout"
+      - cp_ufw_ipv6_inbound_allow_rules | length == 0
+      - cp_ufw_ipv4_http_rules | length == 1
+      - cp_ufw_ipv4_https_rules | length == 1
+      - cp_ufw_broad_ssh_rules | length == 0
+      - >-
+        cp_ufw_inbound_allow_rules | length ==
+        (cp_firewall_ssh_source_ipv4_cidrs | length) + 2
+    fail_msg: >-
+      UFW must expose exactly IPv4 HTTP, IPv4 HTTPS, and source-restricted
+      IPv4 SSH, with no IPv6 inbound allow rules.
+
+- name: Require every declared SSH CIDR in the effective firewall
+  ansible.builtin.assert:
+    that: item | regex_replace('/32$', '') in cp_ufw_effective_policy.stdout
+    fail_msg: "UFW is missing the declared SSH source {{ item }}."
+  loop: "{{ cp_firewall_ssh_source_ipv4_cidrs }}"
+
+- name: Remove the temporary package service-start policy after firewall activation
+  ansible.builtin.file:
+    path: /usr/sbin/policy-rc.d
+    state: absent
+  changed_when: false
+
+- name: Remove the temporary package service-start guard marker
+  ansible.builtin.file:
+    path: /run/vivolution-installer-policy-rc-active
+    state: absent
+  changed_when: false
+
+- name: Unmask PostgreSQL units only after the exact firewall is active
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    masked: false
+  loop:
+    - postgresql@17-main.service
+    - postgresql.service
+
+- name: Start the loopback PostgreSQL service behind the active firewall
+  ansible.builtin.systemd_service:
+    name: postgresql.service
+    enabled: true
+    state: started

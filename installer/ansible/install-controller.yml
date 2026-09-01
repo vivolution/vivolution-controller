@@ -1,0 +1,242 @@
+---
+- name: Install a standalone Vivolution Controller on Ubuntu 24.04
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    cp_profile: ubuntu-standalone
+    cp_install_local_postgres: true
+    cp_db_upstream_host: 127.0.0.1
+    cp_db_upstream_port: 5432
+    cp_db_server_tls_sslmode: disable
+    cp_pgbouncer_host: 127.0.0.1
+    cp_pgbouncer_port: 6432
+    cp_ingress_server_name: "{{ cp_shared_fqdn | default('invalid.local') }}"
+    cp_ingress_https_port: 443
+    cp_ingress_local_tls: false
+    cp_ingress_loopback_resolution: false
+    cp_ingress_guest_ca_path: /etc/ssl/certs/ca-certificates.crt
+    cp_ingress_guest_connect_address: 127.0.0.1
+    cp_controller_cookie_secure: true
+    cp_controller_trust_forwarded_proto: true
+    cp_controller_ssl_redirect: true
+    cp_controller_hsts_seconds: 3600
+    cp_controller_web_port: 8000
+    cp_controller_web_workers: 2
+    cp_controller_memory_max: 1G
+    cp_controller_cpu_quota: 150%
+    cp_controller_create_initial_operator: true
+    cp_controller_reconcile_vivolution_poc: false
+    cp_controller_transition_vivolution_poc_m365_authority: false
+    cp_controller_build: true
+    cp_controller_run_migrations: true
+    cp_controller_refresh_release_environment: true
+    cp_controller_readiness_retries: 60
+    cp_controller_readiness_delay: 2
+    cp_database_name: vivolution
+    cp_db_owner: vivo_owner
+    cp_db_runtime_user: vivo_runtime
+    cp_postgres_enforce_least_privilege: true
+    cp_postgres_shared_buffers: 512MB
+    cp_postgres_effective_cache_size: 2GB
+    cp_postgres_max_connections: 100
+    cp_pgbouncer_max_client_conn: 200
+    cp_pgbouncer_default_pool_size: 30
+    cp_pgbouncer_query_wait_timeout: 3
+    cp_pgbouncer_server_connect_timeout: 5
+    cp_pgbouncer_server_login_retry: 2
+    cp_controller_admin_username: cpadmin
+    # This play provisions the matching django_session runtime ACL. Keep the
+    # reusable controller role legacy-safe and select shared DB sessions here.
+    cp_controller_session_engine: db
+    cp_controller_allowed_hosts: >-
+      127.0.0.1,localhost,{{ cp_node_fqdn | default('node.invalid.local') }},{{ cp_shared_fqdn | default('invalid.local') }}
+    cp_controller_csrf_origins: >-
+      https://{{ cp_node_fqdn | default('node.invalid.local') }},https://{{ cp_shared_fqdn | default('invalid.local') }}
+    cp_journal_max_use: 512M
+    cp_min_vcpus: 2
+    cp_min_memory_mb: 4096
+    cp_min_root_disk_gb: 40
+
+  tasks:
+    - name: Run the read-only standalone host preflight
+      ansible.builtin.include_role:
+        name: ubuntu_preflight
+
+    - name: Install the base safely behind a bounded package-service guard
+      block:
+        - name: Install and configure the Ubuntu base
+          ansible.builtin.include_role:
+            name: ubuntu_base_os
+
+        - name: Prove reconnect access before SSH hardening
+          ansible.builtin.include_role:
+            name: ubuntu_ssh_safety
+
+        - name: Activate and verify the exact inbound firewall
+          ansible.builtin.include_role:
+            name: ubuntu_firewall
+      always:
+        - name: Inspect package service-start policy during bounded cleanup
+          ansible.builtin.stat:
+            path: /usr/sbin/policy-rc.d
+            follow: false
+          register: cp_policy_cleanup_stat
+
+        - name: Read package service-start policy during bounded cleanup
+          ansible.builtin.slurp:
+            src: /usr/sbin/policy-rc.d
+          register: cp_policy_cleanup_content
+          when:
+            - cp_policy_cleanup_stat.stat.exists
+            - cp_policy_cleanup_stat.stat.isreg | default(false)
+            - not (cp_policy_cleanup_stat.stat.islnk | default(false))
+
+        - name: Remove only the exact installer-owned package policy
+          ansible.builtin.file:
+            path: /usr/sbin/policy-rc.d
+            state: absent
+          when:
+            - cp_policy_cleanup_content is defined
+            - not (cp_policy_cleanup_content.skipped | default(false))
+            - >-
+              (cp_policy_cleanup_content.content | b64decode) ==
+              '#!/bin/sh\n# Managed temporarily by Vivolution Controller installation.\nif [ -e /run/vivolution-installer-policy-rc-active ]; then\n  exit 101\nfi\nexit 0\n'
+
+        - name: Inspect the volatile package guard marker during bounded cleanup
+          ansible.builtin.stat:
+            path: /run/vivolution-installer-policy-rc-active
+            follow: false
+          register: cp_policy_marker_cleanup_stat
+
+        - name: Remove only the exact installer-owned volatile guard marker
+          ansible.builtin.file:
+            path: /run/vivolution-installer-policy-rc-active
+            state: absent
+          when:
+            - cp_policy_marker_cleanup_stat.stat.exists
+            - cp_policy_marker_cleanup_stat.stat.isreg | default(false)
+            - not (cp_policy_marker_cleanup_stat.stat.islnk | default(false))
+            - cp_policy_marker_cleanup_stat.stat.pw_name == 'root'
+            - cp_policy_marker_cleanup_stat.stat.gr_name == 'root'
+            - cp_policy_marker_cleanup_stat.stat.mode == '0600'
+
+    - name: Install the Podman runtime
+      ansible.builtin.include_role:
+        name: podman
+
+    - name: Install the local PostgreSQL service
+      ansible.builtin.include_role:
+        name: postgres_local
+
+    - name: Install PgBouncer
+      ansible.builtin.include_role:
+        name: pgbouncer
+
+    - name: Install public HTTPS ingress
+      ansible.builtin.include_role:
+        name: ubuntu_ingress
+
+    - name: Activate the controller application
+      ansible.builtin.include_role:
+        name: controller_services
+
+    - name: Install bounded session maintenance
+      ansible.builtin.include_role:
+        name: ubuntu_session_maintenance
+
+  post_tasks:
+    - name: Define trusted local HTTPS probe base arguments
+      ansible.builtin.set_fact:
+        cp_local_https_curl_base_argv:
+          - curl
+          - --silent
+          - --show-error
+          - --fail
+          - --proto
+          - =https
+          - --tlsv1.2
+          - --noproxy
+          - '*'
+          - --cacert
+          - "{{ cp_ingress_guest_ca_path }}"
+          - --connect-timeout
+          - '2'
+          - --max-time
+          - '10'
+      no_log: true
+
+    - name: Wait for trusted local controller readiness
+      ansible.builtin.command:
+        argv: >-
+          {{ cp_local_https_curl_base_argv +
+             ['--resolve', cp_shared_fqdn ~ ':443:127.0.0.1',
+              '--output', '/dev/null', '--write-out', '%{http_code}',
+              'https://' ~ cp_ingress_server_name ~ '/health/ready'] }}
+      register: cp_local_readiness_probe
+      changed_when: false
+      retries: 60
+      delay: 2
+      until:
+        - cp_local_readiness_probe.rc == 0
+        - cp_local_readiness_probe.stdout | trim == '200'
+
+    - name: Require public database-independent recovery page
+      ansible.builtin.command:
+        argv: >-
+          {{ cp_local_https_curl_base_argv +
+             ['--resolve', cp_shared_fqdn ~ ':443:127.0.0.1',
+              '--output', '/dev/null', '--write-out', '%{http_code}',
+              'https://' ~ cp_ingress_server_name ~ '/recovery/'] }}
+      register: cp_local_recovery_probe
+      changed_when: false
+      retries: 15
+      delay: 2
+      until:
+        - cp_local_recovery_probe.rc == 0
+        - cp_local_recovery_probe.stdout | trim == '200'
+
+    - name: Require the node FQDN to serve the controller over trusted HTTPS
+      ansible.builtin.command:
+        argv: >-
+          {{ cp_local_https_curl_base_argv +
+             ['--resolve', cp_node_fqdn ~ ':443:127.0.0.1'] +
+             ['--output', '/dev/null', '--write-out', '%{http_code}',
+              'https://' ~ cp_node_fqdn ~ '/health/live'] }}
+      register: cp_local_node_fqdn_probe
+      changed_when: false
+      retries: 15
+      delay: 2
+      until:
+        - cp_local_node_fqdn_probe.rc == 0
+        - cp_local_node_fqdn_probe.stdout | trim == '200'
+
+    - name: Require anonymous documentation access to redirect to administrator login
+      ansible.builtin.command:
+        argv: >-
+          {{ cp_local_https_curl_base_argv +
+             ['--resolve', cp_shared_fqdn ~ ':443:127.0.0.1',
+              '--output', '/dev/null', '--write-out',
+              '%{http_code}|%{redirect_url}',
+              'https://' ~ cp_ingress_server_name ~ '/docs/'] }}
+      register: cp_local_documentation_probe
+      changed_when: false
+
+    - name: Validate protected documentation redirect
+      ansible.builtin.assert:
+        that:
+          - cp_local_documentation_probe.rc == 0
+          - >-
+            cp_local_documentation_probe.stdout is match(
+              '^302\\|https://' ~ (cp_ingress_server_name | regex_escape) ~
+              '/admin/login/\\?next=/docs/$')
+        fail_msg: The staff-only documentation endpoint did not redirect to administrator login.
+
+    - name: Report successful standalone controller activation
+      ansible.builtin.debug:
+        msg: >-
+          Controller ready at https://{{ cp_ingress_server_name }}/admin/;
+          documentation is available at https://{{ cp_ingress_server_name }}/docs/;
+          public recovery is available at https://{{ cp_ingress_server_name }}/recovery/.

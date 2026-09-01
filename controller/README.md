@@ -33,6 +33,8 @@ is not proof of Microsoft verification or live data-plane health.
 Copy `.env.example` only as a reference; do not commit a real `.env` file.
 
 - `DJANGO_SECRET_KEY`: random deployment secret; required.
+- `VIVOLUTION_RELEASE_ID`: immutable, display-safe installed release identifier; defaults to
+  `unversioned` until the installer supplies one.
 - `DJANGO_ALLOWED_HOSTS`: comma-separated hostnames; required with debug disabled.
 - `DATABASE_URL`: `postgresql://` URL. Percent-encode reserved characters in credentials.
 - `RLS_CONTEXT_SIGNING_KEY`: an independent 32-byte key encoded as 64 lowercase hex
@@ -41,6 +43,10 @@ Copy `.env.example` only as a reference; do not commit a real `.env` file.
 - `RLS_CONTEXT_TTL_SECONDS`: signed database-context lifetime, from 5 through 300 seconds;
   default `60`.
 - `DJANGO_CSRF_TRUSTED_ORIGINS`: comma-separated HTTPS origins for the operator UI.
+- `DJANGO_SESSION_ENGINE`: exactly `db` (turnkey/HA default), `signed_cookies`
+  (stateless compatibility mode), or `file` (node-local compatibility mode).
+- `DJANGO_SESSION_COOKIE_AGE_SECONDS`: absolute operator-session lifetime from 300 through
+  28800 seconds; default `3600`. The expiry is not extended on each request.
 - `DJANGO_TRUST_X_FORWARDED_PROTO`: set to `true` only behind the trusted ingress proxy.
 - `DJANGO_SECURE_SSL_REDIRECT`: enable after trusted proxy-header handling is verified.
 - `DJANGO_SECURE_HSTS_SECONDS`: begin with a short value after public TLS is stable, then
@@ -97,9 +103,17 @@ boundary, so host/container controls and key rotation remain necessary.
 
 RLS is enabled but not forced so the migration owner can migrate and repair the schema. The
 final deployment grants the non-owner runtime role only explicit required table/sequence
-rights. Operator sessions use the container's bounded `/tmp` tmpfs instead of the database,
-and the runtime administrator cannot edit users, groups, or permissions; those identities are
-reconciled only through the owner-credential deployment command.
+rights. Turnkey clusters use the shared PostgreSQL session backend so all nodes can authenticate
+round-robin requests and logout can revoke the reusable server-side session immediately. The
+runtime database role therefore needs narrowly scoped Django-session-table access in addition to
+its application grants. The runtime administrator still cannot edit users, groups, or permissions;
+those identities are reconciled only through the owner-credential deployment command.
+The optional file backend uses the container's bounded `/tmp` tmpfs. Signed-cookie contents are
+authenticated but not encrypted and must never carry secrets; a copied cookie cannot be centrally
+revoked on logout, so its absolute bounded expiry or an operator password change is its revocation
+boundary.
+Database-backed deployments must run Django's supported expired-session cleanup on a bounded
+maintenance schedule; expiry prevents authentication but does not delete old rows automatically.
 The local deployment qualification connects as that runtime role and proves no-context,
 legacy-setting forgery, signed-context forgery, same-tenant reads and writes, cross-tenant
 read/write denial, explicit operator behavior, and runtime key-table denial against
@@ -138,6 +152,13 @@ Endpoints:
   application signing key matches the owner-only database copy, and the exact ten-policy
   signed-only catalog is intact.
 - `/admin/` is the initial operator UI.
+- `/docs/` is release-matched configuration guidance restricted to authenticated staff.
+- `/recovery/` is a minimal, database-independent public recovery page. It exposes no
+  logs, topology, configuration data, or credential-reset operation.
+
+Set `VIVOLUTION_RELEASE_ID` to the immutable installed release identifier. The value is
+validated before startup and displayed in the operator documentation and recovery page so
+support guidance can be tied to the exact application release.
 
 ## Container
 

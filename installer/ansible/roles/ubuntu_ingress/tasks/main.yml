@@ -1,0 +1,68 @@
+---
+- name: Require the installed Caddy binary
+  ansible.builtin.command:
+    argv: [caddy, version]
+  register: cp_caddy_version
+  changed_when: false
+
+- name: Install dual-FQDN Caddy ingress policy
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: /etc/caddy/Caddyfile
+    owner: root
+    group: caddy
+    mode: '0640'
+    validate: caddy validate --config %s --adapter caddyfile
+  register: cp_caddy_config
+
+- name: Validate the complete Caddy ingress policy
+  ansible.builtin.command:
+    argv:
+      - caddy
+      - validate
+      - --config
+      - /etc/caddy/Caddyfile
+      - --adapter
+      - caddyfile
+  changed_when: false
+
+- name: Enable dual-FQDN Caddy ingress
+  ansible.builtin.systemd_service:
+    name: caddy.service
+    masked: false
+    enabled: true
+    state: started
+
+- name: Restart Caddy only after a validated policy change
+  ansible.builtin.systemd_service:
+    name: caddy.service
+    state: restarted
+  when: cp_caddy_config.changed
+
+- name: Inspect listeners after Caddy activation
+  ansible.builtin.command:
+    argv: [ss, -ltnH]
+  register: cp_caddy_listeners
+  changed_when: false
+
+- name: Require HTTPS and reject the unauthenticated Caddy admin listener
+  ansible.builtin.assert:
+    that:
+      - "':443' in cp_caddy_listeners.stdout"
+      - "':2019' not in cp_caddy_listeners.stdout"
+    fail_msg: Caddy HTTPS is absent or its administrative API remains exposed.
+
+- name: Prove the Caddy admin HTTP endpoint is unreachable
+  ansible.builtin.uri:
+    url: http://127.0.0.1:2019/config/
+    method: GET
+    status_code: -1
+    timeout: 2
+  register: cp_caddy_admin_probe
+  failed_when: false
+  changed_when: false
+
+- name: Require Caddy admin HTTP connection refusal
+  ansible.builtin.assert:
+    that: cp_caddy_admin_probe.status | default(-1) == -1
+    fail_msg: Caddy's unauthenticated administrative API is reachable.

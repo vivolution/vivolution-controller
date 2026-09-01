@@ -4,6 +4,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import PBKDF2PasswordHasher
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase
 
 
@@ -11,13 +12,16 @@ class ReconcileOperatorCommandTests(TestCase):
     username = "cpadmin"
     password = "test-only-operator-password"
 
-    def run_command(self):
+    def run_command(self, *, email=None):
         output = io.StringIO()
+        arguments = [self.username]
+        if email is not None:
+            arguments.extend(("--email", email))
         with patch.dict(
             "os.environ",
             {"DJANGO_SUPERUSER_PASSWORD": self.password},
         ):
-            call_command("reconcile_operator", self.username, stdout=output)
+            call_command("reconcile_operator", *arguments, stdout=output)
         return output.getvalue().strip()
 
     def test_command_creates_and_idempotently_preserves_operator_hash(self):
@@ -69,3 +73,53 @@ class ReconcileOperatorCommandTests(TestCase):
         self.assertNotEqual(operator.password, weak_hash)
         self.assertTrue(operator.check_password(self.password))
         self.assertEqual(self.run_command(), "VIVOLUTION_ADMIN_PRESENT")
+
+    def test_command_normalizes_and_idempotently_reconciles_optional_email(self):
+        self.assertEqual(
+            self.run_command(email="  Owner@EXAMPLE.TEST  "),
+            "VIVOLUTION_ADMIN_RECONCILED",
+        )
+        operator = get_user_model().objects.get(username=self.username)
+        original_hash = operator.password
+        self.assertEqual(operator.email, "Owner@example.test")
+
+        self.assertEqual(
+            self.run_command(email="Owner@example.test"),
+            "VIVOLUTION_ADMIN_PRESENT",
+        )
+        operator.refresh_from_db()
+        self.assertEqual(operator.password, original_hash)
+
+        self.assertEqual(
+            self.run_command(email="new-owner@example.test"),
+            "VIVOLUTION_ADMIN_RECONCILED",
+        )
+        operator.refresh_from_db()
+        self.assertEqual(operator.email, "new-owner@example.test")
+
+    def test_omitted_email_preserves_existing_operator_email(self):
+        get_user_model().objects.create_user(
+            username=self.username,
+            email="preserve@example.test",
+            password=self.password,
+            is_active=True,
+            is_staff=True,
+            is_superuser=True,
+        )
+
+        self.assertEqual(self.run_command(), "VIVOLUTION_ADMIN_PRESENT")
+        operator = get_user_model().objects.get(username=self.username)
+        self.assertEqual(operator.email, "preserve@example.test")
+
+    def test_invalid_email_is_rejected_before_operator_creation(self):
+        overlong_but_well_formed = (
+            f"{'a' * 64}@{'b' * 63}.{'c' * 63}.{'d' * 60}.test"
+        )
+        for invalid_email in ("not-an-email", "", overlong_but_well_formed):
+            with self.subTest(invalid_email=invalid_email):
+                with self.assertRaisesMessage(CommandError, "--email"):
+                    self.run_command(email=invalid_email)
+
+        self.assertFalse(
+            get_user_model().objects.filter(username=self.username).exists()
+        )
