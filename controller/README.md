@@ -1,4 +1,4 @@
-# CP1 controller vertical slice
+# Controller vertical slice
 
 This directory contains the first runnable management-plane slice: Django 5.2 LTS,
 PostgreSQL-only deployment settings, operator administration, liveness/readiness probes,
@@ -26,7 +26,7 @@ is not proof of Microsoft verification or live data-plane health.
 - RLS is a second barrier only for the non-owner runtime role. PostgreSQL table owners and
   superusers bypass non-forced RLS by design. Do not run the web process as either one.
 - The reverse proxy terminates public TLS. Trust of `X-Forwarded-Proto` is opt-in and is safe
-  only when CP1 cannot be reached around that proxy.
+  only when the Controller cannot be reached around that proxy.
 - Configuration artifacts are represented by digest only; this slice does not store or sign
   artifact bytes.
 

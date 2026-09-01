@@ -346,7 +346,7 @@ class ValidationTests(unittest.TestCase):
                         root="/", state_dir=state_dir, log_dir=log_dir
                     )
 
-    def test_rc2_ledger_schema_is_refused_by_letsencrypt_only_rc3(self):
+    def test_ledger_with_unsupported_schema_is_refused(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "ledger.json"
             ledger = installer.PhaseLedger.create(path)
@@ -354,6 +354,16 @@ class ValidationTests(unittest.TestCase):
             value["schema_version"] = 3
             installer.atomic_write_json(path, value)
             with self.assertRaisesRegex(installer.InstallerError, "unsupported schema"):
+                installer.PhaseLedger.load(path)
+
+    def test_ledger_from_different_installer_version_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ledger.json"
+            ledger = installer.PhaseLedger.create(path)
+            value = dict(ledger.value)
+            value["installer_version"] = "0.3.0-rc5"
+            installer.atomic_write_json(path, value)
+            with self.assertRaisesRegex(installer.InstallerError, "version-pinned bootstrap"):
                 installer.PhaseLedger.load(path)
 
     def test_dry_run_defaults_are_isolated_and_explicit(self):

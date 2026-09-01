@@ -82,11 +82,12 @@ qualified on the declared role-specific OS.
   applies time configuration and proves synchronization before certificates,
   database, or Controller activation.
 
-### rc6 source and installed commands
+### rc6 commands from a retained source checkout
 
-These are the same lifecycle commands packaged by the rc6 launcher. The public
-permanent bootstrap remains checksum-pinned to the explicitly promoted
-prerelease.
+These commands are for developers or operators who deliberately retain an exact
+reviewed rc6 source checkout. Hosts installed through the public one-liner must
+use the exact `v0.3.0-rc6` bootstrap for lifecycle operations because the
+bootstrap's temporary extraction directory is removed after each run.
 
 ```sh
 sudo ./installer/install.sh

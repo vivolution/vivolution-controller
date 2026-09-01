@@ -46,7 +46,7 @@ class PublicRecoveryTests(SimpleTestCase):
         self.assertContains(response, "support-bundle")
         self.assertContains(
             response,
-            "/var/lib/vivolution-installer/credentials.txt",
+            "/var/lib/vivolution/installer/credentials.txt",
         )
         self.assertContains(response, "unavailable / planned")
         self.assertNotContains(response, "DATABASE_URL")
@@ -107,8 +107,9 @@ class OperatorDocumentationTests(TestCase):
         self.assertContains(response, "Revoke current node identity")
         self.assertContains(response, "enrollment and heartbeat visibility only")
         self.assertContains(response, "Configuration version")
-        self.assertContains(response, "Standalone CP1 only")
-        self.assertContains(response, "CP2/CP3 controller HA")
+        self.assertContains(response, "One standalone Controller")
+        self.assertContains(response, "Multi-controller HA")
+        self.assertContains(response, "/v0.3.0-rc6/install.sh")
         self.assertContains(response, "External HTTPS load balancer")
         self.assertContains(response, "support-bundle")
         self.assertContains(response, "unavailable / planned")

@@ -18,7 +18,7 @@ remain live acceptance gates.
 - Keeps Controller join/HA and full SBC deployment visibly unavailable. The
   bounded Ubuntu Edge enrollment client is not presented as an SBC, and the
   complete private Debian 13 AMD64 voice POC is not presented as Ubuntu-ready.
-- Removes CP1/CP2/CP3/SBC1/SBC2 naming guidance from product UX. Immutable node
+- Removes ordinal Controller and Edge naming guidance from product UX. Immutable node
   IDs and authoritative topology state are independent of operator-selected
   FQDNs/display names.
 

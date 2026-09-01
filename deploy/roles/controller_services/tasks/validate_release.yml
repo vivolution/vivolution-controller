@@ -6,7 +6,7 @@
       - >-
         cp_controller_validation_release_id is
         match('^cp1-[0-9a-f]{64}$')
-    fail_msg: A full CP1 source-manifest release identifier is required.
+    fail_msg: A full Controller source-manifest release identifier is required.
 
 - name: Revalidate immutable staged controller release
   ansible.builtin.command:

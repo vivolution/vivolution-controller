@@ -136,7 +136,8 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
             tasks.index("Install standalone controller foundation packages"),
         )
         self.assertIn("/var/run/reboot-required", tasks)
-        self.assertIn("sudo ./installer/install.sh resume", tasks)
+        self.assertIn("/v0.3.0-rc6/install.sh", tasks)
+        self.assertIn("sudo sh -s -- resume", tasks)
         for unit in (
             "caddy.service",
             "pgbouncer.service",

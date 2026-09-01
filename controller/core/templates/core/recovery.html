@@ -24,18 +24,23 @@
   <section>
     <h2>If sign-in is unavailable</h2>
     <p>
-      Sign in to the Ubuntu VM console or approved SSH endpoint. Inspect installer status with
-      <code>sudo ./installer/install.sh status</code>, resume an interrupted installation with
-      <code>sudo ./installer/install.sh resume</code>, or reconcile a completed installation
-      with <code>sudo ./installer/install.sh reconcile</code>. Create a redacted diagnostic
-      archive with <code>sudo ./installer/install.sh support-bundle</code> when support asks for
-      one, and inspect it before sharing. The initial credential remains in the root-only
-      <code>/var/lib/vivolution-installer/credentials.txt</code> file.
+      Sign in to the Ubuntu VM console or approved SSH endpoint. Use the exact version-pinned
+      bootstrap below for lifecycle operations. Resume only an interrupted installation and
+      reconcile only a completed installation. Inspect every support bundle before sharing it.
+    </p>
+    <pre><code>curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc6/install.sh | sudo sh -s -- status
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc6/install.sh | sudo sh -s -- resume
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc6/install.sh | sudo sh -s -- reconcile
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc6/install.sh | sudo sh -s -- support-bundle</code></pre>
+    <p>
+      The initial credential remains in the root-only
+      <code>/var/lib/vivolution/installer/credentials.txt</code> file.
     </p>
     <p>
       The installer owns the operator credential. Password reset or rotation is not available
       in this release, and the web password-change endpoints are blocked. Application backup
-      and restore, release upgrades, CP2/CP3 HA and external load-balancer workflows are also
+      and restore, release upgrades, multi-controller HA and external load-balancer workflows
+      are also
       unavailable / planned. Do not edit the database, container environment, password hashes
       or installer state manually.
     </p>

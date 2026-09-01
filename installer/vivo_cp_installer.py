@@ -2095,6 +2095,11 @@ class PhaseLedger:
         value = read_json_file(path)
         if not isinstance(value, dict) or value.get("schema_version") != LEDGER_SCHEMA_VERSION:
             raise InstallerError("Installer ledger has an unsupported schema")
+        if value.get("installer_version") != INSTALLER_VERSION:
+            raise InstallerError(
+                "Installer ledger belongs to a different installer version; use the exact "
+                "version-pinned bootstrap that created this run"
+            )
         phases = value.get("phases")
         if not isinstance(phases, dict) or set(phases) != set(PHASES):
             raise InstallerError("Installer ledger has an invalid phase set")

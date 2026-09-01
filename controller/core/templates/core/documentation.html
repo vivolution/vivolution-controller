@@ -146,12 +146,13 @@
     <section id="ha">
       <h2>5. Release availability and operator sessions</h2>
       <div class="vivo-docs__notice">
-        <strong>Standalone CP1 only — available:</strong> this release installs and operates
-        one controller. The shared controller FQDN must resolve to that CP1 address only.
+        <strong>One standalone Controller — available:</strong> this release installs and
+        operates one Controller. The shared Controller FQDN must resolve only to that
+        Controller's address.
       </div>
       <ul>
         <li>
-          <strong>CP2/CP3 controller HA — unavailable / planned.</strong> Node joining,
+          <strong>Multi-controller HA — unavailable / planned.</strong> Node joining,
           replication, fencing, quorum and promotion have not been released or qualified.
         </li>
         <li>
@@ -166,8 +167,9 @@
       <div class="vivo-docs__warning">
         <strong>Session behavior:</strong> the Ubuntu standalone installer explicitly uses the
         local PostgreSQL session backend. Logout removes the server-side session immediately.
-        This database groundwork does not make CP2, CP3, DNS round-robin or load balancing
-        supported; those modes stay unavailable until their complete HA release gate passes.
+        This database groundwork does not make multi-controller HA, DNS round-robin or load
+        balancing supported; those modes stay unavailable until their complete release gate
+        passes.
       </div>
     </section>
 
@@ -187,14 +189,14 @@
           root-only initial credential file. Do not edit password hashes or database rows.
         </li>
       </ul>
-      <p>Run only these installer operations from the installer source directory:</p>
-      <pre><code>sudo ./installer/install.sh status
-sudo ./installer/install.sh resume
-sudo ./installer/install.sh reconcile
-sudo ./installer/install.sh support-bundle</code></pre>
+      <p>Run lifecycle operations through this exact version-pinned bootstrap:</p>
+      <pre><code>curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc6/install.sh | sudo sh -s -- status
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc6/install.sh | sudo sh -s -- resume
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc6/install.sh | sudo sh -s -- reconcile
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc6/install.sh | sudo sh -s -- support-bundle</code></pre>
       <p>
         The initial console URL, administrator name and password are stored in
-        <code>/var/lib/vivolution-installer/credentials.txt</code>. Read that root-only file
+        <code>/var/lib/vivolution/installer/credentials.txt</code>. Read that root-only file
         locally; never copy it into logs or a support bundle. The installer owns this
         credential. Password rotation is not available in this release, and Django's built-in
         password-change endpoints are deliberately blocked.

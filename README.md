@@ -15,11 +15,11 @@ nodes are deliberately unavailable until replication, fencing, quorum,
 failover, and rejoin acceptance tests pass; the installer will never disguise
 independent databases as an HA cluster.
 
-On a fresh Ubuntu Server 24.04 LTS host, clone or unpack the reviewed source and
-run:
+On a fresh Ubuntu Server 24.04 LTS host, run the permanent, checksum-verifying
+public bootstrap:
 
 ```sh
-sudo ./installer/install.sh
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/main/install.sh | sudo sh
 ```
 
 The rc6 wizard validates the host and public DNS, detects and confirms the
@@ -27,7 +27,11 @@ public IPv4, asks for the node/shared FQDNs, firewall ownership, initial
 operator, Let's Encrypt ACME contact, IANA timezone, and Chrony policy,
 generates protected credentials, installs PostgreSQL/PgBouncer/Podman/Caddy,
 deploys the Controller, runs health checks, and prints the console URL.
-Interrupted rc6 runs use `sudo ./installer/install.sh resume`.
+Interrupted rc6 runs must use the exact version-pinned bootstrap:
+
+```sh
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc6/install.sh | sudo sh -s -- resume
+```
 
 - [Installer guide](installer/README.md)
 - [Turnkey architecture and HA contract](architecture/turnkey-installer.md)
