@@ -3,6 +3,7 @@ carrier_gateway_install_acknowledgement: ''
 carrier_gateway_firewall_contract_acknowledged: false
 
 carrier_gateway_controller_ipv4: 10.20.1.4
+carrier_gateway_controller_public_ipv4: 40.123.208.212
 carrier_gateway_controller_interface: eth0
 carrier_gateway_sbc1_ipv4: 10.20.2.6
 carrier_gateway_sbc2_ipv4: 10.20.2.7
@@ -13,6 +14,10 @@ carrier_gateway_edge_listener_port: 15061
 carrier_gateway_tls_port: 5061
 carrier_gateway_rtp_start: 30000
 carrier_gateway_rtp_end: 30127
+carrier_gateway_ingress_rtp_start: 30000
+carrier_gateway_ingress_rtp_end: 30063
+carrier_gateway_egress_rtp_start: 30064
+carrier_gateway_egress_rtp_end: 30127
 carrier_gateway_edge_rtp_start: 20000
 carrier_gateway_edge_rtp_end: 20255
 
@@ -21,16 +26,24 @@ carrier_gateway_config_root: /etc/vivolution/carrier-gateway
 carrier_gateway_state_root: /var/lib/vivolution/carrier-gateway
 carrier_gateway_runtime_root: /run/vivolution-carrier-gateway
 carrier_gateway_pki_root: /etc/vivolution/carrier-gateway/pki
+carrier_gateway_egress_pki_root: /etc/vivolution/carrier-gateway/egress-pki
 carrier_gateway_results_root: /var/lib/vivolution/carrier-gateway/results
 carrier_gateway_runtime_user: vivolution-carrier
 carrier_gateway_runtime_uid: 10003
 carrier_gateway_runtime_gid: 10003
+carrier_gateway_egress_group: vivolution-carrier-egress
+carrier_gateway_egress_uid: 10004
+carrier_gateway_egress_gid: 10004
+carrier_gateway_egress_loopback_ipv4: 127.0.0.2
+carrier_gateway_egress_signaling_port: 15062
 carrier_gateway_rootless_home: /var/lib/vivolution/carrier-gateway/rootless-home
 carrier_gateway_rootless_runtime_dir: /run/user/10003
 carrier_gateway_rootless_quadlet_root: /var/lib/vivolution/carrier-gateway/rootless-home/.config/containers/systemd
 
 carrier_gateway_certificate_path: /etc/vivolution/carrier-gateway/pki/carrier.fullchain.pem
 carrier_gateway_private_key_path: /etc/vivolution/carrier-gateway/pki/carrier.key
+carrier_gateway_egress_certificate_path: /etc/vivolution/carrier-gateway/egress-pki/carrier.fullchain.pem
+carrier_gateway_egress_private_key_path: /etc/vivolution/carrier-gateway/egress-pki/carrier.key
 carrier_gateway_public_ca_bundle_path: /etc/ssl/certs/ca-certificates.crt
 carrier_gateway_minimum_certificate_seconds: 86400
 
@@ -41,21 +54,32 @@ carrier_gateway_pjproject_version: '2.17'
 carrier_gateway_pjproject_source_sha256: 04b2eb1f0f01aa0ad1945b167171843448a51aa6b7c3e806496d434f13a112b7
 carrier_gateway_image_tag: localhost/vivolution/carrier-gateway-asterisk:22.10.1-srtp1-autobind1
 
-# The invalid number is intentionally non-routable and never sent to Twilio.
+# The invalid number is intentionally non-routable and never sent to a provider.
 carrier_gateway_tone_test_e164: '+9710000002001'
 carrier_gateway_echo_test_e164: '+9710000002002'
 
-# Twilio is absent from the rendered runtime when this is false. Secrets must
-# arrive through a protected encrypted inventory and are never written here.
-carrier_gateway_twilio_enabled: false
-carrier_gateway_twilio_enable_acknowledgement: ''
-carrier_gateway_twilio_termination_fqdn: ''
-carrier_gateway_twilio_destination_ipv4_cidrs: []
-carrier_gateway_twilio_destination_prefixes: []
-carrier_gateway_twilio_geo_allowlist: []
-carrier_gateway_twilio_permitted_caller_id: ''
-carrier_gateway_twilio_secrets: {}
-carrier_gateway_twilio_max_call_seconds: 120
-carrier_gateway_twilio_maximum_calls_per_authorization: 1
-carrier_gateway_twilio_cost_per_minute_ceiling_usd: 1.00
-carrier_gateway_twilio_maximum_spend_per_call_usd: 2.00
+# The Teams/Edge-facing leg above is provider-independent.  The southbound SIP
+# provider is a fail-closed data contract: disabled defaults render no carrier
+# endpoint, credential, route, public address, or network authority.  A provider
+# profile (Twilio is one example) supplies these values through protected
+# inventory; credentials never belong in this repository.
+carrier_gateway_provider_enabled: false
+carrier_gateway_provider_profile: ''
+carrier_gateway_provider_enable_acknowledgement: ''
+carrier_gateway_provider_signaling_fqdn: ''
+carrier_gateway_provider_signaling_transport: ''
+carrier_gateway_provider_signaling_port: 0
+carrier_gateway_provider_signaling_ipv4_cidrs: []
+carrier_gateway_provider_destination_ipv4_cidrs: []
+carrier_gateway_provider_media_ipv4_cidrs: []
+carrier_gateway_provider_remote_media_port_range: ''
+carrier_gateway_provider_destination_prefixes: []
+carrier_gateway_provider_geo_allowlist: []
+carrier_gateway_provider_permitted_caller_id: ''
+carrier_gateway_provider_auth_mode: ''
+carrier_gateway_provider_secrets: {}
+carrier_gateway_provider_media_encryption: ''
+carrier_gateway_provider_max_call_seconds: 120
+carrier_gateway_provider_maximum_calls_per_authorization: 1
+carrier_gateway_provider_cost_per_minute_ceiling_usd: 1.00
+carrier_gateway_provider_maximum_spend_per_call_usd: 2.00

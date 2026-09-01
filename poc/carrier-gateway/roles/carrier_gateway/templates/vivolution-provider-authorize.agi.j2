@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+umask 077
+
+authorized=0
+max_seconds=0
+request_id=none
+
+emit_result() {
+    printf 'SET VARIABLE VIVO_CALL_AUTHORIZED %s\n' "$authorized"
+    printf 'SET VARIABLE VIVO_CALL_MAX_SECONDS %s\n' "$max_seconds"
+    printf 'SET VARIABLE VIVO_CALL_REQUEST_ID "%s"\n' "$request_id"
+}
+
+# Drain the AGI environment before replying.
+while IFS= read -r agi_line; do
+    [ -n "$agi_line" ] || break
+done
+
+destination=${1:-}
+case "$destination" in
+    +[1-9][0-9]*) ;;
+    *) emit_result; exit 0 ;;
+esac
+
+# The client speaks one timeout-bounded request over AF_UNIX. Only the isolated
+# provider-egress UID can open that socket or read provider credentials; the
+# Common Teams Leg UID has neither. The broker burns authority atomically
+# before the credential-bearing provider dialplan can reach Dial().
+response=$(/usr/local/libexec/vivolution-authority-client "$destination" 2>/dev/null || true)
+set -- $response
+if [ "$#" -eq 3 ] && [ "$1" = AUTHORIZED ]; then
+    case "$2" in
+        ''|*[!0-9]*) emit_result; exit 0 ;;
+    esac
+    case "$3" in
+        [a-z0-9][a-z0-9-]*) ;;
+        *) emit_result; exit 0 ;;
+    esac
+    [ "$2" -ge 1 ] && [ "$2" -le {{ carrier_gateway_provider_max_call_seconds }} ] || {
+        emit_result
+        exit 0
+    }
+    [ "${#3}" -ge 8 ] && [ "${#3}" -le 64 ] || { emit_result; exit 0; }
+    authorized=1
+    max_seconds=$2
+    request_id=$3
+fi
+emit_result

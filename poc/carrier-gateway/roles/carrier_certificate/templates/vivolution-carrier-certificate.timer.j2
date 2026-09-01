@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Vivolution carrier certificate renewal
+
+[Timer]
+OnCalendar=*-*-* 04:11:00
+RandomizedDelaySec=2h
+Persistent=true
+Unit=vivolution-carrier-certificate.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=Vivolution root-owned carrier call authority socket
+Before=vivolution-carrier-authority-broker.service
+
+[Socket]
+ListenStream=/run/vivolution-carrier-authority.sock
+SocketUser=root
+SocketGroup={{ carrier_gateway_egress_group }}
+SocketMode=0660
+Backlog=4
+RemoveOnStop=yes
+Service=vivolution-carrier-authority-broker.service
+
+[Install]
+WantedBy=sockets.target

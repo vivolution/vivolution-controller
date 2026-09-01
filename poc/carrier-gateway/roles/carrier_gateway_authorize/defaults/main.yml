@@ -1,13 +1,13 @@
 ---
 carrier_gateway_state_root: /var/lib/vivolution/carrier-gateway
-carrier_gateway_twilio_authorize_acknowledgement: ''
-carrier_gateway_twilio_authorization_request_id: ''
-carrier_gateway_twilio_authorization_destination_e164: ''
-carrier_gateway_twilio_authorization_expires_epoch: 0
-carrier_gateway_twilio_authorization_max_call_seconds: 0
-carrier_gateway_twilio_authorization_max_spend_usd: 0
-carrier_gateway_twilio_destination_prefixes: []
-carrier_gateway_twilio_geo_allowlist: []
-carrier_gateway_twilio_max_call_seconds: 120
-carrier_gateway_twilio_maximum_spend_per_call_usd: 2.00
-carrier_gateway_twilio_cost_per_minute_ceiling_usd: 1.00
+carrier_gateway_provider_authorize_acknowledgement: ''
+carrier_gateway_provider_authorization_request_id: ''
+carrier_gateway_provider_authorization_destination_e164: ''
+carrier_gateway_provider_authorization_expires_epoch: 0
+carrier_gateway_provider_authorization_max_call_seconds: 0
+carrier_gateway_provider_authorization_max_spend_usd: 0
+carrier_gateway_provider_destination_prefixes: []
+carrier_gateway_provider_geo_allowlist: []
+carrier_gateway_provider_max_call_seconds: 120
+carrier_gateway_provider_maximum_spend_per_call_usd: 2.00
+carrier_gateway_provider_cost_per_minute_ceiling_usd: 1.00

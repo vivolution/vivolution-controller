@@ -1,0 +1,696 @@
+#!/usr/bin/python3
+"""Crash-recoverable carrier credential activation for rootless Asterisk."""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+import signal
+import stat
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping, Optional, Tuple
+
+
+SERVER_NAME = {{ carrier_certificate_server_name | to_json }}
+RUNTIME_USER = {{ carrier_certificate_runtime_user | to_json }}
+RUNTIME_UID = {{ carrier_certificate_runtime_uid | int }}
+RUNTIME_GID = {{ carrier_certificate_runtime_gid | int }}
+RUNTIME_HOME = {{ carrier_certificate_rootless_home | to_json }}
+RUNTIME_DIR = {{ carrier_certificate_rootless_runtime_dir | to_json }}
+RUNTIME_UNIT = {{ carrier_certificate_rootless_unit | to_json }}
+EGRESS_RUNTIME_GID = {{ carrier_certificate_egress_runtime_gid | int }}
+EGRESS_UNIT = {{ carrier_certificate_egress_unit | to_json }}
+READINESS = Path({{ carrier_certificate_readiness_path | to_json }})
+ROTATION_ROOT = Path({{ carrier_certificate_rotation_root | to_json }})
+INCOMING_ROOT = ROTATION_ROOT / "incoming"
+BACKUP_ROOT = ROTATION_ROOT / "backup"
+EVIDENCE_ROOT = ROTATION_ROOT / "evidence"
+INCOMING_CERT = INCOMING_ROOT / "carrier.fullchain.pem"
+INCOMING_KEY = INCOMING_ROOT / "carrier.key"
+BACKUP_CERT = BACKUP_ROOT / "carrier.fullchain.pem"
+BACKUP_KEY = BACKUP_ROOT / "carrier.key"
+LIVE_CERT = Path({{ carrier_certificate_path | to_json }})
+LIVE_KEY = Path({{ carrier_certificate_private_key_path | to_json }})
+EGRESS_LIVE_CERT = Path({{ carrier_certificate_egress_path | to_json }})
+EGRESS_LIVE_KEY = Path({{ carrier_certificate_egress_private_key_path | to_json }})
+PUBLIC_CA = Path({{ carrier_certificate_public_ca_bundle_path | to_json }})
+VALIDATOR = Path({{ (carrier_certificate_libexec_root + '/validate-carrier-certificate') | to_json }})
+JOURNAL = ROTATION_ROOT / "transaction.json"
+LOCK = ROTATION_ROOT / "rotation.lock"
+MAINTENANCE_GATE = Path({{ (carrier_certificate_state_root + '/maintenance.json') | to_json }})
+MAX_PEM_BYTES = 1024 * 1024
+MAX_JSON_BYTES = 256 * 1024
+JOURNAL_FIELDS = {
+    "egressWasActive",
+    "hadEgressPair",
+    "hadPair",
+    "phase",
+    "wasActive",
+}
+JOURNAL_PHASES = {"PREPARED", "SERVICES_STOPPED", "PAIRS_INSTALLED", "HEALTHY"}
+
+
+class RotationError(RuntimeError):
+    pass
+
+
+def _canonical(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8") + b"\n"
+
+
+def _digest(content: bytes) -> str:
+    return "sha256:" + hashlib.sha256(content).hexdigest()
+
+
+def _fsync_dir(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _assert_dir(path: Path, mode: int, gid: int = 0) -> None:
+    record = path.lstat()
+    if (
+        not stat.S_ISDIR(record.st_mode)
+        or stat.S_ISLNK(record.st_mode)
+        or record.st_uid != 0
+        or record.st_gid != gid
+        or stat.S_IMODE(record.st_mode) != mode
+    ):
+        raise RotationError(f"unsafe carrier certificate directory: {path}")
+
+
+def _secure_read(
+    path: Path,
+    *,
+    modes: Tuple[int, ...],
+    maximum: int,
+    gid: int,
+) -> bytes:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise RotationError(f"secure read rejected {path}: {exc}") from exc
+    try:
+        record = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(record.st_mode)
+            or record.st_nlink != 1
+            or record.st_uid != 0
+            or record.st_gid != gid
+            or stat.S_IMODE(record.st_mode) not in modes
+            or not 0 < record.st_size <= maximum
+        ):
+            raise RotationError(f"unsafe owner, mode, type, link count, or size: {path}")
+        chunks = []
+        remaining = maximum + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        if len(content) != record.st_size or len(content) > maximum:
+            raise RotationError(f"file changed during secure read: {path}")
+        return content
+    finally:
+        os.close(descriptor)
+
+
+def _exists_regular(path: Path) -> bool:
+    try:
+        record = path.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(record.st_mode) or not stat.S_ISREG(record.st_mode):
+        raise RotationError(f"unexpected non-regular carrier path: {path}")
+    return True
+
+
+def _atomic_write(path: Path, content: bytes, *, mode: int, gid: int) -> None:
+    temporary = path.parent / f".{path.name}.{os.getpid()}.rotation"
+    descriptor: Optional[int] = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            mode,
+        )
+        os.fchmod(descriptor, mode)
+        os.fchown(descriptor, 0, gid)
+        offset = 0
+        while offset < len(content):
+            offset += os.write(descriptor, content[offset:])
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, path)
+        _fsync_dir(path.parent)
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _fsync_dir(path.parent)
+
+
+def _run(
+    argv: Tuple[str, ...],
+    name: str,
+    *,
+    allow_failure: bool = False,
+    timeout: int = 60,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RotationError(f"{name} could not execute: {exc}") from exc
+    if result.returncode != 0 and not allow_failure:
+        detail = (result.stderr or result.stdout).strip().replace("\n", " ")[:400]
+        raise RotationError(f"{name} failed: {detail or 'non-zero exit'}")
+    return result
+
+
+def _user_systemctl(*arguments: str, allow_failure: bool = False):
+    return _run(
+        (
+            "/usr/sbin/runuser",
+            "-u",
+            RUNTIME_USER,
+            "--",
+            "/usr/bin/env",
+            f"HOME={RUNTIME_HOME}",
+            f"XDG_RUNTIME_DIR={RUNTIME_DIR}",
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME_DIR}/bus",
+            "/usr/bin/systemctl",
+            "--user",
+            *arguments,
+        ),
+        "rootless carrier systemctl",
+        allow_failure=allow_failure,
+    )
+
+
+def _service_loaded() -> bool:
+    result = _user_systemctl(
+        "show", RUNTIME_UNIT, "--property=LoadState", "--value", allow_failure=True
+    )
+    value = result.stdout.strip()
+    if result.returncode == 0 and value == "loaded":
+        return True
+    if value == "not-found" or (result.returncode != 0 and "not found" in result.stderr.lower()):
+        return False
+    raise RotationError("rootless carrier unit load-state probe was ambiguous")
+
+
+def _service_active() -> bool:
+    if not _service_loaded():
+        return False
+    result = _user_systemctl("is-active", "--quiet", RUNTIME_UNIT, allow_failure=True)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 3:
+        return False
+    raise RotationError("rootless carrier active-state probe returned an unexpected status")
+
+
+def _stop_service() -> None:
+    _user_systemctl("stop", RUNTIME_UNIT)
+
+
+def _system_systemctl(*arguments: str, allow_failure: bool = False):
+    return _run(
+        ("/usr/bin/systemctl", *arguments),
+        "isolated provider-egress systemctl",
+        allow_failure=allow_failure,
+    )
+
+
+def _egress_service_loaded() -> bool:
+    result = _system_systemctl(
+        "show", EGRESS_UNIT, "--property=LoadState", "--value", allow_failure=True
+    )
+    value = result.stdout.strip()
+    if result.returncode == 0 and value == "loaded":
+        return True
+    if value == "not-found" or (result.returncode != 0 and "not found" in result.stderr.lower()):
+        return False
+    raise RotationError("isolated provider-egress unit load-state probe was ambiguous")
+
+
+def _egress_service_active() -> bool:
+    if not _egress_service_loaded():
+        return False
+    result = _system_systemctl("is-active", "--quiet", EGRESS_UNIT, allow_failure=True)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 3:
+        return False
+    raise RotationError("isolated provider-egress active-state probe was unexpected")
+
+
+def _stop_egress_service() -> None:
+    _system_systemctl("stop", EGRESS_UNIT)
+
+
+def _check_egress_transport() -> None:
+    result = _run(
+        (
+            "/usr/bin/podman",
+            "exec",
+            "vivolution-carrier-egress",
+            "/usr/sbin/asterisk",
+            "-rx",
+            "pjsip show transport provider-egress-tls",
+        ),
+        "live provider-egress TLS transport readiness",
+    )
+    output = result.stdout.lower()
+    if "provider-egress-tls" not in output or "tls" not in output:
+        raise RotationError("live provider-egress TLS transport is absent")
+
+
+def _readiness_is_safe() -> None:
+    try:
+        record = READINESS.lstat()
+    except OSError as exc:
+        raise RotationError(f"carrier readiness verifier is unavailable: {exc}") from exc
+    if (
+        not stat.S_ISREG(record.st_mode)
+        or stat.S_ISLNK(record.st_mode)
+        or record.st_nlink != 1
+        or record.st_uid != 0
+        or record.st_gid != 0
+        or stat.S_IMODE(record.st_mode) != 0o550
+    ):
+        raise RotationError("carrier readiness verifier is not exact root:root 0550")
+
+
+def _restart_and_check_services(*, common: bool, egress: bool) -> None:
+    _readiness_is_safe()
+    if egress:
+        _system_systemctl("restart", EGRESS_UNIT)
+        _system_systemctl("is-active", "--quiet", EGRESS_UNIT)
+        _check_egress_transport()
+    if common:
+        _user_systemctl("restart", RUNTIME_UNIT)
+        _user_systemctl("is-active", "--quiet", RUNTIME_UNIT)
+        _run((str(READINESS),), "carrier readiness after certificate rotation", timeout=90)
+
+
+def _validate_pair(certificate: Path, private_key: Path) -> dict[str, Any]:
+    result = _run(
+        (
+            str(VALIDATOR),
+            "--certificate",
+            str(certificate),
+            "--private-key",
+            str(private_key),
+            "--expected-san",
+            SERVER_NAME,
+            "--trust-bundle",
+            str(PUBLIC_CA),
+            "--minimum-valid-seconds",
+            "{{ carrier_certificate_minimum_valid_seconds | int }}",
+        ),
+        "carrier public-certificate validation",
+    )
+    try:
+        value = json.loads(result.stdout)
+    except (UnicodeError, ValueError) as exc:
+        raise RotationError("carrier certificate validator returned malformed evidence") from exc
+    if (
+        not isinstance(value, dict)
+        or value.get("status") != "CARRIER_PUBLIC_CERTIFICATE_VALID"
+        or value.get("dnsSans") != [SERVER_NAME]
+        or value.get("leafKeyAlgorithm") != "RSA"
+        or value.get("leafKeyBits") != 2048
+        or not value.get("serverAuthenticationEku")
+    ):
+        raise RotationError("carrier certificate validator evidence differs from contract")
+    return value
+
+
+def _write_journal(value: Mapping[str, Any]) -> None:
+    if set(value) != JOURNAL_FIELDS or value.get("phase") not in JOURNAL_PHASES:
+        raise RotationError("internal carrier certificate journal is invalid")
+    _atomic_write(JOURNAL, _canonical(value), mode=0o600, gid=0)
+
+
+def _read_journal() -> Optional[dict[str, Any]]:
+    if not _exists_regular(JOURNAL):
+        return None
+    try:
+        value = json.loads(
+            _secure_read(
+                JOURNAL, modes=(0o600,), maximum=MAX_JSON_BYTES, gid=0
+            ).decode("utf-8")
+        )
+    except (UnicodeError, ValueError) as exc:
+        raise RotationError("carrier certificate transaction journal is invalid") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != JOURNAL_FIELDS
+        or value.get("phase") not in JOURNAL_PHASES
+        or not isinstance(value.get("hadPair"), bool)
+        or not isinstance(value.get("hadEgressPair"), bool)
+        or not isinstance(value.get("wasActive"), bool)
+        or not isinstance(value.get("egressWasActive"), bool)
+    ):
+        raise RotationError("carrier certificate journal differs from its fixed contract")
+    return value
+
+
+def _restore_previous(journal: Mapping[str, Any]) -> None:
+    if journal["phase"] == "HEALTHY":
+        _validate_pair(LIVE_CERT, LIVE_KEY)
+        _validate_pair(EGRESS_LIVE_CERT, EGRESS_LIVE_KEY)
+        common_cert = _secure_read(
+            LIVE_CERT, modes=(0o440,), maximum=MAX_PEM_BYTES, gid=RUNTIME_GID
+        )
+        common_key = _secure_read(
+            LIVE_KEY, modes=(0o440,), maximum=MAX_PEM_BYTES, gid=RUNTIME_GID
+        )
+        egress_cert = _secure_read(
+            EGRESS_LIVE_CERT,
+            modes=(0o440,),
+            maximum=MAX_PEM_BYTES,
+            gid=EGRESS_RUNTIME_GID,
+        )
+        egress_key = _secure_read(
+            EGRESS_LIVE_KEY,
+            modes=(0o440,),
+            maximum=MAX_PEM_BYTES,
+            gid=EGRESS_RUNTIME_GID,
+        )
+        if common_cert != egress_cert or common_key != egress_key:
+            raise RotationError("activated common and provider-egress credentials differ")
+        common_active = _service_active()
+        egress_active = _egress_service_active()
+        if (journal["wasActive"] and not common_active) or (
+            journal["egressWasActive"] and not egress_active
+        ):
+            _restart_and_check_services(
+                common=journal["wasActive"], egress=journal["egressWasActive"]
+            )
+        else:
+            if journal["egressWasActive"]:
+                _check_egress_transport()
+            if journal["wasActive"]:
+                _run((str(READINESS),), "carrier readiness during recovery", timeout=90)
+        _unlink(JOURNAL)
+        return
+    if _egress_service_active():
+        _stop_egress_service()
+    if _service_active():
+        _stop_service()
+    if journal["hadPair"]:
+        previous_cert = _secure_read(
+            BACKUP_CERT, modes=(0o400,), maximum=MAX_PEM_BYTES, gid=0
+        )
+        previous_key = _secure_read(
+            BACKUP_KEY, modes=(0o400,), maximum=MAX_PEM_BYTES, gid=0
+        )
+        _atomic_write(LIVE_CERT, previous_cert, mode=0o440, gid=RUNTIME_GID)
+        _atomic_write(LIVE_KEY, previous_key, mode=0o440, gid=RUNTIME_GID)
+    else:
+        _unlink(LIVE_CERT)
+        _unlink(LIVE_KEY)
+    if journal["hadEgressPair"]:
+        previous_cert = _secure_read(
+            BACKUP_CERT, modes=(0o400,), maximum=MAX_PEM_BYTES, gid=0
+        )
+        previous_key = _secure_read(
+            BACKUP_KEY, modes=(0o400,), maximum=MAX_PEM_BYTES, gid=0
+        )
+        _atomic_write(
+            EGRESS_LIVE_CERT,
+            previous_cert,
+            mode=0o440,
+            gid=EGRESS_RUNTIME_GID,
+        )
+        _atomic_write(
+            EGRESS_LIVE_KEY,
+            previous_key,
+            mode=0o440,
+            gid=EGRESS_RUNTIME_GID,
+        )
+    else:
+        _unlink(EGRESS_LIVE_CERT)
+        _unlink(EGRESS_LIVE_KEY)
+    if journal["wasActive"] or journal["egressWasActive"]:
+        if not journal["hadPair"]:
+            raise RotationError("active carrier service had no previous credential")
+        if journal["egressWasActive"] and not journal["hadEgressPair"]:
+            raise RotationError("active provider-egress service had no previous credential")
+        _restart_and_check_services(
+            common=journal["wasActive"], egress=journal["egressWasActive"]
+        )
+    _unlink(JOURNAL)
+
+
+def _write_evidence(record: Mapping[str, Any]) -> dict[str, Any]:
+    value = dict(record)
+    value["apiVersion"] = "carrier.vivolution.ae/certificate-rotation/v0.1"
+    value["kind"] = "CarrierCertificateRotationEvidence"
+    unsigned = _canonical(value).rstrip(b"\n")
+    value["evidenceDigest"] = _digest(unsigned)
+    encoded = _canonical(value)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"{stamp}-{value['evidenceDigest'].split(':', 1)[1]}.json"
+    _atomic_write(EVIDENCE_ROOT / filename, encoded, mode=0o600, gid=0)
+    return value
+
+
+def _prepare() -> None:
+    _assert_dir(ROTATION_ROOT, 0o700)
+    _assert_dir(INCOMING_ROOT, 0o700)
+    _assert_dir(BACKUP_ROOT, 0o700)
+    _assert_dir(EVIDENCE_ROOT, 0o700)
+    _assert_dir(LIVE_CERT.parent, 0o750, RUNTIME_GID)
+    _assert_dir(EGRESS_LIVE_CERT.parent, 0o750, EGRESS_RUNTIME_GID)
+    try:
+        user_record = __import__("pwd").getpwnam(RUNTIME_USER)
+    except KeyError as exc:
+        raise RotationError("dedicated carrier runtime user is absent") from exc
+    if user_record.pw_uid != RUNTIME_UID or user_record.pw_gid != RUNTIME_GID:
+        raise RotationError("dedicated carrier runtime identity drifted")
+    try:
+        egress_group = __import__("grp").getgrnam({{ carrier_certificate_egress_group | to_json }})
+    except KeyError as exc:
+        raise RotationError("isolated provider-egress group is absent") from exc
+    if egress_group.gr_gid != EGRESS_RUNTIME_GID:
+        raise RotationError("isolated provider-egress group drifted")
+
+
+def _signal_handler(signum: int, _frame: object) -> None:
+    raise RotationError(f"certificate rotation interrupted by signal {signum}")
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        raise RotationError("carrier certificate rotation must execute as root")
+    _prepare()
+    for selected_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(selected_signal, _signal_handler)
+    lock_descriptor = os.open(
+        LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        record = os.fstat(lock_descriptor)
+        if (
+            not stat.S_ISREG(record.st_mode)
+            or record.st_nlink != 1
+            or record.st_uid != 0
+            or record.st_gid != 0
+        ):
+            raise RotationError("carrier certificate lock is unsafe")
+        os.fchmod(lock_descriptor, 0o600)
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        if _exists_regular(MAINTENANCE_GATE):
+            raise RotationError("certificate maintenance blocks activation")
+        stale = _read_journal()
+        if stale is not None:
+            _restore_previous(stale)
+
+        staged_cert = _secure_read(
+            INCOMING_CERT, modes=(0o400,), maximum=MAX_PEM_BYTES, gid=0
+        )
+        staged_key = _secure_read(
+            INCOMING_KEY, modes=(0o400,), maximum=MAX_PEM_BYTES, gid=0
+        )
+        validation = _validate_pair(INCOMING_CERT, INCOMING_KEY)
+
+        cert_exists = _exists_regular(LIVE_CERT)
+        key_exists = _exists_regular(LIVE_KEY)
+        if cert_exists != key_exists:
+            raise RotationError("live carrier certificate/key pair is incomplete")
+        egress_cert_exists = _exists_regular(EGRESS_LIVE_CERT)
+        egress_key_exists = _exists_regular(EGRESS_LIVE_KEY)
+        if egress_cert_exists != egress_key_exists:
+            raise RotationError("live provider-egress certificate/key pair is incomplete")
+        had_pair = cert_exists and key_exists
+        had_egress_pair = egress_cert_exists and egress_key_exists
+        if had_egress_pair and not had_pair:
+            raise RotationError("provider-egress credential exists without the common credential")
+        current_cert = b""
+        current_key = b""
+        if had_pair:
+            current_cert = _secure_read(
+                LIVE_CERT, modes=(0o440,), maximum=MAX_PEM_BYTES, gid=RUNTIME_GID
+            )
+            current_key = _secure_read(
+                LIVE_KEY, modes=(0o440,), maximum=MAX_PEM_BYTES, gid=RUNTIME_GID
+            )
+        if had_egress_pair:
+            current_egress_cert = _secure_read(
+                EGRESS_LIVE_CERT,
+                modes=(0o440,),
+                maximum=MAX_PEM_BYTES,
+                gid=EGRESS_RUNTIME_GID,
+            )
+            current_egress_key = _secure_read(
+                EGRESS_LIVE_KEY,
+                modes=(0o440,),
+                maximum=MAX_PEM_BYTES,
+                gid=EGRESS_RUNTIME_GID,
+            )
+            if current_cert != current_egress_cert or current_key != current_egress_key:
+                raise RotationError("common and provider-egress credentials differ")
+        was_active = _service_active()
+        egress_was_active = _egress_service_active()
+        if was_active and not had_pair:
+            raise RotationError("active rootless Asterisk has no carrier credential")
+        if egress_was_active and not had_egress_pair:
+            raise RotationError("active provider-egress Asterisk has no isolated credential")
+        if egress_was_active and not was_active:
+            raise RotationError("provider-egress Asterisk is active without the common leg")
+        if was_active or egress_was_active:
+            _readiness_is_safe()
+
+        if (
+            had_pair
+            and had_egress_pair
+            and current_cert == staged_cert
+            and current_key == staged_key
+        ):
+            if egress_was_active:
+                _check_egress_transport()
+            evidence = _write_evidence(
+                {
+                    "certificateDigest": _digest(staged_cert),
+                    "dnsSans": validation["dnsSans"],
+                    "providerEgressRestarted": False,
+                    "rootlessAsteriskRestarted": False,
+                    "status": "CARRIER_CERTIFICATE_UNCHANGED",
+                    "timestamp": datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                }
+            )
+            _unlink(INCOMING_CERT)
+            _unlink(INCOMING_KEY)
+            sys.stdout.buffer.write(_canonical(evidence))
+            return 0
+
+        if had_pair:
+            _atomic_write(BACKUP_CERT, current_cert, mode=0o400, gid=0)
+            _atomic_write(BACKUP_KEY, current_key, mode=0o400, gid=0)
+        journal: dict[str, Any] = {
+            "egressWasActive": egress_was_active,
+            "hadEgressPair": had_egress_pair,
+            "hadPair": had_pair,
+            "phase": "PREPARED",
+            "wasActive": was_active,
+        }
+        _write_journal(journal)
+        try:
+            if egress_was_active:
+                _stop_egress_service()
+            if was_active:
+                _stop_service()
+            journal["phase"] = "SERVICES_STOPPED"
+            _write_journal(journal)
+            _atomic_write(LIVE_CERT, staged_cert, mode=0o440, gid=RUNTIME_GID)
+            _atomic_write(LIVE_KEY, staged_key, mode=0o440, gid=RUNTIME_GID)
+            _atomic_write(
+                EGRESS_LIVE_CERT,
+                staged_cert,
+                mode=0o440,
+                gid=EGRESS_RUNTIME_GID,
+            )
+            _atomic_write(
+                EGRESS_LIVE_KEY,
+                staged_key,
+                mode=0o440,
+                gid=EGRESS_RUNTIME_GID,
+            )
+            journal["phase"] = "PAIRS_INSTALLED"
+            _write_journal(journal)
+            _validate_pair(LIVE_CERT, LIVE_KEY)
+            _validate_pair(EGRESS_LIVE_CERT, EGRESS_LIVE_KEY)
+            if was_active or egress_was_active:
+                _restart_and_check_services(
+                    common=was_active, egress=egress_was_active
+                )
+            journal["phase"] = "HEALTHY"
+            _write_journal(journal)
+        except BaseException:
+            _restore_previous(journal)
+            raise
+
+        evidence = _write_evidence(
+            {
+                "certificateDigest": _digest(staged_cert),
+                "dnsSans": validation["dnsSans"],
+                "previousCertificateDigest": _digest(current_cert) if had_pair else None,
+                "providerEgressRestarted": egress_was_active,
+                "rootlessAsteriskRestarted": was_active,
+                "status": "CARRIER_CERTIFICATE_ROTATED_HEALTHY",
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        )
+        _unlink(JOURNAL)
+        _unlink(INCOMING_CERT)
+        _unlink(INCOMING_KEY)
+        sys.stdout.buffer.write(_canonical(evidence))
+        return 0
+    finally:
+        os.close(lock_descriptor)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (KeyError, OSError, RotationError, UnicodeError, ValueError) as exc:
+        print(f"carrier certificate rotation rejected: {exc}", file=sys.stderr)
+        raise SystemExit(1)

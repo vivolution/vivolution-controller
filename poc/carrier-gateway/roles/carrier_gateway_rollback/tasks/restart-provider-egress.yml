@@ -1,0 +1,100 @@
+---
+# Included only after a digest-bound rollback bundle has restored its complete
+# provider profile, endpoint/FQDN configuration, optional Quadlet, and optional
+# credential include while the egress process is stopped.
+- name: Read the restored provider-enabled binding
+  ansible.builtin.slurp:
+    src: "{{ carrier_gateway_config_root }}/provider-enabled"
+  register: carrier_gateway_restored_provider_enabled_raw
+  no_log: true
+
+- name: Classify the exact restored provider binding
+  ansible.builtin.set_fact:
+    carrier_gateway_restored_provider_enabled: >-
+      {{ (carrier_gateway_restored_provider_enabled_raw.content | b64decode | trim) == 'true' }}
+    carrier_gateway_restored_provider_marker: >-
+      {{ carrier_gateway_restored_provider_enabled_raw.content | b64decode | trim }}
+  no_log: true
+
+- name: Require the restored provider marker to be fail-closed
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_restored_provider_marker in ['true', 'false']
+    fail_msg: Restored provider-enabled state is not exact.
+    quiet: true
+
+- name: Inspect the restored provider credential binding
+  ansible.builtin.stat:
+    path: "{{ carrier_gateway_config_root }}/secrets/provider-auth.conf"
+    follow: false
+  register: carrier_gateway_restored_provider_credential
+  changed_when: false
+  no_log: true
+
+- name: Require credential presence and metadata to match restored provider state
+  ansible.builtin.assert:
+    that:
+      - >-
+        (carrier_gateway_restored_provider_credential.stat.exists | default(false)) ==
+        (carrier_gateway_restored_provider_enabled | bool)
+      - >-
+        not (carrier_gateway_restored_provider_enabled | bool) or
+        ((carrier_gateway_restored_provider_credential.stat.isreg | default(false)) and
+         not (carrier_gateway_restored_provider_credential.stat.islnk | default(false)) and
+         (carrier_gateway_restored_provider_credential.stat.nlink | int == 1) and
+         (carrier_gateway_restored_provider_credential.stat.uid | int == 0) and
+         (carrier_gateway_restored_provider_credential.stat.gid | int == 10004) and
+         carrier_gateway_restored_provider_credential.stat.mode == '0440')
+    fail_msg: Restored provider profile is not bound to an exact isolated credential.
+    quiet: true
+  no_log: true
+
+- name: Start restored isolated provider egress before the common leg
+  ansible.builtin.systemd_service:
+    name: vivolution-carrier-egress.service
+    enabled: true
+    state: started
+  when: carrier_gateway_restored_provider_enabled | bool
+
+- name: Read restored isolated provider-egress PID
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=MainPID, --value, vivolution-carrier-egress.service]
+  register: carrier_gateway_restored_provider_egress_pid
+  changed_when: false
+  when: carrier_gateway_restored_provider_enabled | bool
+
+- name: Prove restored provider egress is a new live process
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_restored_provider_egress_pid.stdout | trim is match('^[1-9][0-9]+$')
+      - carrier_gateway_restored_provider_egress_pid.stdout | trim != (carrier_gateway_provider_egress_previous_pid | default('0') | trim)
+    fail_msg: Restored provider egress did not start as a new isolated process.
+    quiet: true
+  when: carrier_gateway_restored_provider_enabled | bool
+
+- name: Prove restored live provider TLS transport
+  ansible.builtin.command:
+    argv:
+      - podman
+      - exec
+      - vivolution-carrier-egress
+      - /usr/sbin/asterisk
+      - -rx
+      - pjsip show transport provider-egress-tls
+  register: carrier_gateway_restored_provider_transport
+  changed_when: false
+  failed_when: >-
+    carrier_gateway_restored_provider_transport.rc != 0 or
+    carrier_gateway_restored_provider_transport.stdout is not search(
+      'Transport:.*provider-egress-tls.*tls')
+  when: carrier_gateway_restored_provider_enabled | bool
+
+- name: Require no provider unit or credential when restored state is disabled
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=LoadState, --value, vivolution-carrier-egress.service]
+  register: carrier_gateway_restored_provider_disabled_unit
+  changed_when: false
+  failed_when: >-
+    carrier_gateway_restored_provider_disabled_unit.rc != 0 or
+    carrier_gateway_restored_provider_disabled_unit.stdout | trim != 'not-found'
+  when: not (carrier_gateway_restored_provider_enabled | bool)

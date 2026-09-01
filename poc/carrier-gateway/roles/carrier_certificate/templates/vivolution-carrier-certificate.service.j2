@@ -1,0 +1,35 @@
+[Unit]
+Description=Vivolution carrier Azure-DNS ACME certificate renewal
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=8min
+EnvironmentFile=/etc/vivolution/carrier-certificate-acme.env
+ExecStart={{ carrier_certificate_libexec_root }}/renew-carrier-certificate
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=tmpfs
+ProtectSystem=strict
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+# ProtectHome=tmpfs hides every home and /run/user. Re-expose only the exact
+# rootless carrier runtime subtree needed for its user bus and Podman state.
+BindPaths={{ carrier_certificate_rootless_runtime_dir }}
+ReadWritePaths={{ carrier_certificate_acme_root }} {{ carrier_certificate_rotation_root }} {{ carrier_certificate_pki_root }} {{ carrier_certificate_egress_pki_root }} {{ carrier_certificate_rootless_home }}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native

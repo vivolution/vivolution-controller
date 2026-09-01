@@ -1,0 +1,83 @@
+[global]
+type=global
+user_agent=Vivolution-Isolated-Carrier-Egress-POC/0.1
+max_forwards=32
+
+[gateway-loopback]
+type=transport
+protocol=udp
+bind={{ carrier_gateway_egress_loopback_ipv4 }}:{{ carrier_gateway_egress_signaling_port }}
+local_net=127.0.0.0/8
+
+[gateway-inbound]
+type=endpoint
+transport=gateway-loopback
+context=from-gateway
+disallow=all
+allow=ulaw
+allow=alaw
+direct_media=no
+rtp_symmetric=no
+force_rport=no
+rewrite_contact=no
+timers=yes
+trust_id_inbound=no
+send_pai=no
+media_encryption=no
+
+[gateway-source]
+type=identify
+endpoint=gateway-inbound
+match=127.0.0.1
+
+{% if carrier_gateway_provider_enabled | bool %}
+{% if carrier_gateway_provider_auth_mode == 'digest' %}
+#include /run/carrier-secrets/provider-auth.conf
+{% endif %}
+
+[provider-egress-tls]
+type=transport
+protocol=tls
+bind={{ carrier_gateway_controller_ipv4 }}:0
+method=tlsv1_2
+cert_file=/run/carrier-pki/carrier.fullchain.pem
+priv_key_file=/run/carrier-pki/carrier.key
+ca_list_file=/run/public-ca/ca-certificates.crt
+verify_server=yes
+allow_reload=no
+external_signaling_address={{ carrier_gateway_controller_public_ipv4 }}
+external_signaling_port={{ carrier_gateway_provider_signaling_port }}
+external_media_address={{ carrier_gateway_controller_public_ipv4 }}
+
+[provider-aor]
+type=aor
+contact=sips:{{ carrier_gateway_provider_signaling_fqdn }}:{{ carrier_gateway_provider_signaling_port }}
+qualify_frequency=30
+qualify_timeout=3.0
+
+[provider]
+type=endpoint
+transport=provider-egress-tls
+aors=provider-aor
+{% if carrier_gateway_provider_auth_mode == 'digest' %}
+outbound_auth=provider-auth
+{% endif %}
+context=reject-all
+disallow=all
+allow=ulaw
+allow=alaw
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+timers=yes
+callerid={{ carrier_gateway_provider_permitted_caller_id }}
+from_user={{ carrier_gateway_provider_permitted_caller_id }}
+from_domain={{ carrier_gateway_provider_signaling_fqdn }}
+contact_user={{ carrier_gateway_provider_permitted_caller_id }}
+user_eq_phone=yes
+send_pai=yes
+trust_id_outbound=yes
+media_encryption={{ carrier_gateway_provider_media_encryption }}
+media_encryption_optimistic=no
+{% endif %}

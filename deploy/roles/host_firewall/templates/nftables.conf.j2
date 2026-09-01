@@ -36,8 +36,11 @@ table inet vivolution_filter {
         ip saddr {{ cp_voice_fixture_source_ipv4_cidr }} udp dport { {{ cp_voice_fixture_udp_port_ranges | join(', ') }} } ct state new accept
 {% endif %}
 {% if cp_effective_carrier_gateway_enabled %}
-        ip saddr { {{ cp_carrier_gateway_source_ipv4_cidrs | join(', ') }} } tcp dport {{ cp_carrier_gateway_tcp_port }} ct state new accept comment "vivolution-carrier-tls"
-        ip saddr { {{ cp_carrier_gateway_source_ipv4_cidrs | join(', ') }} } udp sport {{ cp_carrier_gateway_edge_media_source_port_range }} udp dport {{ cp_carrier_gateway_udp_destination_port_range }} accept comment "vivolution-carrier-media"
+        ip saddr { {{ cp_carrier_gateway_source_ipv4_cidrs | join(', ') }} } ip daddr {{ cp_carrier_gateway_controller_ipv4 }} tcp dport {{ cp_carrier_gateway_tcp_port }} ct state new accept comment "vivolution-carrier-tls"
+        ip saddr { {{ cp_carrier_gateway_source_ipv4_cidrs | join(', ') }} } ip daddr {{ cp_carrier_gateway_controller_ipv4 }} udp sport {{ cp_carrier_gateway_edge_media_source_port_range }} udp dport {{ cp_carrier_gateway_ingress_rtp_port_range }} accept comment "vivolution-carrier-media"
+{% if cp_carrier_gateway_provider_enabled | bool %}
+        ip saddr { {{ cp_carrier_gateway_provider_media_ipv4_cidrs | join(', ') }} } ip daddr {{ cp_carrier_gateway_controller_ipv4 }} udp sport {{ cp_carrier_gateway_provider_remote_media_port_range }} udp dport {{ cp_carrier_gateway_egress_rtp_port_range }} accept comment "vivolution-carrier-provider-media-in"
+{% endif %}
 {% endif %}
     }
 
@@ -47,5 +50,23 @@ table inet vivolution_filter {
 
     chain output {
         type filter hook output priority filter; policy accept;
+{% if cp_effective_carrier_gateway_enabled %}
+        meta skuid {{ cp_carrier_gateway_runtime_uid }} ip daddr { {{ cp_carrier_gateway_source_ipv4_cidrs | join(', ') }} } ct state established,related accept comment "vivolution-carrier-edge-established-out"
+{% if cp_carrier_gateway_provider_enabled | bool %}
+        meta skuid {{ cp_carrier_gateway_egress_uid }} ip daddr { {{ cp_carrier_gateway_provider_destination_ipv4_cidrs | join(', ') }} } ct state established,related accept comment "vivolution-carrier-provider-tls-established-out"
+        meta skuid {{ cp_carrier_gateway_egress_uid }} ip daddr { {{ cp_carrier_gateway_provider_media_ipv4_cidrs | join(', ') }} } ct state established,related accept comment "vivolution-carrier-provider-media-established-out"
+{% endif %}
+        meta skuid {{ cp_carrier_gateway_runtime_uid }} oifname "lo" accept
+        meta skuid {{ cp_carrier_gateway_runtime_uid }} ip daddr {{ cp_carrier_gateway_controller_ipv4 }} accept
+        meta skuid {{ cp_carrier_gateway_runtime_uid }} ip saddr {{ cp_carrier_gateway_controller_ipv4 }} ip daddr { {{ cp_carrier_gateway_source_ipv4_cidrs | join(', ') }} } tcp dport {{ cp_carrier_gateway_edge_signaling_destination_port }} ct state new accept comment "vivolution-carrier-edge-tls-out"
+        meta skuid {{ cp_carrier_gateway_runtime_uid }} ip saddr {{ cp_carrier_gateway_controller_ipv4 }} ip daddr { {{ cp_carrier_gateway_source_ipv4_cidrs | join(', ') }} } udp sport {{ cp_carrier_gateway_ingress_rtp_port_range }} udp dport {{ cp_carrier_gateway_edge_media_destination_port_range }} accept comment "vivolution-carrier-edge-media-out"
+{% if cp_carrier_gateway_provider_enabled | bool %}
+        meta skuid {{ cp_carrier_gateway_egress_uid }} oifname "lo" accept comment "vivolution-carrier-egress-loopback"
+        meta skuid {{ cp_carrier_gateway_egress_uid }} ip saddr {{ cp_carrier_gateway_controller_ipv4 }} ip daddr { {{ cp_carrier_gateway_provider_destination_ipv4_cidrs | join(', ') }} } tcp dport {{ cp_carrier_gateway_provider_signaling_port }} ct state new accept comment "vivolution-carrier-provider-tls-out"
+        meta skuid {{ cp_carrier_gateway_egress_uid }} ip saddr {{ cp_carrier_gateway_controller_ipv4 }} ip daddr { {{ cp_carrier_gateway_provider_media_ipv4_cidrs | join(', ') }} } udp sport {{ cp_carrier_gateway_egress_rtp_port_range }} udp dport {{ cp_carrier_gateway_provider_remote_media_port_range }} accept comment "vivolution-carrier-provider-media-out"
+        meta skuid {{ cp_carrier_gateway_egress_uid }} drop comment "vivolution-carrier-egress-deny"
+{% endif %}
+        meta skuid {{ cp_carrier_gateway_runtime_uid }} drop comment "vivolution-carrier-user-egress-deny"
+{% endif %}
     }
 }

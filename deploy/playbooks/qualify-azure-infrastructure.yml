@@ -17,6 +17,9 @@
             cp_azure_infrastructure_topology_selected: >-
               {{ cp_azure_infrastructure_topology |
                  default('legacy-single-node', true) }}
+            cp_azure_poc_cp1_carrier_overlay_mode_selected: >-
+              {{ cp_azure_poc_cp1_carrier_overlay_mode |
+                 default('ABSENT', true) }}
 
         - name: Require one supported Azure infrastructure topology
           ansible.builtin.assert:
@@ -84,6 +87,10 @@
               - cp_azure_poc_pbx_tls_listener_port is defined
               - cp_azure_poc_edge_runtime_profile is defined
               - cp_azure_poc_direct_replacement_runtime_profile is defined
+              - >-
+                cp_azure_poc_direct_replacement_runtime_profile !=
+                'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+                cp_azure_poc_cp1_carrier_overlay_mode is defined
               - >-
                 cp_azure_poc_direct_replacement_runtime_profile !=
                 'DIRECT_ROUTING_PRIVATE_PBX_POC' or
@@ -219,6 +226,14 @@
               - >-
                 cp_azure_poc_direct_replacement_runtime_profile in
                 ['NOT_DEPLOYED', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
+              - >-
+                (cp_azure_poc_direct_replacement_runtime_profile ==
+                 'NOT_DEPLOYED' and
+                 cp_azure_poc_cp1_carrier_overlay_mode_selected == 'ABSENT') or
+                (cp_azure_poc_direct_replacement_runtime_profile ==
+                 'DIRECT_ROUTING_PRIVATE_PBX_POC' and
+                 cp_azure_poc_cp1_carrier_overlay_mode_selected in
+                 ['TWILIO_DISABLED', 'TWILIO_ENABLED'])
               - >-
                 cp_azure_poc_direct_replacement_runtime_profile !=
                 'DIRECT_ROUTING_PRIVATE_PBX_POC' or
@@ -1484,6 +1499,238 @@
                 destinationPortRange: '30000-30127'
                 destinationPortRanges: []
                 provisioningState: Succeeded
+              - name: AllowTwilioSecureMediaInbound
+                priority: 340
+                protocol: Udp
+                access: Allow
+                direction: Inbound
+                sourcePrefix: 168.86.128.0/18
+                sourcePrefixes: []
+                sourcePortRange: '10000-60000'
+                sourcePortRanges: []
+                destinationPrefix: 10.20.1.4/32
+                destinationPrefixes: []
+                destinationPortRange: '30000-30127'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowCp1AzureDhcpOutbound
+                priority: 1000
+                protocol: Udp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: '68'
+                sourcePortRanges: []
+                destinationPrefix: 168.63.129.16
+                destinationPrefixes: []
+                destinationPortRange: '67'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowCp1AzureDnsUdpOutbound
+                priority: 1010
+                protocol: Udp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: 168.63.129.16
+                destinationPrefixes: []
+                destinationPortRange: '53'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowCp1AzureDnsTcpOutbound
+                priority: 1020
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: 168.63.129.16
+                destinationPrefixes: []
+                destinationPortRange: '53'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowCp1AzureWireServerOutbound
+                priority: 1030
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: 168.63.129.16
+                destinationPrefixes: []
+                destinationPortRange: null
+                destinationPortRanges:
+                  - '80'
+                  - '32526'
+                provisioningState: Succeeded
+              - name: AllowCp1AzureImdsOutbound
+                priority: 1040
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: 169.254.169.254
+                destinationPrefixes: []
+                destinationPortRange: '80'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowCp1NtpOutbound
+                priority: 1050
+                protocol: Udp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: Internet
+                destinationPrefixes: []
+                destinationPortRange: '123'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowCp1WebOutbound
+                priority: 1060
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: Internet
+                destinationPrefixes: []
+                destinationPortRange: null
+                destinationPortRanges:
+                  - '80'
+                  - '443'
+                provisioningState: Succeeded
+              - name: AllowGeneration2FixtureSignalingOutbound
+                priority: 1100
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: null
+                destinationPrefixes:
+                  - 10.20.2.4/32
+                  - 10.20.2.5/32
+                destinationPortRange: '15061'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowGeneration2FixtureMediaOutbound
+                priority: 1110
+                protocol: Udp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: null
+                sourcePortRanges:
+                  - '21000-21127'
+                  - '22000-22063'
+                destinationPrefix: null
+                destinationPrefixes:
+                  - 10.20.2.4/32
+                  - 10.20.2.5/32
+                destinationPortRange: '20000-20255'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowGeneration3CarrierSignalingOutbound
+                priority: 1120
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: null
+                destinationPrefixes:
+                  - 10.20.2.6/32
+                  - 10.20.2.7/32
+                destinationPortRange: '15061'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowGeneration3CarrierMediaOutbound
+                priority: 1130
+                protocol: Udp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: '30000-30127'
+                sourcePortRanges: []
+                destinationPrefix: null
+                destinationPrefixes:
+                  - 10.20.2.6/32
+                  - 10.20.2.7/32
+                destinationPortRange: '20000-20255'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowTwilioSecureSignalingOutbound
+                priority: 1200
+                protocol: Tcp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: null
+                destinationPrefixes:
+                  - 54.172.60.0/30
+                  - 54.244.51.0/30
+                  - 54.171.127.192/30
+                  - 35.156.191.128/30
+                  - 54.65.63.192/30
+                  - 54.169.127.128/30
+                  - 54.252.254.64/30
+                  - 177.71.206.192/30
+                destinationPortRange: '5061'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: AllowTwilioSecureMediaOutbound
+                priority: 1210
+                protocol: Udp
+                access: Allow
+                direction: Outbound
+                sourcePrefix: 10.20.1.4/32
+                sourcePrefixes: []
+                sourcePortRange: '30000-30127'
+                sourcePortRanges: []
+                destinationPrefix: 168.86.128.0/18
+                destinationPrefixes: []
+                destinationPortRange: '10000-60000'
+                destinationPortRanges: []
+                provisioningState: Succeeded
+              - name: DenyAllCp1Outbound
+                priority: 4096
+                protocol: '*'
+                access: Deny
+                direction: Outbound
+                sourcePrefix: '*'
+                sourcePrefixes: []
+                sourcePortRange: '*'
+                sourcePortRanges: []
+                destinationPrefix: '*'
+                destinationPrefixes: []
+                destinationPortRange: '*'
+                destinationPortRanges: []
+                provisioningState: Succeeded
               - name: DenyAllInbound
                 priority: 4096
                 protocol: '*'
@@ -1500,17 +1747,52 @@
                 provisioningState: Succeeded
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
+        - name: Define the exact independently selected CP1 carrier rule sets
+          ansible.builtin.set_fact:
+            cp_azure_poc_controller_carrier_overlay_rule_names:
+              - AllowGeneration3CarrierSignaling
+              - AllowGeneration3CarrierMedia
+              - AllowCp1AzureDhcpOutbound
+              - AllowCp1AzureDnsUdpOutbound
+              - AllowCp1AzureDnsTcpOutbound
+              - AllowCp1AzureWireServerOutbound
+              - AllowCp1AzureImdsOutbound
+              - AllowCp1NtpOutbound
+              - AllowCp1WebOutbound
+              - AllowGeneration2FixtureSignalingOutbound
+              - AllowGeneration2FixtureMediaOutbound
+              - AllowGeneration3CarrierSignalingOutbound
+              - AllowGeneration3CarrierMediaOutbound
+              - DenyAllCp1Outbound
+            cp_azure_poc_controller_twilio_overlay_rule_names:
+              - AllowTwilioSecureMediaInbound
+              - AllowTwilioSecureSignalingOutbound
+              - AllowTwilioSecureMediaOutbound
+          when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
+
         - name: Select the exact POC controller NSG rules for both generations
           ansible.builtin.set_fact:
             cp_azure_poc_expected_controller_nsg_rules: >-
               {{
                 (
                   cp_azure_poc_controller_nsg_rule_superset |
-                  rejectattr('name', 'equalto', 'AllowGeneration3CarrierSignaling') |
-                  rejectattr('name', 'equalto', 'AllowGeneration3CarrierMedia') |
+                  rejectattr(
+                    'name', 'in',
+                    cp_azure_poc_controller_carrier_overlay_rule_names +
+                    cp_azure_poc_controller_twilio_overlay_rule_names) |
                   list
                 )
-                if cp_azure_poc_direct_replacement_runtime_profile == 'NOT_DEPLOYED'
+                if cp_azure_poc_cp1_carrier_overlay_mode_selected == 'ABSENT'
+                else
+                (
+                  cp_azure_poc_controller_nsg_rule_superset |
+                  rejectattr(
+                    'name', 'in',
+                    cp_azure_poc_controller_twilio_overlay_rule_names) |
+                  list
+                )
+                if cp_azure_poc_cp1_carrier_overlay_mode_selected ==
+                   'TWILIO_DISABLED'
                 else cp_azure_poc_controller_nsg_rule_superset
               }}
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
@@ -1520,12 +1802,18 @@
             that:
               - >-
                 cp_azure_nsg_rules | length ==
-                (8 if cp_azure_poc_direct_replacement_runtime_profile ==
-                      'DIRECT_ROUTING_PRIVATE_PBX_POC' else 6)
-              - cp_azure_nsg_rules == cp_azure_poc_expected_controller_nsg_rules
+                (6 if cp_azure_poc_cp1_carrier_overlay_mode_selected ==
+                       'ABSENT' else
+                 20 if cp_azure_poc_cp1_carrier_overlay_mode_selected ==
+                        'TWILIO_DISABLED' else 23)
+              - >-
+                cp_azure_nsg_rules | sort(attribute='name') ==
+                cp_azure_poc_expected_controller_nsg_rules |
+                sort(attribute='name')
             fail_msg: >-
-              The POC controller NSG is not the exact six-rule synthetic base
-              plus the independently selected two-rule generation-3 overlay.
+              The POC controller NSG is not the exact six-rule synthetic base,
+              fourteen-rule carrier overlay, and separately selected
+              three-rule Twilio authority.
           when: cp_azure_infrastructure_topology_selected == 'poc-three-node'
 
         - name: Read the exact POC Edge availability set
@@ -1724,10 +2012,14 @@
             cp_azure_poc_direct_replacement_bindings:
               - role: sbc1
                 vm_name: "{{ cp_azure_poc_direct_replacement_vm_names[0] }}"
+                nsg_name: >-
+                  {{ cp_azure_poc_direct_replacement_vm_names[0] ~ '-nsg' }}
                 public_ip_name: >-
                   {{ cp_azure_poc_direct_replacement_public_ip_names[0] }}
               - role: sbc2
                 vm_name: "{{ cp_azure_poc_direct_replacement_vm_names[1] }}"
+                nsg_name: >-
+                  {{ cp_azure_poc_direct_replacement_vm_names[1] ~ '-nsg' }}
                 public_ip_name: >-
                   {{ cp_azure_poc_direct_replacement_public_ip_names[1] }}
           when:
@@ -2653,6 +2945,98 @@
                 provisioningState: Succeeded
             expected_rules: "{{ expected_rule_contract }}"
 
+        - name: Read each complete generation-3 Direct Routing NSG rule set
+          ansible.builtin.command:
+            argv:
+              - az
+              - network
+              - nsg
+              - rule
+              - list
+              - --subscription
+              - "{{ cp_azure_subscription_id }}"
+              - --resource-group
+              - "{{ cp_azure_resource_group }}"
+              - --nsg-name
+              - "{{ item.nsg_name }}"
+              - --query
+              - >-
+                sort_by([],&name)[].{name:name,description:description,
+                priority:priority,protocol:protocol,access:access,
+                direction:direction,sourcePrefix:sourceAddressPrefix,
+                sourcePrefixes:sourceAddressPrefixes,
+                sourcePortRange:sourcePortRange,
+                sourcePortRanges:sourcePortRanges,
+                destinationPrefix:destinationAddressPrefix,
+                destinationPrefixes:destinationAddressPrefixes,
+                destinationPortRange:destinationPortRange,
+                destinationPortRanges:destinationPortRanges,
+                provisioningState:provisioningState}
+              - --output
+              - json
+          environment: *azure_cli_environment
+          loop: "{{ cp_azure_poc_direct_replacement_bindings | default([]) }}"
+          loop_control:
+            label: "{{ item.role }}"
+          register: cp_azure_poc_g3_nsg_rules_raw
+          changed_when: false
+          check_mode: false
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
+            - >-
+              cp_azure_poc_direct_replacement_runtime_profile ==
+              'DIRECT_ROUTING_PRIVATE_PBX_POC'
+
+        - name: Validate each exact generation-3 Direct Routing NSG contract
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ playbook_dir }}/../../infra/azure-poc/cp1_carrier_nsg_overlay.py"
+              - validate-g3-rules
+              - --node
+              - "{{ item.item.vm_name }}"
+            stdin: "{{ item.stdout }}"
+            stdin_add_newline: false
+          loop: "{{ cp_azure_poc_g3_nsg_rules_raw.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.role | default('invalid-g3-nsg') }}"
+          register: cp_azure_poc_g3_nsg_contracts_raw
+          changed_when: false
+          check_mode: false
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
+            - >-
+              cp_azure_poc_direct_replacement_runtime_profile ==
+              'DIRECT_ROUTING_PRIVATE_PBX_POC'
+
+        - name: Require two exact generation-3 Direct Routing NSG contracts
+          ansible.builtin.assert:
+            that:
+              - cp_azure_poc_g3_nsg_contracts_raw.results | length == 2
+              - evidence.keys() | list | sort ==
+                ['apiVersion', 'contractSha256', 'node', 'ruleCount',
+                 'status'] | sort
+              - evidence.apiVersion == 'infra.vivolution.ae/g3-nsg-contract/v1'
+              - evidence.node == item.item.item.vm_name
+              - evidence.ruleCount | int == 19
+              - >-
+                evidence.contractSha256 is
+                match('^[0-9a-f]{64}$')
+              - evidence.status == 'GENERATION3_DIRECT_ROUTING_NSG_VALID'
+            fail_msg: >-
+              A generation-3 replacement NSG is not the exact 19-rule
+              Direct Routing private-PBX contract.
+          loop: "{{ cp_azure_poc_g3_nsg_contracts_raw.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.item.role | default('invalid-g3-nsg-proof') }}"
+          vars:
+            evidence: "{{ item.stdout | from_json }}"
+          when:
+            - cp_azure_infrastructure_topology_selected == 'poc-three-node'
+            - >-
+              cp_azure_poc_direct_replacement_runtime_profile ==
+              'DIRECT_ROUTING_PRIVATE_PBX_POC'
+
         - name: Read the public DNS A record without mutation
           ansible.builtin.command:
             argv:
@@ -2811,9 +3195,13 @@
                 if cp_azure_infrastructure_topology_selected == 'legacy-single-node'
                 else
                 'profile-SYNTHETIC_PRIVATE,controller-' ~
-                (8 if cp_azure_poc_direct_replacement_runtime_profile ==
-                      'DIRECT_ROUTING_PRIVATE_PBX_POC' else 6) ~
-                '-rule,edge-17-rule-exact-contracts' }}
+                (6 if cp_azure_poc_cp1_carrier_overlay_mode_selected ==
+                       'ABSENT' else
+                 20 if cp_azure_poc_cp1_carrier_overlay_mode_selected ==
+                        'TWILIO_DISABLED' else 23) ~
+                '-rule,carrier-mode-' ~
+                cp_azure_poc_cp1_carrier_overlay_mode_selected ~
+                ',g2-edge-17-rule,g3-edge-19-rule-exact-contracts' }}
               - >-
                 os_disk_network_access={{
                 'controller-disabled-deny-all'

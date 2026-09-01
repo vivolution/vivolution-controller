@@ -1,7 +1,7 @@
 # Vivolution SBC
 
-Status: three-node turnkey POC implementation candidate; offline qualification
-passing, Azure deployment and end-to-end acceptance pending
+Status: Azure generation-2 synthetic POC qualified; generation-3 Direct
+Routing/Twilio path under remediation and not yet live-accepted
 
 ## Working hypothesis
 
@@ -45,14 +45,19 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
   VM, then run the signed current-release and distinct N-1 gates. The latest
   verified evidence, rather than this narrative, is authoritative for pass/fail
   status; the bridge itself is not the final isolation boundary.
-- The authorized three-node POC implementation now includes a fail-closed
+- The authorized Azure POC group is live in UAE North with replacement CP1 and
+  two generation-2 Edge nodes. Signed synthetic TLS/SIP/RTP calls, SBC failover,
+  reboot recovery, and replacement-CP1 restore have passed. The preserved
+  legacy controller remains the DNS target and rollback source until cutover.
+- The implementation includes a fail-closed
   OpenSIPS/RTPengine Edge bootstrap, signed desired-state verifier/compiler,
   transactional activation and rollback, public-certificate automation, a
   private no-PSTN SIP/TLS/RTP fixture, first-tenant CP1 catalog reconciliation,
   replacement-controller restore automation, and a guarded Microsoft 365
-  onboarding package. This is source readiness, not a deployment claim: Azure
-  host qualification, end-to-end calls, failover, and signed final evidence
-  remain pending until the new CP1/SBC1/SBC2 environment is built and tested.
+  onboarding package. A parallel generation-3 Direct Routing profile adds the
+  CP1 carrier gateway and Twilio termination path. It remains a guarded draft
+  until its public-NAT/media, certificate, authorization/CDR, rollback, and
+  teardown gates pass independent review and live host qualification.
 - Trivy is pinned for the replacement qualification. The signed gate blocks
   every fixable HIGH/CRITICAL finding in the committed source, exact running
   OCI image, and guest package database. It also retains the complete unfixed
@@ -66,13 +71,21 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
   retained `azure` profile continues to require an external PostgreSQL service.
   Signed evidence, rather than this narrative, is authoritative for the latest
   Azure qualification result.
-- No vendor purchase, customer pilot, live traffic, or production deployment is
-  authorized. Microsoft supportability, certified-SBC licensing, carrier
-  agreements, and UAE regulatory feasibility remain mandatory gates.
+- No vendor purchase, customer pilot, production traffic, or production
+  deployment is authorized. Jay accepted OpenSIPS/RTPengine as an explicitly
+  non-certified POC boundary. Microsoft supportability, carrier agreements,
+  and UAE regulatory feasibility remain mandatory production gates.
 - The private synthetic gate cannot be described as a live Teams/PSTN pass.
-  Live Direct Routing remains blocked by the unverified
-  `voice.vivolution.ae` Microsoft 365 domain, absent Teams/Phone System test
-  licenses and users, and acceptance of the non-certified support boundary.
+  The first live profile uses the root FQDNs `sbc1.vivolution.ae`,
+  `sbc2.vivolution.ae`, and `carrier.vivolution.ae` for the single Vivolution
+  tenant. Jay reports that `jay@vivolution.ae` has Microsoft 365 E5/Teams Phone;
+  live tenant verification must be repeated after normal browser sign-in.
+  Twilio is outbound-only for this POC because no DID exists, and its account,
+  verified caller ID, permitted destination, TLS/SRTP, and live call evidence
+  remain pending.
+- Four VMs are presently powered, including the preserved legacy controller.
+  Their retail baseline is approximately USD 8.48/day, so the live acceptance
+  window must be short and idle compute deallocated promptly.
 
 ## Working documents
 
@@ -80,6 +93,7 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 - [Architecture options](architecture/options.md)
 - [Reference architecture](architecture/reference-architecture.md)
 - [Architecture diagram](architecture/reference-architecture.html)
+- [Modular turnkey architecture](architecture/modular-turnkey-architecture.html)
 - [Open-source reference path](architecture/open-source-reference.md)
 - [Provider-neutral fleet management](architecture/fleet-management.md)
 - [Control plane high availability](architecture/control-plane-ha.md)

@@ -1,7 +1,7 @@
 [global]
 type=global
 user_agent=Vivolution-Carrier-Gateway-POC/0.1
-max_forwards=20
+max_forwards=70
 
 [carrier-live-mutual-tls]
 type=transport
@@ -92,37 +92,31 @@ send_pai=yes
 media_encryption=sdes
 media_encryption_optimistic=no
 
-{% if carrier_gateway_twilio_enabled | bool %}
-[twilio-auth]
-type=auth
-auth_type=userpass
-username={{ carrier_gateway_twilio_secrets.username }}
-password={{ carrier_gateway_twilio_secrets.password }}
+{% if carrier_gateway_provider_enabled | bool %}
+[carrier-egress-loopback]
+type=transport
+protocol=udp
+bind=127.0.0.1:0
+local_net=127.0.0.0/8
 
-[twilio-aor]
+[carrier-egress-aor]
 type=aor
-contact=sips:{{ carrier_gateway_twilio_termination_fqdn }}:5061
-qualify_frequency=30
-qualify_timeout=3.0
+contact=sip:{{ carrier_gateway_egress_loopback_ipv4 }}:{{ carrier_gateway_egress_signaling_port }}
+qualify_frequency=0
 
-[twilio]
+[carrier-egress]
 type=endpoint
-transport=carrier-live-mutual-tls
-aors=twilio-aor
-outbound_auth=twilio-auth
+transport=carrier-egress-loopback
+aors=carrier-egress-aor
 context=reject-all
 disallow=all
 allow=ulaw
 allow=alaw
 direct_media=no
-rtp_symmetric=yes
-force_rport=yes
-rewrite_contact=yes
+rtp_symmetric=no
+force_rport=no
+rewrite_contact=no
 timers=yes
-from_user={{ carrier_gateway_twilio_permitted_caller_id | regex_replace('^\\+', '') }}
-from_domain={{ carrier_gateway_twilio_termination_fqdn }}
-send_pai=yes
-trust_id_outbound=yes
-media_encryption=sdes
-media_encryption_optimistic=no
+send_pai=no
+media_encryption=no
 {% endif %}

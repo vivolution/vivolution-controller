@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+[ "$#" -eq 0 ] || exit 64
+exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 \
+  /usr/bin/python3 -I -B {{ (carrier_certificate_libexec_root + '/rotate-carrier-certificate.py') | quote }}

@@ -5,4 +5,8 @@
   gather_facts: true
   serial: 1
   roles:
+    # The certificate role owns only the exact 10003 identity bootstrap needed
+    # for protected key installation and rootless-service recovery. The full
+    # gateway role then revalidates that identity before any runtime exposure.
+    - role: carrier_certificate
     - role: carrier_gateway

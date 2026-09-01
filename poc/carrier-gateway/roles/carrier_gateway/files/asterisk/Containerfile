@@ -10,6 +10,7 @@ ARG PJPROJECT_SOURCE_SHA256=04b2eb1f0f01aa0ad1945b167171843448a51aa6b7c3e806496d
 COPY pjsip-tls-listener-bind-fail-closed.patch /tmp/pjsip-tls-listener-bind-fail-closed.patch
 COPY pjproject-tls-kernel-autobind.patch /tmp/pjproject-tls-kernel-autobind.patch
 COPY pjproject-dns-kernel-autobind.patch /tmp/pjproject-dns-kernel-autobind.patch
+COPY vivolution-authority-client.c /tmp/vivolution-authority-client.c
 
 RUN set -eux; \
     apt-get update; \
@@ -97,6 +98,9 @@ RUN set -eux; \
     grep -Eq '(^|[[:space:]])res_srtp([[:space:]]|$)' menuselect.makeopts; \
     make --jobs=2 DOWNLOAD=:; \
     make DESTDIR=/out DOWNLOAD=: install; \
+    cc -D_GNU_SOURCE -Os -Wall -Wextra -Werror \
+        -o /out/usr/local/libexec/vivolution-authority-client \
+        /tmp/vivolution-authority-client.c; \
     test -x /out/usr/sbin/asterisk; \
     test -f /out/usr/lib/asterisk/modules/chan_pjsip.so; \
     test -f /out/usr/lib/asterisk/modules/res_pjsip.so; \
@@ -104,6 +108,7 @@ RUN set -eux; \
     test -f /out/usr/lib/asterisk/modules/res_srtp.so; \
     test -f /out/usr/lib/asterisk/modules/app_echo.so; \
     test -f /out/usr/lib/asterisk/modules/app_milliwatt.so; \
+    test -x /out/usr/local/libexec/vivolution-authority-client; \
     ldd /out/usr/lib/asterisk/modules/res_srtp.so | grep -Eq 'libsrtp2?\.so'; \
     test -s /out/var/lib/asterisk/documentation/core-en_US.xml; \
     find /out/usr -type f -perm /111 -exec strip --strip-unneeded '{}' + 2>/dev/null || true; \
@@ -127,8 +132,6 @@ RUN set -eux; \
         --home-dir /var/lib/asterisk --no-create-home --shell /usr/sbin/nologin carrier-gateway; \
     mkdir --parents \
         /etc/asterisk \
-        /var/lib/asterisk/authorization/used \
-        /var/lib/asterisk/authorization/rejected \
         /var/log/asterisk/cdr-custom \
         /var/run/asterisk \
         /var/spool/asterisk; \
@@ -138,6 +141,7 @@ RUN set -eux; \
 COPY --from=builder /out/usr/ /usr/
 COPY --from=builder /runtime-libs/ /
 COPY --from=builder /out/var/lib/asterisk/documentation/ /usr/share/asterisk/documentation/
+COPY --chmod=0555 vivolution-carrier-entrypoint /usr/local/libexec/vivolution-carrier-entrypoint
 
 USER 10003:10003
 EXPOSE 5061/tcp 30000-30127/udp
@@ -147,5 +151,5 @@ LABEL org.opencontainers.image.title="Vivolution bounded carrier gateway" \
       ae.vivolution.gateway.scope="direct-private-pbx-poc" \
       ae.vivolution.gateway.pstn-default="disabled"
 
-ENTRYPOINT ["/usr/sbin/asterisk"]
+ENTRYPOINT ["/usr/local/libexec/vivolution-carrier-entrypoint"]
 CMD ["-f", "-C", "/etc/asterisk/asterisk.conf"]
