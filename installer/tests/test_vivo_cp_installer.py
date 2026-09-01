@@ -124,9 +124,80 @@ class ValidationTests(unittest.TestCase):
             prompts.append(prompt)
             return next(responses)
 
-        answers = installer.prompt_answers(input_function=answer)
+        answers = installer.prompt_answers(input_function=answer, environment={})
         self.assertEqual(answers["acme_email"], "admin@example.com")
         self.assertTrue(any("Let's Encrypt ACME contact email" in item for item in prompts))
+
+    def test_interactive_prompt_defaults_to_detected_active_ssh_client(self):
+        responses = iter(
+            (
+                "standalone",
+                "cp1.voice.example.com",
+                "controller.voice.example.com",
+                "1.1.1.1",
+                "",
+                "cpadmin",
+                "admin@example.com",
+                "",
+                "",
+            )
+        )
+        prompts = []
+
+        def answer(prompt):
+            prompts.append(prompt)
+            return next(responses)
+
+        answers = installer.prompt_answers(
+            input_function=answer,
+            environment={
+                "SSH_CONNECTION": "198.51.100.23 53122 203.0.113.10 22",
+                "SUDO_USER": "ubuntu",
+            },
+        )
+        self.assertEqual(answers["ssh_source_cidrs"], ["198.51.100.23/32"])
+        self.assertTrue(any("[198.51.100.23/32]" in item for item in prompts))
+
+    def test_interactive_prompt_retries_only_missing_or_invalid_ssh_source(self):
+        responses = iter(
+            (
+                "standalone",
+                "cp1.voice.example.com",
+                "controller.voice.example.com",
+                "1.1.1.1",
+                "",
+                "0.0.0.0/0",
+                "198.51.100.23/32",
+                "cpadmin",
+                "admin@example.com",
+                "",
+                "ubuntu",
+            )
+        )
+        prompts = []
+        messages = []
+
+        def answer(prompt):
+            prompts.append(prompt)
+            return next(responses)
+
+        answers = installer.prompt_answers(
+            input_function=answer,
+            output_function=messages.append,
+            environment={},
+        )
+        self.assertEqual(answers["ssh_source_cidrs"], ["198.51.100.23/32"])
+        self.assertEqual(
+            sum("Allowed administrator SSH" in item for item in prompts), 3
+        )
+        self.assertTrue(any("intentionally refused" in item for item in messages))
+        self.assertFalse(
+            any("This controller's public FQDN" in item for item in prompts[4:])
+        )
+
+    def test_world_open_ssh_source_is_refused(self):
+        with self.assertRaisesRegex(installer.InstallerError, "exact IPv4 /32"):
+            installer.validate_ssh_cidrs("0.0.0.0/0")
 
     def test_configuration_summary_names_fixed_letsencrypt_directory(self):
         rendered = "\n".join(installer.configuration_summary_lines(valid_answers()))

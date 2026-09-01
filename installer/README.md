@@ -72,13 +72,13 @@ an older protected answer file it defaults to the validated `admin_email`, but
 every new interactive installation asks for it explicitly and offers the
 administrator email as the default.
 
-The rc4 ledger schema remains version 4, so it can safely resume an rc3 run that
+The rc5 ledger schema remains version 4, so it can safely resume an rc3/rc4 run that
 failed during the initial read-only preflight. It deliberately refuses
 resume/reconcile of an rc2-managed installation. An rc2 host may already have
 an alternate-CA certificate cached;
 silently reusing that leaf would not prove the new Let's Encrypt-only contract.
-This candidate therefore requires a fresh rc3-or-later host until a separately reviewed
-certificate migration exists.
+This candidate therefore requires a fresh rc3-or-later host until a separately
+reviewed certificate migration exists.
 
 Ubuntu 24.04 normally publishes `/etc/os-release` as the relative symlink
 `../usr/lib/os-release`. The host check accepts only that canonical link or a
@@ -109,9 +109,13 @@ clock, reboot marker, and listener inventory are also rechecked at that final
 read-only boundary, including after a delayed resume. Up to sixteen exact IPv4
 SSH /32 sources are accepted, matching the Ansible enforcement limit.
 RFC1918 or public management /32s are accepted. When `SSH_CONNECTION` contains
-an IPv4 client, that active session is automatically added so firewall
-reconciliation cannot omit it. `ssh_allowed_user` must name the existing
-non-root Linux administrator; when omitted, a validated `SUDO_USER` is used.
+an IPv4 client, the wizard offers that address as its default and automatically
+adds it so firewall reconciliation cannot omit the active session. If `sudo`
+does not preserve the SSH connection metadata, the field is required and
+invalid or blank input is re-prompted immediately. `0.0.0.0/0` is deliberately
+refused: opening administrative SSH to the entire Internet is not a safe
+turnkey default. `ssh_allowed_user` must name the existing non-root Linux
+administrator; when omitted, a validated `SUDO_USER` is used.
 
 ## State and logs
 

@@ -459,7 +459,9 @@ def validate_public_ipv4(value, field_name="public_ipv4"):
 
 
 def validate_ssh_cidrs(value):
-    if isinstance(value, str):
+    if value is None:
+        values = []
+    elif isinstance(value, str):
         values = [item.strip() for item in value.split(",") if item.strip()]
     elif isinstance(value, list):
         values = value
@@ -599,21 +601,48 @@ def validate_answers(raw_answers, environment=None):
     }
 
 
-def prompt_answers(input_function=input):
-    print("Vivolution CP1 standalone installer")
-    print("Join/HA modes are intentionally unavailable in this release.\n")
-    detected_ssh_user = os.environ.get("SUDO_USER", "").strip() or None
+def prompt_answers(input_function=input, output_function=print, environment=None):
+    environment = os.environ if environment is None else environment
+    output_function("Vivolution CP1 standalone installer")
+    output_function("Join/HA modes are intentionally unavailable in this release.\n")
+    detected_ssh_user = environment.get("SUDO_USER", "").strip() or None
+    detected_ssh_cidr = current_ssh_client_cidr(environment=environment)
     questions = (
         ("deployment_mode", "Deployment mode", "standalone"),
         ("node_fqdn", "This controller's public FQDN", None),
         ("shared_fqdn", "Shared controller web FQDN", None),
         ("public_ipv4", "This controller's public IPv4", None),
-        ("ssh_source_cidrs", "Allowed administrator SSH /32 CIDRs (comma separated)", None),
         ("admin_username", "Initial web administrator username", "cpadmin"),
         ("admin_email", "Initial web administrator email", None),
     )
     collected = {}
-    for key, label, default in questions:
+    for key, label, default in questions[:4]:
+        suffix = " [%s]" % default if default is not None else ""
+        response = input_function("%s%s: " % (label, suffix)).strip()
+        collected[key] = response if response else default
+    while True:
+        ssh_cidr_suffix = (
+            " [%s]" % detected_ssh_cidr if detected_ssh_cidr is not None else ""
+        )
+        ssh_cidr_response = input_function(
+            "Allowed administrator SSH /32 CIDRs (comma separated)%s: "
+            % ssh_cidr_suffix
+        ).strip()
+        ssh_cidr_candidate = ssh_cidr_response or detected_ssh_cidr
+        try:
+            ssh_cidrs = validate_ssh_cidrs(ssh_cidr_candidate)
+            if detected_ssh_cidr is not None and detected_ssh_cidr not in ssh_cidrs:
+                ssh_cidrs = validate_ssh_cidrs(ssh_cidrs + [detected_ssh_cidr])
+            collected["ssh_source_cidrs"] = ssh_cidrs
+            break
+        except InstallerError as exc:
+            output_function("Invalid SSH source restriction: %s" % exc)
+            if detected_ssh_cidr is None:
+                output_function(
+                    "Enter the current administrator's exact IPv4 address with /32; "
+                    "0.0.0.0/0 is intentionally refused."
+                )
+    for key, label, default in questions[4:]:
         suffix = " [%s]" % default if default is not None else ""
         response = input_function("%s%s: " % (label, suffix)).strip()
         collected[key] = response if response else default
@@ -627,7 +656,7 @@ def prompt_answers(input_function=input):
         "Existing non-root Linux SSH administrator%s: " % ssh_suffix
     ).strip()
     collected["ssh_allowed_user"] = ssh_response if ssh_response else detected_ssh_user
-    return validate_answers(collected)
+    return validate_answers(collected, environment=environment)
 
 
 def load_answers(answer_file=None, input_function=input):

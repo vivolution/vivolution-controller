@@ -1,6 +1,6 @@
 # Vivolution Control Plane and SBC
 
-Status: standalone Ubuntu CP1 public beta available; the v0.3.0-rc3 Controller
+Status: standalone Ubuntu CP1 public beta available; the v0.3.0-rc5 Controller
 and enrollment-only Edge source candidate is locally qualified. Real
 PostgreSQL, fresh Ubuntu, and live Teams/SIP acceptance remain pending.
 
@@ -21,8 +21,9 @@ run:
 sudo ./installer/install.sh
 ```
 
-The wizard validates the host and public DNS, preserves the active SSH source,
-asks for the node/shared FQDNs, initial operator, and Let's Encrypt ACME contact,
+The wizard validates the host and public DNS, offers the detected active SSH
+client as an exact `/32` default (and refuses world-open SSH), asks for the
+node/shared FQDNs, initial operator, and Let's Encrypt ACME contact,
 generates protected credentials, installs PostgreSQL/PgBouncer/Podman/Caddy,
 deploys the controller, runs health checks, and prints the console URL.
 Interrupted runs use `sudo ./installer/install.sh resume`.
@@ -75,7 +76,7 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 
 ## Current boundary
 
-- The `v0.3.0-rc4` source candidate has separate deterministic Controller and Edge
+- The `v0.3.0-rc5` source candidate has separate deterministic Controller and Edge
   enrollment archives, checksum-pinned bootstraps, exact allowlists, and tamper
   tests. It corrects the stock Ubuntu 24.04 `/etc/os-release` symlink preflight
   and adds a non-installing packaged host-OS check. A complete fresh-host run
@@ -93,7 +94,7 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
   provider-egress process is restricted to `30064-30127`. Each receives only
   its own root-owned `0440` certificate copy and UID-scoped nftables authority.
 - Offline verification passes 58 carrier tests, 249 deployment tests, 83
-  Controller tests (12 PostgreSQL-only skips), 57 installer tests, 16 installer
+  Controller tests (12 PostgreSQL-only skips), 60 installer tests, 16 installer
   Ansible tests, and 42 Edge enrollment tests (one root-only tmpfs skip), plus
   syntax, digest-compatibility, whitespace, and independent security gates.
   This is source readiness, not a live-call or production claim.
