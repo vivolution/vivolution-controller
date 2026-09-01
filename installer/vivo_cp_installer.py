@@ -33,7 +33,7 @@ from pathlib import Path
 
 
 INSTALLER_VERSION = "0.3.0"
-LEDGER_SCHEMA_VERSION = 3
+LEDGER_SCHEMA_VERSION = 4
 SUPPORTED_OS_ID = "ubuntu"
 SUPPORTED_OS_VERSION = "24.04"
 DEFAULT_STATE_DIR = "/var/lib/vivolution-installer"
@@ -42,6 +42,9 @@ DEFAULT_DRY_RUN_STATE_DIR = "/var/lib/vivolution-installer-dry-run"
 DEFAULT_DRY_RUN_LOG_DIR = "/var/log/vivolution-installer-dry-run"
 DEFAULT_PLAYBOOK = "installer/ansible/install-controller.yml"
 DEFAULT_ANSIBLE_CONFIG = "installer/ansible/ansible.cfg"
+LETS_ENCRYPT_PRODUCTION_DIRECTORY = (
+    "https://acme-v02.api.letsencrypt.org/directory"
+)
 
 PHASES = (
     "preflight",
@@ -63,9 +66,10 @@ ANSWER_KEYS = {
     "ssh_source_cidrs",
     "admin_username",
     "admin_email",
+    "acme_email",
     "ssh_allowed_user",
 }
-REQUIRED_ANSWER_KEYS = ANSWER_KEYS - {"ssh_allowed_user"}
+REQUIRED_ANSWER_KEYS = ANSWER_KEYS - {"ssh_allowed_user", "acme_email"}
 SECRET_KEYS = {
     "cp_controller_admin_password",
     "cp_db_owner_password",
@@ -480,22 +484,30 @@ def validate_ssh_username(value):
     return username
 
 
-def validate_admin_email(value):
+def validate_contact_email(value, field_name):
     if not isinstance(value, str):
-        raise InstallerError("admin_email must be a string")
+        raise InstallerError("%s must be a string" % field_name)
     candidate = value.strip()
     if len(candidate) > 254 or "\n" in candidate or "\r" in candidate:
-        raise InstallerError("admin_email is invalid")
+        raise InstallerError("%s is invalid" % field_name)
     display_name, address = email.utils.parseaddr(candidate)
     if display_name or address != candidate or address.count("@") != 1:
-        raise InstallerError("admin_email must be one plain email address")
+        raise InstallerError("%s must be one plain email address" % field_name)
     local_part, domain = address.rsplit("@", 1)
     if not local_part or len(local_part) > 64:
-        raise InstallerError("admin_email has an invalid local part")
+        raise InstallerError("%s has an invalid local part" % field_name)
     if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+", local_part):
-        raise InstallerError("admin_email has an invalid local part")
-    normalized_domain = validate_fqdn(domain, "admin_email domain")
+        raise InstallerError("%s has an invalid local part" % field_name)
+    normalized_domain = validate_fqdn(domain, "%s domain" % field_name)
     return "%s@%s" % (local_part, normalized_domain)
+
+
+def validate_admin_email(value):
+    return validate_contact_email(value, "admin_email")
+
+
+def validate_acme_email(value):
+    return validate_contact_email(value, "acme_email")
 
 
 def validate_answers(raw_answers, environment=None):
@@ -529,6 +541,8 @@ def validate_answers(raw_answers, environment=None):
     shared_fqdn = validate_fqdn(raw_answers["shared_fqdn"], "shared_fqdn")
     if node_fqdn == shared_fqdn:
         raise InstallerError("node_fqdn and shared_fqdn must be different DNS names")
+    admin_email = validate_admin_email(raw_answers["admin_email"])
+    acme_email = validate_acme_email(raw_answers.get("acme_email") or admin_email)
     return {
         "deployment_mode": "standalone",
         "node_fqdn": node_fqdn,
@@ -536,7 +550,8 @@ def validate_answers(raw_answers, environment=None):
         "public_ipv4": validate_public_ipv4(raw_answers["public_ipv4"]),
         "ssh_source_cidrs": ssh_cidrs,
         "admin_username": validate_admin_username(raw_answers["admin_username"]),
-        "admin_email": validate_admin_email(raw_answers["admin_email"]),
+        "admin_email": admin_email,
+        "acme_email": acme_email,
         "ssh_allowed_user": validate_ssh_username(ssh_user_value),
     }
 
@@ -553,13 +568,22 @@ def prompt_answers(input_function=input):
         ("ssh_source_cidrs", "Allowed administrator SSH /32 CIDRs (comma separated)", None),
         ("admin_username", "Initial web administrator username", "cpadmin"),
         ("admin_email", "Initial web administrator email", None),
-        ("ssh_allowed_user", "Existing non-root Linux SSH administrator", detected_ssh_user),
     )
     collected = {}
     for key, label, default in questions:
         suffix = " [%s]" % default if default is not None else ""
         response = input_function("%s%s: " % (label, suffix)).strip()
         collected[key] = response if response else default
+    acme_default = collected["admin_email"]
+    acme_response = input_function(
+        "Let's Encrypt ACME contact email [%s]: " % acme_default
+    ).strip()
+    collected["acme_email"] = acme_response if acme_response else acme_default
+    ssh_suffix = " [%s]" % detected_ssh_user if detected_ssh_user is not None else ""
+    ssh_response = input_function(
+        "Existing non-root Linux SSH administrator%s: " % ssh_suffix
+    ).strip()
+    collected["ssh_allowed_user"] = ssh_response if ssh_response else detected_ssh_user
     return validate_answers(collected)
 
 
@@ -581,6 +605,8 @@ def configuration_summary_lines(answers):
         "SSH source /32s: %s" % ", ".join(answers["ssh_source_cidrs"]),
         "Web administrator: %s" % answers["admin_username"],
         "Web administrator email: %s" % answers["admin_email"],
+        "Let's Encrypt ACME email: %s" % answers["acme_email"],
+        "ACME directory: %s" % LETS_ENCRYPT_PRODUCTION_DIRECTORY,
     )
 
 
@@ -607,6 +633,36 @@ def validate_answer_dns(answers, resolver=socket.getaddrinfo):
             raise InstallerError(
                 "%s must resolve exclusively to declared public IPv4 %s; got %s"
                 % (name, expected, rendered)
+            )
+        try:
+            ipv6_results = resolver(name, 443, socket.AF_INET6, socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            no_ipv6_errors = {
+                code
+                for code in (
+                    getattr(socket, "EAI_NONAME", None),
+                    getattr(socket, "EAI_NODATA", None),
+                    getattr(socket, "EAI_ADDRFAMILY", None),
+                )
+                if code is not None
+            }
+            if exc.errno not in no_ipv6_errors:
+                raise InstallerError("IPv6 DNS lookup failed for %s: %s" % (name, exc))
+            ipv6_results = []
+        except OSError as exc:
+            raise InstallerError("IPv6 DNS lookup failed for %s: %s" % (name, exc))
+        ipv6_addresses = sorted(
+            {
+                item[4][0].split("%", 1)[0]
+                for item in ipv6_results
+                if len(item) >= 5 and item[4] and item[4][0]
+            }
+        )
+        if ipv6_addresses:
+            raise InstallerError(
+                "%s must not publish IPv6 AAAA records because this standalone "
+                "installer exposes no IPv6 ingress; got %s"
+                % (name, ", ".join(ipv6_addresses))
             )
         resolved_by_name[name] = addresses
     return resolved_by_name
@@ -1136,6 +1192,7 @@ def build_ansible_vars(answers, secret_values, release_id, controller_base_image
         "cp_ssh_allowed_user": answers["ssh_allowed_user"],
         "cp_controller_admin_username": answers["admin_username"],
         "cp_controller_admin_email": answers["admin_email"],
+        "cp_acme_email": answers["acme_email"],
         "cp_controller_release_id": release_id,
         "cp_controller_base_image": controller_base_image,
         "cp_ingress_server_name": answers["shared_fqdn"],
@@ -1478,6 +1535,8 @@ class InstallerEngine:
             "recovery_url": "https://%s/recovery/" % answers["shared_fqdn"],
             "admin_username": answers["admin_username"],
             "admin_email": answers["admin_email"],
+            "acme_email": answers["acme_email"],
+            "acme_ca": LETS_ENCRYPT_PRODUCTION_DIRECTORY,
             "credentials_file": str(self.paths.credentials),
             "human_log": str(self.paths.human_log),
             "event_log": str(self.paths.event_log),
@@ -1493,6 +1552,8 @@ class InstallerEngine:
             "Recovery URL: {recovery_url}\n"
             "Administrator: {admin_username}\n"
             "Administrator email: {admin_email}\n"
+            "Let's Encrypt ACME email: {acme_email}\n"
+            "ACME directory: {acme_ca}\n"
             "Administrator password: {admin_password}\n"
         ).format(admin_password=secret_values["cp_controller_admin_password"], **summary)
         atomic_write_bytes(self.paths.credentials, credential_text.encode("utf-8"), mode=0o600)

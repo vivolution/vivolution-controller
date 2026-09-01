@@ -1,8 +1,8 @@
 # Vivolution Control Plane and SBC
 
-Status: standalone Ubuntu CP1 public beta available; the v0.3.0-rc2 Controller
-and enrollment-only Edge candidate is locally qualified. Real PostgreSQL, fresh
-Ubuntu, and live Teams/SIP acceptance remain pending.
+Status: standalone Ubuntu CP1 public beta available; the v0.3.0-rc3 Controller
+and enrollment-only Edge source candidate is locally qualified. Real
+PostgreSQL, fresh Ubuntu, and live Teams/SIP acceptance remain pending.
 
 ## Turnkey Controller installer
 
@@ -22,20 +22,30 @@ sudo ./installer/install.sh
 ```
 
 The wizard validates the host and public DNS, preserves the active SSH source,
-asks for the node/shared FQDNs and initial operator, generates protected
-credentials, installs PostgreSQL/PgBouncer/Podman/Caddy, deploys the controller,
-runs health checks, and prints the console URL. Interrupted runs use
-`sudo ./installer/install.sh resume`.
+asks for the node/shared FQDNs, initial operator, and Let's Encrypt ACME contact,
+generates protected credentials, installs PostgreSQL/PgBouncer/Podman/Caddy,
+deploys the controller, runs health checks, and prints the console URL.
+Interrupted runs use `sudo ./installer/install.sh resume`.
 
 - [Installer guide](installer/README.md)
 - [Turnkey architecture and HA contract](architecture/turnkey-installer.md)
 - [Controller application and operator guide](controller/README.md)
 
 The separate public `vivolution-install` repository uses immutable tags and
-minimal checksum-pinned assets. The `v0.3.0-rc2` design keeps two commands and
+minimal checksum-pinned assets. The `v0.3.0-rc3` design keeps two commands and
 archives separate: standalone CP1, and an enrollment-only Edge
 client/placeholder. The latter does not install an SBC, SIP/RTP, Teams, or a
 carrier profile, and neither command claims CP2/CP3 high availability.
+
+The standalone Controller pins Caddy to the Let's Encrypt production ACME
+directory as its only certificate issuer. Caddy requests and automatically
+renews public certificates for both the unique Controller VM FQDN and stable
+shared FQDN; trusted HTTPS readiness fails closed if issuance is unavailable.
+This Controller certificate flow is separate from future Teams/SBC signaling
+certificates.
+
+The rc3 source requires a fresh installation and does not claim to convert a
+certificate already cached by an rc2 host.
 
 The Hosted SBC material below is a separate guarded POC module. Its invariant
 is **Microsoft Teams -> Common Teams Leg -> SBC routing/media -> Generic SIP
@@ -65,7 +75,7 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 
 ## Current boundary
 
-- The `v0.3.0-rc2` candidate has separate deterministic Controller and Edge
+- The `v0.3.0-rc3` source candidate has separate deterministic Controller and Edge
   enrollment archives, checksum-pinned bootstraps, exact allowlists, and tamper
   tests. A real PostgreSQL and fresh Ubuntu 24.04 run remains an acceptance gate.
 - The bounded Edge enrollment client accepts the canonical Controller shared
@@ -80,8 +90,8 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 - The common Teams process is restricted to RTP `30000-30063`; the isolated
   provider-egress process is restricted to `30064-30127`. Each receives only
   its own root-owned `0440` certificate copy and UID-scoped nftables authority.
-- Offline verification passes 58 carrier tests, 249 deployment tests, 82
-  Controller tests (12 PostgreSQL-only skips), 43 installer tests, 16 installer
+- Offline verification passes 58 carrier tests, 249 deployment tests, 83
+  Controller tests (12 PostgreSQL-only skips), 48 installer tests, 16 installer
   Ansible tests, and 42 Edge enrollment tests (one root-only tmpfs skip), plus
   syntax, digest-compatibility, whitespace, and independent security gates.
   This is source readiness, not a live-call or production claim.

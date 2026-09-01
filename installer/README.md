@@ -25,7 +25,7 @@ deployment.
   be `0700` and `authorized_keys` must be `0600`.
 - Two distinct public names, such as `cp1.voice.example.com` and
   `controller.voice.example.com`, both resolving exclusively to the same
-  declared globally routable IPv4 address.
+  declared globally routable IPv4 address, with no published AAAA records.
 - TCP 80 and 443 forwarded to this VM when it is behind NAT. The standalone
   candidate uses direct DNS, does not support an external load balancer, and
   deliberately opens no IPv6 ingress.
@@ -61,9 +61,21 @@ sudo ./installer/install.sh install \
   "ssh_source_cidrs": ["8.8.8.8/32"],
   "ssh_allowed_user": "ubuntu",
   "admin_username": "cpadmin",
-  "admin_email": "admin@example.com"
+  "admin_email": "admin@example.com",
+  "acme_email": "certificates@example.com"
 }
 ```
+
+`acme_email` is the Let's Encrypt ACME account contact. For compatibility with
+an older protected answer file it defaults to the validated `admin_email`, but
+every new interactive installation asks for it explicitly and offers the
+administrator email as the default.
+
+The rc3 ledger schema deliberately refuses resume/reconcile of an rc2-managed
+installation. An rc2 host may already have an alternate-CA certificate cached;
+silently reusing that leaf would not prove the new Let's Encrypt-only contract.
+This candidate therefore requires a fresh rc3 host until a separately reviewed
+certificate migration exists.
 
 Unknown keys and non-standalone modes fail closed. Passwords and application
 secrets are generated locally and are never accepted through the answer file.
@@ -80,7 +92,8 @@ Before that confirmation, the read-only preflight requires:
 - no existing listeners on TCP 80, 443, 5432, 6432, or 8000;
 - any listener on TCP 22 to be owned exclusively by `sshd`; and
 - both the distinct node and shared FQDNs to resolve over IPv4 exclusively to
-  the public IPv4 entered by the administrator.
+  the public IPv4 entered by the administrator, with no AAAA records because
+  this standalone profile deliberately exposes no IPv6 ingress.
 
 DNS is checked once before confirmation and again immediately before apt. The
 clock, reboot marker, and listener inventory are also rechecked at that final
@@ -121,6 +134,16 @@ log. If power is lost, progress emitted before the loss is already durable.
 Network-service units remain masked until the exact firewall and their managed
 configuration are ready, so a failed package phase cannot expose a default
 service after reboot.
+
+Caddy is configured with exactly one certificate issuer: the Let's Encrypt
+production ACME directory. It registers with the validated `acme_email`,
+requests public certificates for both configured FQDNs, redirects HTTP to
+HTTPS, stores its managed keys under the protected Caddy service data directory,
+and renews automatically. It has no ZeroSSL or local/self-signed fallback in
+this profile. The existing trusted HTTPS probes cause installation to fail
+closed when public issuance does not complete. TCP 80/443 reachability, fully
+propagated A records, and any CAA permission for `letsencrypt.org` remain the
+administrator's prerequisites.
 
 On success, the handoff prints and persists these endpoints:
 

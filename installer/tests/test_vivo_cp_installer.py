@@ -28,6 +28,7 @@ def valid_answers():
         "ssh_source_cidrs": ["8.8.8.8/32"],
         "admin_username": "cpadmin",
         "admin_email": "admin@example.com",
+        "acme_email": "certificates@example.com",
         "ssh_allowed_user": "ubuntu",
     }
 
@@ -74,9 +75,11 @@ class InstallerFixture:
             "dry_run": True,
             "ansible_playbook": "/usr/bin/true",
             "output_stream": io.StringIO(),
-            "dns_resolver": lambda host, port, family, socket_type: [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port))
-            ],
+            "dns_resolver": lambda host, port, family, socket_type: (
+                [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port))]
+                if family == socket.AF_INET
+                else []
+            ),
         }
         values.update(overrides)
         return installer.InstallerEngine(**values)
@@ -92,6 +95,43 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(
             normalized["ssh_source_cidrs"], ["8.8.4.4/32", "8.8.8.8/32"]
         )
+        self.assertEqual(normalized["acme_email"], "certificates@example.com")
+
+    def test_legacy_answers_default_acme_contact_to_admin_email(self):
+        answers = valid_answers()
+        del answers["acme_email"]
+        answers["admin_email"] = "Admin@Example.COM"
+        normalized = installer.validate_answers(answers)
+        self.assertEqual(normalized["acme_email"], "Admin@example.com")
+
+    def test_interactive_prompt_asks_for_acme_email_with_admin_default(self):
+        responses = iter(
+            (
+                "standalone",
+                "cp1.voice.example.com",
+                "controller.voice.example.com",
+                "1.1.1.1",
+                "8.8.8.8/32",
+                "cpadmin",
+                "admin@example.com",
+                "",
+                "ubuntu",
+            )
+        )
+        prompts = []
+
+        def answer(prompt):
+            prompts.append(prompt)
+            return next(responses)
+
+        answers = installer.prompt_answers(input_function=answer)
+        self.assertEqual(answers["acme_email"], "admin@example.com")
+        self.assertTrue(any("Let's Encrypt ACME contact email" in item for item in prompts))
+
+    def test_configuration_summary_names_fixed_letsencrypt_directory(self):
+        rendered = "\n".join(installer.configuration_summary_lines(valid_answers()))
+        self.assertIn("Let's Encrypt ACME email: certificates@example.com", rendered)
+        self.assertIn(installer.LETS_ENCRYPT_PRODUCTION_DIRECTORY, rendered)
 
     def test_join_modes_are_explicitly_refused(self):
         for mode in ("join-cp2", "join-cp3", "witness", "ha"):
@@ -124,17 +164,34 @@ class ValidationTests(unittest.TestCase):
         answers = valid_answers()
 
         def matching_resolver(host, port, family, socket_type):
+            if family == socket.AF_INET6:
+                return []
             return [(family, socket_type, 6, "", ("1.1.1.1", port))]
 
         resolved = installer.validate_answer_dns(answers, resolver=matching_resolver)
         self.assertEqual(set(resolved), {answers["node_fqdn"], answers["shared_fqdn"]})
 
         def mismatching_resolver(host, port, family, socket_type):
+            if family == socket.AF_INET6:
+                return []
             address = "1.1.1.1" if host == answers["node_fqdn"] else "8.8.8.8"
             return [(family, socket_type, 6, "", (address, port))]
 
         with self.assertRaisesRegex(installer.InstallerError, "must resolve exclusively"):
             installer.validate_answer_dns(answers, resolver=mismatching_resolver)
+
+    def test_published_aaaa_records_are_refused(self):
+        answers = valid_answers()
+
+        def dual_stack_resolver(host, port, family, socket_type):
+            if family == socket.AF_INET6:
+                return [
+                    (family, socket_type, 6, "", ("2001:4860:4860::8888", port, 0, 0))
+                ]
+            return [(family, socket_type, 6, "", ("1.1.1.1", port))]
+
+        with self.assertRaisesRegex(installer.InstallerError, "must not publish IPv6 AAAA"):
+            installer.validate_answer_dns(answers, resolver=dual_stack_resolver)
 
     def test_unsafe_network_and_identity_values_are_refused(self):
         cases = (
@@ -143,6 +200,7 @@ class ValidationTests(unittest.TestCase):
             ("ssh_source_cidrs", ["8.8.8.0/24"]),
             ("admin_username", "root"),
             ("admin_email", "Name <admin@example.com>"),
+            ("acme_email", "Name <certificates@example.com>"),
             ("ssh_allowed_user", "root"),
         )
         for key, value in cases:
@@ -173,6 +231,16 @@ class ValidationTests(unittest.TestCase):
     def test_state_path_cannot_escape_root(self):
         with self.assertRaisesRegex(installer.InstallerError, "must not contain"):
             installer.InstallerPaths(root="/tmp/safe", state_dir="/../../escape")
+
+    def test_rc2_ledger_schema_is_refused_by_letsencrypt_only_rc3(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ledger.json"
+            ledger = installer.PhaseLedger.create(path)
+            value = dict(ledger.value)
+            value["schema_version"] = 3
+            installer.atomic_write_json(path, value)
+            with self.assertRaisesRegex(installer.InstallerError, "unsupported schema"):
+                installer.PhaseLedger.load(path)
 
     def test_dry_run_defaults_are_isolated_and_explicit(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -551,6 +619,9 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(observed["vars"][0]["cp_ssh_allowed_user"], "ubuntu")
             self.assertEqual(
                 observed["vars"][0]["cp_ingress_server_name"], "controller.voice.example.com"
+            )
+            self.assertEqual(
+                observed["vars"][0]["cp_acme_email"], "certificates@example.com"
             )
             self.assertEqual(
                 observed["vars"][0]["cp_controller_allowed_hosts"],

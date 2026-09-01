@@ -1,5 +1,22 @@
 # CP1 controller release notes
 
+## Let's Encrypt-only Controller HTTPS
+
+- Adds a separately validated ACME contact email to the interactive and
+  answer-file installer contracts.
+- Pins Caddy to the Let's Encrypt production ACME directory as its single
+  certificate issuer for both the unique Controller VM FQDN and stable shared
+  FQDN, with no alternate public CA or local/self-signed fallback.
+- Rejects published AAAA records because the standalone profile deliberately
+  exposes only IPv4 ingress, and retains trusted HTTPS probes so incomplete
+  public issuance fails installation closed.
+- Leaves certificate storage and automatic renewal under Caddy's managed
+  service lifecycle. Future Teams/SBC signaling certificates remain outside
+  this Controller-web certificate scope.
+- Advances the installer ledger schema so rc2 resume/reconcile is refused;
+  existing alternate-CA certificate storage is not mislabeled as converted to
+  the new Let's Encrypt-only contract.
+
 ## Release-matched operator documentation
 
 - Adds staff-only HTML configuration guidance at `/docs/` using the existing Django

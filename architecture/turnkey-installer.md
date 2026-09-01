@@ -68,7 +68,8 @@ installer.
 
 The initial standalone controller uses:
 
-- Caddy for public HTTPS and automatic public-certificate renewal;
+- Caddy pinned to the Let's Encrypt production ACME directory as its single
+  Controller-web certificate issuer, with automatic public-certificate renewal;
 - a rootful, systemd-managed Podman Quadlet for the immutable Django/Gunicorn
   application image;
 - PgBouncer on loopback;
@@ -125,10 +126,15 @@ not remove failed nodes. An external load balancer may add health removal and
 cookie affinity.
 
 The current standalone candidate supports direct DNS only: both its node FQDN
-and shared FQDN must resolve exclusively to CP1's declared public IPv4 address,
-and Caddy obtains certificates for both names. External-load-balancer mode is
-not offered until its TLS termination/re-encryption, health-check, forwarding,
-and trusted-proxy contract is explicitly selected and qualified.
+and shared FQDN must resolve exclusively to CP1's declared public IPv4 address
+and publish no AAAA record. The installer separately asks for a Let's Encrypt
+ACME contact (defaulting to the validated operator email), and Caddy obtains and
+renews certificates for both names through that one production issuer. No
+alternate public CA or local/self-signed fallback is configured. The rc3 ledger
+also refuses rc2 resume/reconcile because an earlier host may already cache a
+different issuer's certificate. External-load-balancer mode is not offered
+until its TLS termination/re-encryption, health-check, forwarding, and
+trusted-proxy contract is explicitly selected and qualified.
 
 The target database design is PostgreSQL under Patroni with an mTLS-protected
 etcd distributed configuration store:

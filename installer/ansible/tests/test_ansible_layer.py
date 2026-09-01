@@ -62,7 +62,11 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
             "cp_shared_fqdn",
             "cp_public_ipv4",
             "cp_ingress_server_name == cp_shared_fqdn",
+            "cp_acme_email is defined",
+            "cp_acme_email is match",
             "resolve exclusively to",
+            "must not publish an IPv6 AAAA record",
+            "socket.AF_INET6",
             "address.is_global",
         ):
             self.assertIn(token, tasks)
@@ -235,10 +239,19 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
         self.assertIn("https://{{ cp_shared_fqdn }}:443", caddyfile)
         self.assertIn("https://{{ cp_node_fqdn }}:443", caddyfile)
         self.assertIn("admin off", caddyfile)
+        self.assertEqual(caddyfile.count("cert_issuer acme"), 1)
+        self.assertIn(
+            "dir https://acme-v02.api.letsencrypt.org/directory", caddyfile
+        )
+        self.assertIn("email {{ cp_acme_email | to_json }}", caddyfile)
+        self.assertNotIn("zerossl", caddyfile.lower())
+        self.assertNotIn("tls internal", caddyfile.lower())
         self.assertIn("@edge_api path /api/edge/*", caddyfile)
         self.assertIn("request_body @edge_api", caddyfile)
         self.assertIn("max_size 16384B", caddyfile)
         self.assertIn("':2019' not in cp_caddy_listeners.stdout", tasks)
+        self.assertIn("Require only the Let's Encrypt production ACME issuer", tasks)
+        self.assertIn("cp_caddy_tls_policies[0].issuers | length == 1", tasks)
 
     def test_post_install_checks_readiness_recovery_docs_and_node_name(self):
         playbook = read("install-controller.yml")

@@ -58,6 +58,13 @@
       - cp_ingress_server_name == cp_shared_fqdn
       - cp_ingress_https_port | int == 443
       - not (cp_ingress_local_tls | bool)
+      - cp_acme_email is defined
+      - cp_acme_email is string
+      - cp_acme_email | length <= 254
+      - cp_acme_email is match('^[A-Za-z0-9.!#$%&''*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+$')
+      - cp_acme_email.split('@') | length == 2
+      - cp_acme_email.split('@')[0] | length <= 64
+      - cp_acme_email.split('@')[1] is match(cp_public_fqdn_pattern)
       - cp_controller_allowed_hosts.split(',') | map('trim') | list | unique | length == 4
       - "'127.0.0.1' in (cp_controller_allowed_hosts.split(',') | map('trim') | list)"
       - "'localhost' in (cp_controller_allowed_hosts.split(',') | map('trim') | list)"
@@ -66,7 +73,7 @@
       - >-
         cp_controller_csrf_origins.split(',') | map('trim') | list | sort ==
         (['https://' ~ cp_node_fqdn, 'https://' ~ cp_shared_fqdn] | sort)
-    fail_msg: Hostname, public FQDN, HTTPS, Allowed-Hosts, or CSRF settings are invalid.
+    fail_msg: Hostname, public FQDN, ACME, HTTPS, Allowed-Hosts, or CSRF settings are invalid.
   vars:
     cp_public_fqdn_pattern: '^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
     cp_ipv4_address_pattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})$'
@@ -196,6 +203,67 @@
       {{ item.item }} must resolve exclusively to {{ cp_public_ipv4 }} before
       public certificate enrollment.
   loop: "{{ cp_public_fqdn_resolutions.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: cp_require_public_dns | bool
+
+- name: Recheck that neither public FQDN publishes an IPv6 AAAA record
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import socket
+        import sys
+
+        try:
+            records = socket.getaddrinfo(
+                sys.argv[1], 443, socket.AF_INET6, socket.SOCK_STREAM
+            )
+        except socket.gaierror as exc:
+            no_data = {
+                code
+                for code in (
+                    getattr(socket, "EAI_NONAME", None),
+                    getattr(socket, "EAI_NODATA", None),
+                    getattr(socket, "EAI_ADDRFAMILY", None),
+                )
+                if code is not None
+            }
+            if exc.errno in no_data:
+                raise SystemExit(0)
+            print("IPv6 DNS lookup failed: %s" % exc, file=sys.stderr)
+            raise SystemExit(2)
+
+        addresses = sorted(
+            {
+                record[4][0].split("%", 1)[0]
+                for record in records
+                if len(record) >= 5 and record[4] and record[4][0]
+            }
+        )
+        if addresses:
+            print(",".join(addresses))
+            raise SystemExit(1)
+      - "{{ item }}"
+  loop:
+    - "{{ cp_node_fqdn }}"
+    - "{{ cp_shared_fqdn }}"
+  register: cp_public_fqdn_ipv6_resolutions
+  changed_when: false
+  failed_when: false
+  when: cp_require_public_dns | bool
+
+- name: Require both public FQDNs to have no IPv6 AAAA records
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - item.stdout | trim | length == 0
+    fail_msg: >-
+      {{ item.item }} must not publish an IPv6 AAAA record because this
+      standalone profile exposes no IPv6 ingress; got
+      {{ item.stdout | trim if item.stdout | trim else item.stderr | trim }}.
+  loop: "{{ cp_public_fqdn_ipv6_resolutions.results }}"
   loop_control:
     label: "{{ item.item }}"
   when: cp_require_public_dns | bool

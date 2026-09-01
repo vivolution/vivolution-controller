@@ -1,5 +1,9 @@
 {
     admin off
+    cert_issuer acme {
+        dir https://acme-v02.api.letsencrypt.org/directory
+        email {{ cp_acme_email | to_json }}
+    }
 }
 
 https://{{ cp_shared_fqdn }}:443, https://{{ cp_node_fqdn }}:443 {
