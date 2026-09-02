@@ -2,4 +2,14 @@
 cp_pgdg_signing_key_fingerprint: B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
 cp_pgdg_signing_key_url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
 cp_pgdg_keyring_path: /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+cp_caddy_signing_key_fingerprint: 65760C51EDEA2017CEA2CA15155B6D79CA56EA34
+cp_caddy_signing_key_sha256: 783dfee04b19e851a928cd87b34710213ebbe7628f98d9f34595ab83be578c00
+cp_caddy_signing_key_url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+cp_caddy_keyring_path: /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+cp_caddy_repository_url: https://dl.cloudsmith.io/public/caddy/stable/deb/debian
+cp_caddy_package_version: '2.11.4'
 cp_journal_max_use: 512M
+cp_firewall_mode: infrastructure
+cp_timezone: Etc/UTC
+cp_ntp_mode: automatic
+cp_ntp_servers: []

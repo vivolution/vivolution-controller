@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "cp1_carrier_nsg_overlay.py"
 BICEP = ROOT / "cp1-carrier-nsg-overlay.bicep"
 PARAMETERS = ROOT / "cp1-carrier-nsg-overlay.bicepparam"
+TWILIO_PARAMETERS = ROOT / "cp1-carrier-nsg-overlay-twilio.bicepparam"
 MAIN_BICEP = ROOT / "main.bicep"
 
 SPEC = importlib.util.spec_from_file_location("cp1_carrier_nsg_overlay", SCRIPT)
@@ -157,13 +158,17 @@ def generation3_authority(action: str) -> dict:
     }
 
 
-def observations(action: str, state: str) -> dict:
+def observations(action: str, state: str, *, target_twilio_enabled: bool = False) -> dict:
+    target_rules = overlay._target_overlay_rules(target_twilio_enabled)
+    target_by_name = {rule["name"]: rule for rule in target_rules}
     cp1 = list(overlay.CP1_BASE_RULES)
     if state == "EXACT":
-        cp1 += list(overlay.OVERLAY_RULES)
+        cp1 += list(target_rules)
+    elif state == "DISABLED":
+        cp1 += list(overlay.ALWAYS_OVERLAY_RULES)
     elif state == "PARTIAL":
-        cp1 += [overlay.OVERLAY_RULES[0]]
-    present = {rule["name"] for rule in cp1} & set(overlay.OVERLAY_BY_NAME)
+        cp1 += [target_rules[0]]
+    present = {rule["name"] for rule in cp1} & set(target_by_name)
     return {
         "account": {
             "id": overlay.EXPECTED_SUBSCRIPTION_ID,
@@ -176,6 +181,10 @@ def observations(action: str, state: str) -> dict:
         "g2Rules": {
             node: with_etags(rules)
             for node, rules in overlay.G2_RULES_BY_NODE.items()
+        },
+        "g3Rules": {
+            node: with_etags(rules)
+            for node, rules in overlay.G3_RULES_BY_NODE.items()
         },
         "generation3Authority": generation3_authority(action),
         "nodes": [node_observation(node, action) for node in overlay.NODE_SPECS],
@@ -195,7 +204,7 @@ def observations(action: str, state: str) -> dict:
                         "changeType": "NoChange" if name in present else "Create",
                         "resourceId": overlay._rule_id(name),
                     }
-                    for name in sorted(overlay.OVERLAY_BY_NAME)
+                    for name in sorted(target_by_name)
                 ],
                 "status": "Succeeded",
             }
@@ -211,18 +220,71 @@ class OverlayTests(unittest.TestCase):
             overlay.compile_package(),
             {
                 "bicepCompilerVersion": "0.46.1.21595",
-                "compiledParametersSha256": overlay.EXPECTED_COMPILED_PARAMETERS_SHA256,
+                "compiledParametersSha256": overlay.EXPECTED_COMPILED_PARAMETERS_SHA256[False],
                 "compiledTemplateSha256": overlay.EXPECTED_COMPILED_TEMPLATE_SHA256,
+                "twilioEnabled": False,
+            },
+        )
+        self.assertEqual(
+            overlay.compile_package(True),
+            {
+                "bicepCompilerVersion": "0.46.1.21595",
+                "compiledParametersSha256": overlay.EXPECTED_COMPILED_PARAMETERS_SHA256[True],
+                "compiledTemplateSha256": overlay.EXPECTED_COMPILED_TEMPLATE_SHA256,
+                "twilioEnabled": True,
             },
         )
         source = BICEP.read_text(encoding="utf-8")
-        self.assertEqual(source.count("Microsoft.Network/networkSecurityGroups/securityRules@2023-11-01"), 2)
+        self.assertEqual(source.count("Microsoft.Network/networkSecurityGroups/securityRules@2023-11-01"), 17)
+        self.assertEqual(source.count("= if (twilioEnabled)"), 3)
+        self.assertIn("param twilioEnabled bool", source)
+        self.assertIn("param twilioEnabled = false", PARAMETERS.read_text(encoding="utf-8"))
+        self.assertIn(
+            "param twilioEnabled = true",
+            TWILIO_PARAMETERS.read_text(encoding="utf-8"),
+        )
         self.assertIn("priority: 320", source)
         self.assertIn("priority: 330", source)
+        self.assertIn("priority: 340", source)
+        self.assertIn("priority: 1200", source)
+        self.assertIn("priority: 1210", source)
         self.assertIn("'10.20.2.6/32'", source)
         self.assertIn("'10.20.2.7/32'", source)
         self.assertIn("sourcePortRange: '20000-20255'", source)
         self.assertIn("destinationPortRange: '30000-30127'", source)
+        self.assertIn("sourceAddressPrefix: '168.86.128.0/18'", source)
+        self.assertIn("destinationAddressPrefix: '168.86.128.0/18'", source)
+        self.assertIn("sourcePortRange: '10000-60000'", source)
+        self.assertIn("destinationPortRange: '10000-60000'", source)
+        self.assertIn("sourcePortRange: '30000-30127'", source)
+        self.assertIn("direction: 'Outbound'", source)
+        self.assertIn("name: 'DenyAllCp1Outbound'", source)
+        self.assertIn("priority: 4096", source)
+        for dependency in (
+            "AllowCp1AzureDhcpOutbound",
+            "AllowCp1AzureDnsUdpOutbound",
+            "AllowCp1AzureDnsTcpOutbound",
+            "AllowCp1AzureWireServerOutbound",
+            "AllowCp1AzureImdsOutbound",
+            "AllowCp1NtpOutbound",
+            "AllowCp1WebOutbound",
+            "AllowGeneration2FixtureSignalingOutbound",
+            "AllowGeneration2FixtureMediaOutbound",
+            "AllowGeneration3CarrierSignalingOutbound",
+            "AllowGeneration3CarrierMediaOutbound",
+        ):
+            self.assertIn(dependency, source)
+        for signaling_range in (
+            "54.172.60.0/30",
+            "54.244.51.0/30",
+            "54.171.127.192/30",
+            "35.156.191.128/30",
+            "54.65.63.192/30",
+            "54.169.127.128/30",
+            "54.252.254.64/30",
+            "177.71.206.192/30",
+        ):
+            self.assertIn(signaling_range, source)
         self.assertNotIn("0.0.0.0/0", source)
         self.assertTrue(PARAMETERS.exists())
 
@@ -238,8 +300,11 @@ class OverlayTests(unittest.TestCase):
         package = overlay.compile_package()
         plan = overlay.create_plan("apply", observations("apply", "ABSENT"), package, now=NOW)
         self.assertEqual(plan["overlayState"], "ABSENT")
+        self.assertFalse(plan["targetTwilioEnabled"])
         self.assertEqual(len(plan["nodeBindings"]), 5)
-        self.assertEqual(len(plan["providerWhatIf"]["changes"]), 2)
+        self.assertEqual(
+            len(plan["providerWhatIf"]["changes"]), len(overlay.OVERLAY_RULES)
+        )
         self.assertTrue(all(item["changeType"] == "Create" for item in plan["providerWhatIf"]["changes"]))
         self.assertEqual(plan["budget"]["incrementalOverlayCostUsd"], "0.00")
         self.assertEqual(plan["budget"]["budgetScope"], overlay._resource_group_id())
@@ -258,6 +323,9 @@ class OverlayTests(unittest.TestCase):
         bad["g2Rules"][overlay.G2_NODES[0]][0]["priority"] = 999
         cases.append(bad)
         bad = observations("apply", "ABSENT")
+        bad["g3Rules"][overlay.G3_NODES[0]][0]["destinationPortRange"] = "*"
+        cases.append(bad)
+        bad = observations("apply", "ABSENT")
         bad["whatIf"]["changes"][0]["changeType"] = "Modify"
         cases.append(bad)
         bad = observations("apply", "ABSENT")
@@ -266,6 +334,22 @@ class OverlayTests(unittest.TestCase):
         for index, value in enumerate(cases):
             with self.subTest(index=index), self.assertRaises(overlay.OverlayError):
                 overlay.create_plan("apply", value, overlay.compile_package(), now=NOW)
+
+    def test_generation3_rule_inventory_validator_is_exact_and_bounded(self):
+        node = overlay.G3_NODES[0]
+        raw = json.dumps(overlay.G3_RULES_BY_NODE[node])
+        evidence = overlay.validate_generation3_rule_inventory(node, raw)
+        self.assertEqual(evidence["ruleCount"], 19)
+        self.assertEqual(
+            evidence["status"], "GENERATION3_DIRECT_ROUTING_NSG_VALID"
+        )
+
+        drifted = copy.deepcopy(overlay.G3_RULES_BY_NODE[node])
+        drifted[0]["destinationPortRange"] = "*"
+        with self.assertRaises(overlay.OverlayError):
+            overlay.validate_generation3_rule_inventory(node, json.dumps(drifted))
+        with self.assertRaises(overlay.OverlayError):
+            overlay.validate_generation3_rule_inventory(node, "[" + " " * (256 * 1024))
 
     def test_partial_overlay_has_mixed_apply_recovery_and_fresh_teardown(self):
         package = overlay.compile_package()
@@ -282,6 +366,55 @@ class OverlayTests(unittest.TestCase):
         )
         self.assertEqual(teardown_plan["overlayState"], "PARTIAL")
         self.assertEqual(len(teardown_plan["overlayRules"]), 1)
+
+    def test_disabled_target_plans_etag_removal_and_teardown_accepts_superset(self):
+        value = observations("apply", "EXACT")
+        value["cp1Rules"] = with_etags(
+            list(overlay.CP1_BASE_RULES) + list(overlay.ALL_OVERLAY_RULES)
+        )
+        disabled = overlay.create_plan(
+            "apply", value, overlay.compile_package(False), now=NOW
+        )
+        self.assertEqual(disabled["overlayState"], "SUPERSET")
+        self.assertEqual(len(disabled["conditionalDeletes"]), 3)
+
+        teardown = observations("teardown", "EXACT")
+        teardown["cp1Rules"] = with_etags(
+            list(overlay.CP1_BASE_RULES) + list(overlay.ALL_OVERLAY_RULES)
+        )
+        plan = overlay.create_plan(
+            "teardown", teardown, overlay.compile_package(), now=NOW
+        )
+        self.assertEqual(plan["overlayState"], "SUPERSET")
+        self.assertEqual(len(plan["overlayRules"]), len(overlay.ALL_OVERLAY_RULES))
+
+    def test_later_twilio_enable_is_separately_digest_and_what_if_bound(self):
+        package = overlay.compile_package(True)
+        before = observations(
+            "apply", "DISABLED", target_twilio_enabled=True
+        )
+        plan = overlay.create_plan("apply", before, package, now=NOW)
+        self.assertTrue(plan["targetTwilioEnabled"])
+        self.assertEqual(plan["conditionalDeletes"], [])
+        self.assertEqual(plan["overlayState"], "PARTIAL")
+        changes = {
+            item["resourceId"].rsplit("/", 1)[-1].lower(): item["changeType"]
+            for item in plan["providerWhatIf"]["changes"]
+        }
+        self.assertEqual(
+            {
+                changes[rule["name"].lower()]
+                for rule in overlay.TWILIO_OVERLAY_RULES
+            },
+            {"Create"},
+        )
+        self.assertEqual(
+            {
+                changes[rule["name"].lower()]
+                for rule in overlay.ALWAYS_OVERLAY_RULES
+            },
+            {"NoChange"},
+        )
 
     def test_budget_uses_exact_active_rg_current_spend_and_no_filter(self):
         package = overlay.compile_package()
@@ -435,6 +568,46 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         self.assertEqual(commands[0][0:4], ["az", "deployment", "group", "create"])
 
+    def test_apply_disabled_mode_etag_removes_only_conditional_twilio_rules(self):
+        package = overlay.compile_package(False)
+        before = observations("apply", "EXACT")
+        before["cp1Rules"] = with_etags(
+            list(overlay.CP1_BASE_RULES) + list(overlay.ALL_OVERLAY_RULES)
+        )
+        after = observations("apply", "EXACT")
+        plan = overlay.create_plan("apply", before, package, now=NOW)
+        commands = []
+
+        def runner(argv):
+            commands.append(list(argv))
+            if argv[0:4] == ["az", "deployment", "group", "create"]:
+                return json.dumps(
+                    {
+                        "id": rid(
+                            "Microsoft.Resources/deployments", overlay.DEPLOYMENT_NAME
+                        ),
+                        "name": overlay.DEPLOYMENT_NAME,
+                        "provisioningState": "Succeeded",
+                    }
+                )
+            return ""
+
+        with mock.patch.object(
+            overlay, "collect_observations", side_effect=[before, after]
+        ):
+            result = overlay.apply_plan(
+                plan, runner=runner, now=NOW + timedelta(minutes=1)
+            )
+        self.assertFalse(result["twilioEnabled"])
+        self.assertEqual(commands[0][0:4], ["az", "deployment", "group", "create"])
+        self.assertEqual(len(commands[1:]), 3)
+        self.assertTrue(
+            all(command[0:4] == ["az", "rest", "--method", "delete"] for command in commands[1:])
+        )
+        self.assertTrue(
+            all(any(value.startswith("If-Match=") for value in command) for command in commands[1:])
+        )
+
     def test_teardown_uses_etag_deletes_and_proves_absence(self):
         package = overlay.compile_package()
         before = observations("teardown", "EXACT")
@@ -449,7 +622,7 @@ class OverlayTests(unittest.TestCase):
         with mock.patch.object(overlay, "collect_observations", side_effect=[before, after]):
             result = overlay.apply_plan(plan, runner=runner, now=NOW + timedelta(minutes=1))
         self.assertEqual(result["status"], "CP1_CARRIER_NSG_OVERLAY_REMOVED")
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), len(overlay.OVERLAY_RULES))
         self.assertTrue(all(command[0:4] == ["az", "rest", "--method", "delete"] for command in commands))
         self.assertTrue(all(any(value.startswith("If-Match=") for value in command) for command in commands))
 

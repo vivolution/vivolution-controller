@@ -1,0 +1,219 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Vivolution Cloud-Neutral Controller HA</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f8fafc;
+    --fg: #172033;
+    --muted: #5b6475;
+    --line: #64748b;
+    --neutral: #e2e8f0;
+    --input: #bfdbfe;
+    --process: #c7d2fe;
+    --storage: #99f6e4;
+    --external: #fde68a;
+    --risk: #fecaca;
+    --white: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f172a;
+      --fg: #e5e7eb;
+      --muted: #a3adbd;
+      --line: #94a3b8;
+      --neutral: #334155;
+      --input: #1d4ed8;
+      --process: #4338ca;
+      --storage: #0f766e;
+      --external: #92400e;
+      --risk: #991b1b;
+      --white: #111827;
+    }
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+      "Segoe UI", sans-serif;
+  }
+  main {
+    max-width: 1600px;
+    margin: 24px auto;
+    padding: 0 20px 32px;
+  }
+  svg {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+  .title { font-size: 28px; font-weight: 700; fill: var(--fg); }
+  .subtitle { font-size: 15px; fill: var(--muted); }
+  .section { font-size: 17px; font-weight: 700; fill: var(--fg); }
+  .label { font-size: 15px; font-weight: 650; fill: var(--fg); }
+  .body { font-size: 13px; fill: var(--fg); }
+  .small { font-size: 12px; fill: var(--muted); }
+  .tiny { font-size: 11px; fill: var(--muted); }
+  .node { stroke: var(--line); stroke-width: 1.4; }
+  .neutral { fill: var(--neutral); }
+  .input { fill: var(--input); }
+  .process { fill: var(--process); }
+  .storage { fill: var(--storage); }
+  .external { fill: var(--external); }
+  .risk { fill: var(--risk); }
+  .surface { fill: var(--white); }
+  .edge { stroke: var(--line); stroke-width: 2; fill: none; }
+  .edge-soft { stroke: var(--line); stroke-width: 1.5; fill: none; stroke-dasharray: 7 6; }
+  .edge-strong { stroke: #334155; stroke-width: 2.5; fill: none; }
+  .zone { fill: none; stroke: var(--line); stroke-width: 1.3; stroke-dasharray: 8 6; }
+  .pill { stroke: var(--line); stroke-width: 1; }
+</style>
+<main>
+  <svg viewBox="0 0 1600 1240" role="img" aria-labelledby="diagram-title diagram-desc">
+    <title id="diagram-title">Vivolution cloud-neutral controller high-availability architecture</title>
+    <desc id="diagram-desc">A cloud-neutral Ubuntu controller cluster with one, two, or three controller nodes, public mutual TLS replication, round-robin DNS or an optional HTTPS load balancer, and quorum-based automatic failover when three nodes are present.</desc>
+
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--line)" />
+      </marker>
+      <marker id="arrow-strong" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155" />
+      </marker>
+    </defs>
+
+    <!-- Connectors are intentionally drawn before nodes. -->
+    <path class="edge" marker-end="url(#arrow)" d="M800 122 L800 166" />
+    <path class="edge-soft" marker-end="url(#arrow)" d="M800 246 C690 260 535 264 440 300" />
+    <path class="edge-soft" marker-end="url(#arrow)" d="M800 246 C910 260 1065 264 1160 300" />
+
+    <!-- Ingress choice to common backend fan-out bus. -->
+    <path class="edge" marker-end="url(#arrow)" d="M440 406 L440 430 L800 430 L800 480" />
+    <path class="edge" marker-end="url(#arrow)" d="M1160 406 L1160 430 L800 430 L800 480" />
+    <path class="edge" d="M280 480 L1320 480" />
+    <path class="edge" marker-end="url(#arrow)" d="M280 480 L280 528" />
+    <path class="edge" marker-end="url(#arrow)" d="M800 480 L800 528" />
+    <path class="edge" marker-end="url(#arrow)" d="M1320 480 L1320 528" />
+
+    <!-- Public mTLS control and replication mesh. -->
+    <path class="edge-strong" marker-start="url(#arrow-strong)" marker-end="url(#arrow-strong)" d="M492 640 L588 640" />
+    <path class="edge-strong" marker-start="url(#arrow-strong)" marker-end="url(#arrow-strong)" d="M1012 640 L1108 640" />
+    <path class="edge-soft" marker-start="url(#arrow)" marker-end="url(#arrow)" d="M492 752 C650 840 950 840 1108 752" />
+
+    <!-- Database replication paths. -->
+    <path class="edge" marker-end="url(#arrow)" d="M492 808 L588 808" />
+    <path class="edge" marker-end="url(#arrow)" d="M1012 808 L1108 808" />
+
+    <!-- Title -->
+    <text class="title" x="800" y="42" text-anchor="middle">Vivolution Cloud-Neutral Controller HA</text>
+    <text class="subtitle" x="800" y="70" text-anchor="middle">Admin supplies Ubuntu VMs · one interactive installer · no Azure/AWS/GCP/VMware provisioning dependency</text>
+
+    <!-- Clients and shared name -->
+    <rect class="node input" x="560" y="86" width="480" height="76" rx="14" />
+    <text class="label" x="800" y="116" text-anchor="middle">Administrators · Edge Agents · Automation</text>
+    <text class="small" x="800" y="142" text-anchor="middle">HTTPS access to the shared controller service</text>
+
+    <rect class="node external" x="540" y="166" width="520" height="80" rx="14" />
+    <text class="section" x="800" y="197" text-anchor="middle">controller.voice.vivolution.ae</text>
+    <text class="small" x="800" y="224" text-anchor="middle">Choose one ingress model below</text>
+
+    <!-- Ingress options -->
+    <rect class="node external" x="155" y="300" width="570" height="106" rx="14" />
+    <text class="label" x="440" y="331" text-anchor="middle">Option A · Public DNS round-robin</text>
+    <text class="body" x="440" y="359" text-anchor="middle">A records: 1.1.1.1 · 2.2.2.2 · 3.3.3.3</text>
+    <text class="small" x="440" y="384" text-anchor="middle">Simple distribution · no native health removal or cookie affinity</text>
+
+    <rect class="node external" x="875" y="300" width="570" height="106" rx="14" />
+    <text class="label" x="1160" y="331" text-anchor="middle">Option B · External HTTPS load balancer</text>
+    <text class="body" x="1160" y="359" text-anchor="middle">Shared FQDN points to the LB virtual IP</text>
+    <text class="small" x="1160" y="384" text-anchor="middle">HTTPS health checks · failed-node removal · cookie persistence</text>
+
+    <rect class="node neutral" x="470" y="444" width="660" height="54" rx="12" />
+    <text class="label" x="800" y="468" text-anchor="middle">Every advertised node serves HTTPS</text>
+    <text class="small" x="800" y="488" text-anchor="middle">Inter-controller traffic bypasses the LB and uses each node's own FQDN</text>
+
+    <!-- Controller cluster zone -->
+    <rect class="zone" x="55" y="510" width="1490" height="390" rx="18" />
+    <text class="section" x="80" y="540">Controller cluster · public mTLS mesh</text>
+    <text class="small" x="1520" y="540" text-anchor="end">Ubuntu Server 24.04 LTS on every node</text>
+
+    <!-- CP1 -->
+    <rect class="node surface" x="68" y="558" width="424" height="318" rx="16" />
+    <rect class="node input" x="84" y="576" width="392" height="66" rx="11" />
+    <text class="section" x="280" y="603" text-anchor="middle">CP1 · 1.1.1.1</text>
+    <text class="body" x="280" y="628" text-anchor="middle">cp1.voice.vivolution.ae</text>
+    <rect class="node process" x="84" y="658" width="392" height="58" rx="10" />
+    <text class="label" x="280" y="682" text-anchor="middle">HTTPS portal · API · Agent gateway</text>
+    <text class="small" x="280" y="704" text-anchor="middle">Active whenever node health permits</text>
+    <rect class="node neutral" x="84" y="730" width="392" height="50" rx="10" />
+    <text class="label" x="280" y="760" text-anchor="middle">HA coordinator · quorum voter</text>
+    <rect class="node storage" x="84" y="794" width="392" height="58" rx="10" />
+    <text class="label" x="280" y="819" text-anchor="middle">PostgreSQL · current PRIMARY</text>
+    <text class="small" x="280" y="841" text-anchor="middle">Primary role can move after a safe failover</text>
+
+    <!-- CP2 -->
+    <rect class="node surface" x="588" y="558" width="424" height="318" rx="16" />
+    <rect class="node input" x="604" y="576" width="392" height="66" rx="11" />
+    <text class="section" x="800" y="603" text-anchor="middle">CP2 · 2.2.2.2</text>
+    <text class="body" x="800" y="628" text-anchor="middle">cp2.voice.vivolution.ae</text>
+    <rect class="node process" x="604" y="658" width="392" height="58" rx="10" />
+    <text class="label" x="800" y="682" text-anchor="middle">HTTPS portal · API · Agent gateway</text>
+    <text class="small" x="800" y="704" text-anchor="middle">Active application · database-aware routing</text>
+    <rect class="node neutral" x="604" y="730" width="392" height="50" rx="10" />
+    <text class="label" x="800" y="760" text-anchor="middle">HA coordinator · quorum voter</text>
+    <rect class="node storage" x="604" y="794" width="392" height="58" rx="10" />
+    <text class="label" x="800" y="819" text-anchor="middle">PostgreSQL · promotable REPLICA</text>
+    <text class="small" x="800" y="841" text-anchor="middle">Standby in the two-controller mode</text>
+
+    <!-- CP3 -->
+    <rect class="node surface" x="1108" y="558" width="424" height="318" rx="16" />
+    <rect class="node input" x="1124" y="576" width="392" height="66" rx="11" />
+    <text class="section" x="1320" y="603" text-anchor="middle">CP3 · 3.3.3.3</text>
+    <text class="body" x="1320" y="628" text-anchor="middle">cp3.voice.vivolution.ae</text>
+    <rect class="node process" x="1124" y="658" width="392" height="58" rx="10" />
+    <text class="label" x="1320" y="682" text-anchor="middle">HTTPS portal · API · Agent gateway</text>
+    <text class="small" x="1320" y="704" text-anchor="middle">Full controller when the third node exists</text>
+    <rect class="node external" x="1124" y="730" width="392" height="50" rx="10" />
+    <text class="label" x="1320" y="760" text-anchor="middle">HA coordinator · automatic witness vote</text>
+    <rect class="node storage" x="1124" y="794" width="392" height="58" rx="10" />
+    <text class="label" x="1320" y="819" text-anchor="middle">PostgreSQL · promotable REPLICA</text>
+    <text class="small" x="1320" y="841" text-anchor="middle">Participates in replication and 2-of-3 quorum</text>
+
+    <!-- Mesh labels in the gaps -->
+    <rect class="pill neutral" x="499" y="606" width="82" height="50" rx="10" />
+    <text class="tiny" x="540" y="627" text-anchor="middle">public</text>
+    <text class="tiny" x="540" y="645" text-anchor="middle">mTLS</text>
+    <rect class="pill neutral" x="1019" y="606" width="82" height="50" rx="10" />
+    <text class="tiny" x="1060" y="627" text-anchor="middle">public</text>
+    <text class="tiny" x="1060" y="645" text-anchor="middle">mTLS</text>
+
+    <!-- Operating modes -->
+    <text class="section" x="70" y="946">Installer-detected operating mode</text>
+
+    <rect class="node neutral" x="68" y="970" width="440" height="126" rx="14" />
+    <text class="label" x="288" y="1000" text-anchor="middle">1 controller · Standalone</text>
+    <text class="body" x="92" y="1031">CP1 runs the application and primary database.</text>
+    <text class="small" x="92" y="1056">No controller-level failover; backups remain mandatory.</text>
+    <text class="small" x="92" y="1080">A later installer run can join CP2 without rebuilding CP1.</text>
+
+    <rect class="node external" x="580" y="970" width="440" height="126" rx="14" />
+    <text class="label" x="800" y="1000" text-anchor="middle">2 controllers · Active / standby</text>
+    <text class="body" x="604" y="1031">CP1 primary; CP2 continuously replicated and promotable.</text>
+    <text class="small" x="604" y="1056">No quorum tie-breaker: promotion requires explicit fencing.</text>
+    <text class="small" x="604" y="1080">This prevents split-brain during a WAN partition.</text>
+
+    <rect class="node storage" x="1092" y="970" width="440" height="126" rx="14" />
+    <text class="label" x="1312" y="1000" text-anchor="middle">3 controllers · Automatic HA</text>
+    <text class="body" x="1116" y="1031">CP3 automatically completes a 2-of-3 quorum.</text>
+    <text class="small" x="1116" y="1056">One writable DB primary; two promotable replicas.</text>
+    <text class="small" x="1116" y="1080">Safe leader election and automatic failover are enabled.</text>
+
+    <!-- Important DNS/LB limitation -->
+    <rect class="node risk" x="68" y="1122" width="1464" height="88" rx="14" />
+    <text class="label" x="92" y="1152">Important ingress rule</text>
+    <text class="body" x="92" y="1177">Round-robin DNS does not perform live health removal or cookie affinity. Every advertised IP must serve HTTPS, and cached DNS may continue sending clients to a failed node until TTL expires.</text>
+    <text class="body" x="92" y="1198">Use the optional external HTTPS load balancer whenever health-based backend removal and sticky sessions are required.</text>
+  </svg>
+</main>

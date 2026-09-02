@@ -10,6 +10,10 @@ https://{{ cp_ingress_server_name }}:{{ cp_ingress_https_port }} {
     tls internal
 {% endif %}
     encode zstd gzip
+    @edge_api path /api/edge/*
+    request_body @edge_api {
+        max_size 16384B
+    }
     reverse_proxy 127.0.0.1:{{ cp_controller_web_port }}
 
     header {

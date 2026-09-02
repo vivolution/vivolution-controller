@@ -19,4 +19,24 @@ cp_carrier_gateway_source_ipv4_cidrs:
   - 10.20.2.7/32
 cp_carrier_gateway_tcp_port: 5061
 cp_carrier_gateway_edge_media_source_port_range: 20000-20255
-cp_carrier_gateway_udp_destination_port_range: 30000-30127
+# The two Asterisk processes have non-overlapping host RTP listeners.  Keep
+# these authorities separate so an Edge packet can never reach provider
+# egress and a provider packet can never reach the Teams-facing process.
+cp_carrier_gateway_ingress_rtp_port_range: 30000-30063
+cp_carrier_gateway_egress_rtp_port_range: 30064-30127
+cp_carrier_gateway_runtime_uid: 10003
+cp_carrier_gateway_egress_uid: 10004
+cp_carrier_gateway_controller_ipv4: 10.20.1.4
+cp_carrier_gateway_edge_signaling_destination_port: 15061
+cp_carrier_gateway_edge_media_destination_port_range: 20000-20255
+
+# Public provider authority is a second opt-in inside the carrier contract.
+# Per-customer profiles supply exact signaling/media authority; disabled
+# defaults retain no public route. Vendor-specific values belong only in an
+# example or customer profile, never in this core firewall contract.
+cp_carrier_gateway_provider_enabled: false
+cp_carrier_gateway_provider_signaling_ipv4_cidrs: []
+cp_carrier_gateway_provider_destination_ipv4_cidrs: []
+cp_carrier_gateway_provider_signaling_port: 0
+cp_carrier_gateway_provider_media_ipv4_cidrs: []
+cp_carrier_gateway_provider_remote_media_port_range: ''

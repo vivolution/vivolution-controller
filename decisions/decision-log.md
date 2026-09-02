@@ -135,3 +135,11 @@
 - Decision: Withdraw D-018's reproducible-qualification conclusion while retaining its folders as bounded historical functional evidence. Promote the repaired controller through the compatibility bridge and signed-only release, then require true bounded-state idempotency, exact-image rollback, signed tenant context, least-privilege database grants, Caddy isolation, committed/signed evidence, and a fail-closed Trivy dependency/OS package gate before restoring a local qualification claim.
 - Reason: The audit proved that the old Ansible `changed=0` recap hid PostgreSQL SCRAM changes and found material tenant-boundary, release, credential, evidence, and coverage gaps. Trivy also reports current High/Critical package findings without fixed versions; these remain explicit signed residual risk while every fixable High/Critical finding blocks acceptance.
 - Boundary: The repaired local management-plane foundation still does not establish Azure AMD64/Flexible Server/public TLS acceptance, application-level vulnerability completeness, enrollment/PKI, or a working SIP/media SBC product.
+
+## D-020 — Common Teams leg and generic customer SIP-trunk leg
+
+- Date: 2026-09-01
+- Status: Accepted
+- Decision: Keep the Microsoft Teams Direct Routing leg common across every Vivolution SBC Edge. Model the customer-facing leg as a generic, per-customer SIP-trunk contract covering signaling authority, transport, authentication, media encryption, codecs, number policy, network allowlists, limits, secrets and health checks. Twilio is one provider profile for Vivolution's own test tenant; du, e&, a customer PBX or another carrier can supply a different profile against the same contract.
+- Reason: Microsoft Teams interworking is the stable platform responsibility, while carrier and PBX choices belong to each customer. No provider should become a control-plane or SBC-runtime dependency.
+- Boundary: Provider-specific network authority and authoritative billing/CDR corroboration may use named adapters, but the generic call, authorization, rollback and evidence contracts must not hard-code Twilio. Live PSTN testing remains separately gated by credentials, licensing, destination, call-count and spend approval.

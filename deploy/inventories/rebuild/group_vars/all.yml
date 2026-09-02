@@ -34,6 +34,7 @@ cp_pgbouncer_server_login_retry: 2
 
 cp_controller_admin_username: cpadmin
 cp_controller_allowed_hosts: 127.0.0.1,localhost,vivo-cp1-lab
+cp_controller_origin: https://controller.lab.example.test
 cp_controller_csrf_origins: https://vivo-cp1-lab:8081
 cp_controller_cookie_secure: true
 cp_controller_trust_forwarded_proto: true

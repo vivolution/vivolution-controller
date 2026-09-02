@@ -1,0 +1,60 @@
+---
+# Public identity and the one isolated Azure DNS authority are immutable for
+# this bounded POC. Tenant/subscription/principal/address inputs remain
+# explicit inventory bindings and are rejected when absent.
+carrier_certificate_server_name: carrier.vivolution.ae
+carrier_certificate_acme_zone: acme-carrier.vivolution.ae
+carrier_certificate_acme_challenge_alias: _acme-challenge.carrier.vivolution.ae
+carrier_certificate_acme_challenge_target: _acme-challenge.acme-carrier.vivolution.ae
+carrier_certificate_dns_resource_group: DNS_Zones
+carrier_certificate_azure_subscription_id: ''
+carrier_certificate_azure_tenant_id: ''
+carrier_certificate_expected_cp1_principal_id: ''
+carrier_certificate_expected_public_ipv4: ''
+carrier_certificate_acme_email: ''
+carrier_certificate_azure_dns_resolver_ipv4: 168.63.129.16
+
+# Fresh controller-side Azure RBAC reconciliation is transferred as a signed,
+# expiring receipt. The Ed25519 seed never leaves the controller; CP1 receives
+# only the receipt and the separately pinned public key.
+carrier_certificate_rbac_receipt_controller_path: ''
+carrier_certificate_rbac_signer_public_key_controller_path: ''
+carrier_certificate_rbac_signing_key_id: ''
+carrier_certificate_rbac_signer_public_key_sha256: ''
+carrier_certificate_rbac_receipt_maximum_lifetime_seconds: 3600
+carrier_certificate_rbac_receipt_minimum_remaining_seconds: 60
+carrier_certificate_rbac_receipt_path: /etc/vivolution/carrier-certificate-rbac-receipt.json
+carrier_certificate_rbac_signer_public_key_path: /etc/vivolution/carrier-certificate-rbac-signer.pem
+carrier_certificate_operation_guard_path: /usr/local/libexec/vivolution-carrier-certificate/carrier-certificate-operation-guard
+
+# Reviewed, checksum-pinned ACME client. These values must move together only
+# after a separate artifact review.
+carrier_certificate_lego_version: 5.4.0
+carrier_certificate_lego_linux_amd64_archive_sha256: d3adf89392d606ce84d485c1cc20832edd42ace6ff9ced9dd3670d9d8b8aca38
+carrier_certificate_key_type: rsa2048
+carrier_certificate_renew_days: 30
+carrier_certificate_minimum_valid_seconds: 1209600
+
+carrier_certificate_runtime_user: vivolution-carrier
+carrier_certificate_runtime_uid: 10003
+carrier_certificate_runtime_gid: 10003
+carrier_certificate_rootless_home: /var/lib/vivolution/carrier-gateway/rootless-home
+carrier_certificate_rootless_runtime_dir: /run/user/10003
+carrier_certificate_rootless_unit: vivolution-carrier-gateway.service
+carrier_certificate_egress_group: vivolution-carrier-egress
+carrier_certificate_egress_runtime_gid: 10004
+carrier_certificate_egress_unit: vivolution-carrier-egress.service
+carrier_certificate_readiness_path: /usr/local/libexec/vivolution-carrier-gateway-readiness
+
+carrier_certificate_cache_root: /var/cache/vivolution-carrier-certificate
+carrier_certificate_state_root: /var/lib/vivolution-carrier-certificate
+carrier_certificate_acme_root: /var/lib/vivolution-carrier-certificate/acme
+carrier_certificate_rotation_root: /var/lib/vivolution-carrier-certificate/rotation
+carrier_certificate_libexec_root: /usr/local/libexec/vivolution-carrier-certificate
+carrier_certificate_pki_root: /etc/vivolution/carrier-gateway/pki
+carrier_certificate_path: /etc/vivolution/carrier-gateway/pki/carrier.fullchain.pem
+carrier_certificate_private_key_path: /etc/vivolution/carrier-gateway/pki/carrier.key
+carrier_certificate_egress_pki_root: /etc/vivolution/carrier-gateway/egress-pki
+carrier_certificate_egress_path: /etc/vivolution/carrier-gateway/egress-pki/carrier.fullchain.pem
+carrier_certificate_egress_private_key_path: /etc/vivolution/carrier-gateway/egress-pki/carrier.key
+carrier_certificate_public_ca_bundle_path: /etc/ssl/certs/ca-certificates.crt

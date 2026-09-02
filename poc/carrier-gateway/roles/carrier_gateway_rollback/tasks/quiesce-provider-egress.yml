@@ -1,0 +1,47 @@
+---
+- name: Inspect isolated provider-egress unit before restore
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=LoadState, --value, vivolution-carrier-egress.service]
+  register: carrier_gateway_provider_egress_load_state
+  changed_when: false
+  failed_when: >-
+    carrier_gateway_provider_egress_load_state.rc != 0 or
+    carrier_gateway_provider_egress_load_state.stdout | trim not in ['loaded', 'not-found']
+
+- name: Read isolated provider-egress PID before restore
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=MainPID, --value, vivolution-carrier-egress.service]
+  register: carrier_gateway_provider_egress_pid_before_stop
+  changed_when: false
+  when: carrier_gateway_provider_egress_load_state.stdout | trim == 'loaded'
+
+- name: Bind the pre-restore isolated provider-egress PID
+  ansible.builtin.set_fact:
+    carrier_gateway_provider_egress_previous_pid: >-
+      {{ carrier_gateway_provider_egress_pid_before_stop.stdout | default('0') | trim }}
+
+- name: Quiesce isolated provider egress before restoring its profile or credential
+  ansible.builtin.systemd_service:
+    name: vivolution-carrier-egress.service
+    state: stopped
+  when: carrier_gateway_provider_egress_load_state.stdout | trim == 'loaded'
+
+- name: Prove isolated provider egress is stably stopped
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=ActiveState, --value, vivolution-carrier-egress.service]
+  register: carrier_gateway_provider_egress_stopped_state
+  changed_when: false
+  failed_when: >-
+    carrier_gateway_provider_egress_stopped_state.rc != 0 or
+    carrier_gateway_provider_egress_stopped_state.stdout | trim not in ['inactive', 'failed']
+  when: carrier_gateway_provider_egress_load_state.stdout | trim == 'loaded'
+
+- name: Prove isolated provider egress has no live PID
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=MainPID, --value, vivolution-carrier-egress.service]
+  register: carrier_gateway_provider_egress_stopped_pid
+  changed_when: false
+  failed_when: >-
+    carrier_gateway_provider_egress_stopped_pid.rc != 0 or
+    carrier_gateway_provider_egress_stopped_pid.stdout | trim != '0'
+  when: carrier_gateway_provider_egress_load_state.stdout | trim == 'loaded'

@@ -1,0 +1,3 @@
+---
+cp_firewall_mode: infrastructure
+cp_firewall_ssh_source_ipv4_cidrs: []

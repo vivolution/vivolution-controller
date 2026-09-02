@@ -33,13 +33,14 @@ EXPECTED_LOCATION = "uaenorth"
 EXPECTED_CP1_NSG = "viv-sbc-poc-cp1-nsg"
 EXPECTED_BICEP_VERSION = "0.46.1.21595"
 EXPECTED_COMPILED_TEMPLATE_SHA256 = (
-    "2ef32a468c60c849551ab2a63d3c8f827ed7919c4c0252742c01b6a22c47fc58"
+    "17b87ef7151683f0d0617d1bf215944134ce4b64ed0938eaf38ad0a7d947289f"
 )
-EXPECTED_COMPILED_PARAMETERS_SHA256 = (
-    "d17eb0b8af0de79eba8a053beabac4e83a523f89bf572fda2d11149d766dc6ab"
-)
+EXPECTED_COMPILED_PARAMETERS_SHA256 = {
+    False: "14c02a5c5fc240f126c835569d46b47a54d94a4c17feee17b9032b911fd1d696",
+    True: "89384cdfcfb5243f075c11d4b30555955125b6b7563acbca49b262e63f80102a",
+}
 DEPLOYMENT_NAME = "viv-sbc-cp1-carrier-nsg-overlay"
-API_VERSION = "infra.vivolution.ae/cp1-carrier-nsg-overlay-plan/v0.1"
+API_VERSION = "infra.vivolution.ae/cp1-carrier-nsg-overlay-plan/v0.3"
 PLAN_KIND = "Cp1CarrierNsgOverlayPlan"
 PLAN_MAX_AGE_MINUTES = 10
 DEPLOYMENT_COMPLETION_RESERVE_SECONDS = 15
@@ -48,9 +49,10 @@ DEPLOYMENT_SETTLE_TIMEOUT_SECONDS = 90
 APPLY_CONFIRMATION = "APPLY-VIVOLUTION-CP1-CARRIER-NSG-OVERLAY"
 TEARDOWN_CONFIRMATION = "TEARDOWN-VIVOLUTION-CP1-CARRIER-NSG-OVERLAY"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_PARAMETER_PATH = (
-    PROJECT_ROOT / "infra/azure-poc/cp1-carrier-nsg-overlay.bicepparam"
-)
+EXPECTED_PARAMETER_PATHS = {
+    False: PROJECT_ROOT / "infra/azure-poc/cp1-carrier-nsg-overlay.bicepparam",
+    True: PROJECT_ROOT / "infra/azure-poc/cp1-carrier-nsg-overlay-twilio.bicepparam",
+}
 EXPECTED_TEMPLATE_PATH = (
     PROJECT_ROOT / "infra/azure-poc/cp1-carrier-nsg-overlay.bicep"
 )
@@ -78,6 +80,7 @@ NODE_SPECS = {
 }
 G2_NODES = ("viv-sbc-poc-sbc1", "viv-sbc-poc-sbc2")
 G3_NODES = ("viv-sbc-dr-sbc1-g3", "viv-sbc-dr-sbc2-g3")
+MICROSOFT_DIRECT_ROUTING_CIDRS = ("52.112.0.0/14", "52.120.0.0/14")
 
 
 class OverlayError(RuntimeError):
@@ -93,7 +96,7 @@ class CompiledPackage:
     def __init__(
         self,
         *,
-        evidence: dict[str, str],
+        evidence: dict[str, Any],
         parameters: dict[str, Any],
         template: dict[str, Any],
     ) -> None:
@@ -160,12 +163,13 @@ class CompiledArtifacts:
             raise OverlayError("compiled {} artifact is not one object".format(label))
         return value
 
-    def verify(self, expected: Mapping[str, str]) -> None:
+    def verify(self, expected: Mapping[str, Any]) -> None:
         if self.parameters_path is None or self.template_path is None:
             raise OverlayError("compiled artifact set is not materialized")
         evidence = _validate_package(
             self._read_exact(self.parameters_path, "parameter"),
             self._read_exact(self.template_path, "template"),
+            twilio_enabled=bool(self.package.evidence["twilioEnabled"]),
         )
         if evidence != dict(expected) or evidence != self.package.evidence:
             raise OverlayError("compiled artifact digest authority drifted")
@@ -378,7 +382,7 @@ CP1_BASE_RULES = sorted(
     key=lambda item: item["name"],
 )
 
-OVERLAY_RULES = sorted(
+ALWAYS_OVERLAY_RULES = sorted(
     [
         _rule(
             "AllowGeneration3CarrierSignaling",
@@ -402,9 +406,208 @@ OVERLAY_RULES = sorted(
             destination_prefix="10.20.1.4/32",
             destination_port_range="30000-30127",
         ),
+        _rule(
+            "AllowCp1AzureDhcpOutbound",
+            "CP1 DHCP renewal from UDP/68 to the fixed Azure WireServer DHCP endpoint only.",
+            1000,
+            "Udp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_range="68",
+            destination_prefix="168.63.129.16",
+            destination_port_range="67",
+        ),
+        _rule(
+            "AllowCp1AzureDnsUdpOutbound",
+            "CP1 unicast UDP DNS to the fixed Azure platform resolver only.",
+            1010,
+            "Udp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_range="*",
+            destination_prefix="168.63.129.16",
+            destination_port_range="53",
+        ),
+        _rule(
+            "AllowCp1AzureDnsTcpOutbound",
+            "CP1 unicast TCP DNS fallback to the fixed Azure platform resolver only.",
+            1020,
+            "Tcp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_range="*",
+            destination_prefix="168.63.129.16",
+            destination_port_range="53",
+        ),
+        _rule(
+            "AllowCp1AzureWireServerOutbound",
+            "CP1 Azure Linux Agent WireServer channels only.",
+            1030,
+            "Tcp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_range="*",
+            destination_prefix="168.63.129.16",
+            destination_port_ranges=("80", "32526"),
+        ),
+        _rule(
+            "AllowCp1AzureImdsOutbound",
+            "CP1 managed-identity and instance metadata requests to IMDS only.",
+            1040,
+            "Tcp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_range="*",
+            destination_prefix="169.254.169.254",
+            destination_port_range="80",
+        ),
+        _rule(
+            "AllowCp1NtpOutbound",
+            "CP1 resolver-selected network time service on UDP/123 only.",
+            1050,
+            "Udp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_range="*",
+            destination_prefix="Internet",
+            destination_port_range="123",
+        ),
+        _rule(
+            "AllowCp1WebOutbound",
+            "CP1 HTTP and HTTPS for Debian APT, pinned artifacts, ACME, and Azure DNS APIs.",
+            1060,
+            "Tcp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_range="*",
+            destination_prefix="Internet",
+            destination_port_ranges=("80", "443"),
+        ),
+        _rule(
+            "AllowGeneration2FixtureSignalingOutbound",
+            "Active generation-2 synthetic fixture TLS signaling from CP1 to the two preserved SBCs.",
+            1100,
+            "Tcp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_range="*",
+            destination_prefixes=("10.20.2.4/32", "10.20.2.5/32"),
+            destination_port_range="15061",
+        ),
+        _rule(
+            "AllowGeneration2FixtureMediaOutbound",
+            "Active generation-2 synthetic fixture media from both exact CP1 allocations to the preserved SBCs.",
+            1110,
+            "Udp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_ranges=("21000-21127", "22000-22063"),
+            destination_prefixes=("10.20.2.4/32", "10.20.2.5/32"),
+            destination_port_range="20000-20255",
+        ),
+        _rule(
+            "AllowGeneration3CarrierSignalingOutbound",
+            "CP1 carrier mutual-TLS signaling to the exact generation-3 private listeners.",
+            1120,
+            "Tcp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_range="*",
+            destination_prefixes=("10.20.2.6/32", "10.20.2.7/32"),
+            destination_port_range="15061",
+        ),
+        _rule(
+            "AllowGeneration3CarrierMediaOutbound",
+            "Exact CP1 carrier media allocation to the generation-3 Edge tenant allocation.",
+            1130,
+            "Udp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_range="30000-30127",
+            destination_prefixes=("10.20.2.6/32", "10.20.2.7/32"),
+            destination_port_range="20000-20255",
+        ),
+        _rule(
+            "DenyAllCp1Outbound",
+            "Explicitly deny every other CP1 outbound flow before Azure default rules.",
+            4096,
+            "*",
+            "Outbound",
+            source_prefix="*",
+            source_port_range="*",
+            destination_prefix="*",
+            destination_port_range="*",
+            access="Deny",
+        ),
     ],
     key=lambda item: item["name"],
 )
+
+TWILIO_OVERLAY_RULES = sorted(
+    [
+        _rule(
+            "AllowTwilioSecureMediaInbound",
+            "Twilio global secure-media gateways to the exact CP1 Asterisk RTP allocation; no inbound SIP/DID rule is created.",
+            340,
+            "Udp",
+            "Inbound",
+            source_prefix="168.86.128.0/18",
+            source_port_range="10000-60000",
+            destination_prefix="10.20.1.4/32",
+            destination_port_range="30000-30127",
+        ),
+        _rule(
+            "AllowTwilioSecureSignalingOutbound",
+            "CP1 TLS termination traffic to all current Twilio Elastic SIP Trunking signaling gateway ranges; host policy narrows this to reviewed DNS /32s.",
+            1200,
+            "Tcp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_range="*",
+            destination_prefixes=(
+                "54.172.60.0/30",
+                "54.244.51.0/30",
+                "54.171.127.192/30",
+                "35.156.191.128/30",
+                "54.65.63.192/30",
+                "54.169.127.128/30",
+                "54.252.254.64/30",
+                "177.71.206.192/30",
+            ),
+            destination_port_range="5061",
+        ),
+        _rule(
+            "AllowTwilioSecureMediaOutbound",
+            "Exact CP1 Asterisk RTP allocation to Twilio global secure-media gateway ports.",
+            1210,
+            "Udp",
+            "Outbound",
+            source_prefix="10.20.1.4/32",
+            source_port_range="30000-30127",
+            destination_prefix="168.86.128.0/18",
+            destination_port_range="10000-60000",
+        ),
+    ],
+    key=lambda item: item["name"],
+)
+
+ALL_OVERLAY_RULES = sorted(
+    ALWAYS_OVERLAY_RULES + TWILIO_OVERLAY_RULES,
+    key=lambda item: item["name"],
+)
+ALL_OVERLAY_BY_NAME = {item["name"]: item for item in ALL_OVERLAY_RULES}
+
+
+def _target_overlay_rules(twilio_enabled: bool) -> list[dict[str, Any]]:
+    return sorted(
+        ALWAYS_OVERLAY_RULES + (TWILIO_OVERLAY_RULES if twilio_enabled else []),
+        key=lambda item: item["name"],
+    )
+
+
+# Backward-compatible disabled-mode view for callers that do not select a
+# package. Mutation paths always derive their target from a reviewed package.
+OVERLAY_RULES = _target_overlay_rules(False)
 OVERLAY_BY_NAME = {item["name"]: item for item in OVERLAY_RULES}
 
 
@@ -448,6 +651,40 @@ G2_RULES_BY_NODE = {
 }
 
 
+def _g3_rules() -> list[dict[str, Any]]:
+    """Exact 19-rule contract emitted by direct-replacement.bicep."""
+
+    edge = "10.20.2.0/24"
+    cp1 = "10.20.1.4/32"
+    microsoft = MICROSOFT_DIRECT_ROUTING_CIDRS
+    media_ports = ("3478-3481", "49152-53247")
+    values = [
+        _rule("AllowAdminSsh", "SSH from the separately approved administrator public IPv4 /32 set only.", 100, "Tcp", "Inbound", source_prefixes=EXPECTED_ADMIN_PREFIXES, source_port_range="*", destination_prefix="*", destination_port_range="22"),
+        _rule("AllowMicrosoftTls5061", "Microsoft Direct Routing mutual-TLS signaling from the reviewed current IPv4 CIDRs.", 200, "Tcp", "Inbound", source_prefixes=microsoft, source_port_range="*", destination_prefix="*", destination_port_range="5061"),
+        _rule("AllowMicrosoftMedia", "Microsoft Media Processor UDP from its documented source ports to the bounded local RTPengine pool.", 210, "Udp", "Inbound", source_prefixes=microsoft, source_port_ranges=media_ports, destination_prefix=edge, destination_port_range="20000-29999"),
+        _rule("AllowCarrierGatewayTls15061", "CP1 carrier-gateway mutual-TLS signaling to the isolated local PBX listener.", 300, "Tcp", "Inbound", source_prefix=cp1, source_port_range="*", destination_prefix="*", destination_port_range="15061"),
+        _rule("AllowCarrierGatewayMediaInbound", "CP1 carrier-gateway media from its exact advertised range to the first-tenant Edge allocation.", 310, "Udp", "Inbound", source_prefix=cp1, source_port_range="30000-30127", destination_prefix="*", destination_port_range="20000-20255"),
+        _rule("DenyAllInbound", "Explicitly deny every other inbound flow before Azure default rules.", 4096, "*", "Inbound", source_prefix="*", source_port_range="*", destination_prefix="*", destination_port_range="*", access="Deny"),
+        _rule("AllowAzureDhcpOutbound", "Azure DHCP renewal from the guest client port to WireServer DHCP only.", 1000, "Udp", "Outbound", source_prefix=edge, source_port_range="68", destination_prefix="168.63.129.16", destination_port_range="67"),
+        _rule("AllowAzureDnsUdpOutbound", "Unicast UDP DNS to Azure platform DNS only.", 1010, "Udp", "Outbound", source_prefix=edge, source_port_range="*", destination_prefix="168.63.129.16", destination_port_range="53"),
+        _rule("AllowAzureDnsTcpOutbound", "Unicast TCP DNS fallback to Azure platform DNS only.", 1020, "Tcp", "Outbound", source_prefix=edge, source_port_range="*", destination_prefix="168.63.129.16", destination_port_range="53"),
+        _rule("AllowAzureWireServerOutbound", "Azure Linux Agent WireServer channels only.", 1030, "Tcp", "Outbound", source_prefix=edge, source_port_range="*", destination_prefix="168.63.129.16", destination_port_ranges=("80", "32526")),
+        _rule("AllowAzureImdsOutbound", "Managed-identity and instance metadata requests to IMDS only.", 1040, "Tcp", "Outbound", source_prefix=edge, source_port_range="*", destination_prefix="169.254.169.254", destination_port_range="80"),
+        _rule("AllowNtpOutbound", "NTP to the two fixed anycast time sources configured by the Edge role.", 1050, "Udp", "Outbound", source_prefix=edge, source_port_range="*", destination_prefixes=("162.159.200.1/32", "162.159.200.123/32"), destination_port_range="123"),
+        _rule("AllowWebOutbound", "HTTP and HTTPS for Debian APT, pinned package retrieval, ACME, and Azure DNS APIs.", 1060, "Tcp", "Outbound", source_prefix=edge, source_port_range="*", destination_prefix="Internet", destination_port_ranges=("80", "443")),
+        _rule("AllowControlPlaneOutbound", "Private HTTPS to the fixed CP1 control-plane address only.", 1070, "Tcp", "Outbound", source_prefix=edge, source_port_range="*", destination_prefix=cp1, destination_port_range="443"),
+        _rule("AllowMicrosoftSignalingOutbound", "Mutual-TLS signaling to the reviewed current Microsoft Direct Routing IPv4 CIDRs only.", 1100, "Tcp", "Outbound", source_prefix=edge, source_port_range="*", destination_prefixes=microsoft, destination_port_range="5061"),
+        _rule("AllowMicrosoftMediaOutbound", "First-tenant RTPengine UDP to documented Microsoft Media Processor ports and IPv4 CIDRs.", 1110, "Udp", "Outbound", source_prefix=edge, source_port_range="20000-20255", destination_prefixes=microsoft, destination_port_ranges=media_ports),
+        _rule("AllowCarrierGatewayTls5061", "Mutual-TLS signaling over the existing VNet to the exact CP1 private /32 and remote listener only.", 1120, "Tcp", "Outbound", source_prefix=edge, source_port_range="*", destination_prefix=cp1, destination_port_range="5061"),
+        _rule("AllowCarrierGatewayMediaOutbound", "First-tenant RTPengine allocation over the existing VNet to the exact CP1 private /32 and media range only.", 1130, "Udp", "Outbound", source_prefix=edge, source_port_range="20000-20255", destination_prefix=cp1, destination_port_range="30000-30127"),
+        _rule("DenyAllOutbound", "Explicitly deny every other outbound flow before Azure default rules.", 4096, "*", "Outbound", source_prefix="*", source_port_range="*", destination_prefix="*", destination_port_range="*", access="Deny"),
+    ]
+    return sorted(values, key=lambda item: item["name"])
+
+
+G3_RULES_BY_NODE = {node: _g3_rules() for node in G3_NODES}
+
+
 def _contract_rule(value: Mapping[str, Any]) -> dict[str, Any]:
     keys = set(CP1_BASE_RULES[0])
     if not isinstance(value, Mapping) or not keys.issubset(value):
@@ -455,7 +692,41 @@ def _contract_rule(value: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value.get(key) for key in sorted(keys)}
 
 
-def _validate_package(parameters: Mapping[str, Any], template: Mapping[str, Any]) -> dict[str, str]:
+def validate_generation3_rule_inventory(
+    node: str, raw: str
+) -> dict[str, Any]:
+    """Validate one sanitized live generation-3 NSG inventory."""
+
+    if node not in G3_NODES:
+        raise OverlayError("generation-3 NSG node is not exact")
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > 256 * 1024:
+        raise OverlayError("generation-3 NSG inventory exceeds its input bound")
+    value = _strict_json(raw, "generation-3 NSG inventory")
+    if not isinstance(value, list):
+        raise OverlayError("generation-3 NSG inventory is not a list")
+    actual = sorted(
+        [_contract_rule(item) for item in value], key=lambda item: item["name"]
+    )
+    expected = G3_RULES_BY_NODE[node]
+    if actual != expected:
+        raise OverlayError(
+            "generation-3 Direct Routing NSG drifted for {}".format(node)
+        )
+    return {
+        "apiVersion": "infra.vivolution.ae/g3-nsg-contract/v1",
+        "contractSha256": _digest(expected),
+        "node": node,
+        "ruleCount": len(expected),
+        "status": "GENERATION3_DIRECT_ROUTING_NSG_VALID",
+    }
+
+
+def _validate_package(
+    parameters: Mapping[str, Any],
+    template: Mapping[str, Any],
+    *,
+    twilio_enabled: bool,
+) -> dict[str, Any]:
     if set(parameters) != {"$schema", "contentVersion", "parameters"}:
         raise OverlayError("compiled parameter document shape drifted")
     wrapped = parameters.get("parameters")
@@ -463,6 +734,7 @@ def _validate_package(parameters: Mapping[str, Any], template: Mapping[str, Any]
         "existingCp1NetworkSecurityGroupName": EXPECTED_CP1_NSG,
         "targetResourceGroupName": EXPECTED_RESOURCE_GROUP,
         "targetSubscriptionId": EXPECTED_SUBSCRIPTION_ID,
+        "twilioEnabled": twilio_enabled,
     }
     if not isinstance(wrapped, dict) or set(wrapped) != set(expected_values):
         raise OverlayError("compiled overlay parameters are not exact")
@@ -474,7 +746,7 @@ def _validate_package(parameters: Mapping[str, Any], template: Mapping[str, Any]
     if actual_values != expected_values:
         raise OverlayError("compiled overlay parameter values drifted")
     parameter_digest = _digest(parameters)
-    if parameter_digest != EXPECTED_COMPILED_PARAMETERS_SHA256:
+    if parameter_digest != EXPECTED_COMPILED_PARAMETERS_SHA256[twilio_enabled]:
         raise OverlayError("compiled parameter digest differs from the reviewed package")
     metadata = template.get("metadata") if isinstance(template, Mapping) else None
     generator = metadata.get("_generator") if isinstance(metadata, Mapping) else None
@@ -491,10 +763,16 @@ def _validate_package(parameters: Mapping[str, Any], template: Mapping[str, Any]
         "bicepCompilerVersion": EXPECTED_BICEP_VERSION,
         "compiledParametersSha256": parameter_digest,
         "compiledTemplateSha256": template_digest,
+        "twilioEnabled": twilio_enabled,
     }
 
 
-def compile_package_bundle(path: Path = EXPECTED_PARAMETER_PATH) -> CompiledPackage:
+def compile_package_bundle(
+    twilio_enabled: bool = False,
+    path: Path | None = None,
+) -> CompiledPackage:
+    expected_path = EXPECTED_PARAMETER_PATHS[twilio_enabled]
+    path = expected_path if path is None else path
     if path.is_symlink():
         raise OverlayError("overlay parameter file must not be a symlink")
     try:
@@ -503,7 +781,7 @@ def compile_package_bundle(path: Path = EXPECTED_PARAMETER_PATH) -> CompiledPack
     except OSError as exc:
         raise OverlayError("overlay parameter file is unavailable") from exc
     if (
-        resolved != EXPECTED_PARAMETER_PATH.resolve()
+        resolved != expected_path.resolve()
         or not stat.S_ISREG(metadata.st_mode)
         or metadata.st_nlink != 1
         or metadata.st_uid != os.getuid()
@@ -521,16 +799,21 @@ def compile_package_bundle(path: Path = EXPECTED_PARAMETER_PATH) -> CompiledPack
     if not isinstance(parameters, dict) or not isinstance(template, dict):
         raise OverlayError("compiled overlay package is not two JSON objects")
     return CompiledPackage(
-        evidence=_validate_package(parameters, template),
+        evidence=_validate_package(
+            parameters, template, twilio_enabled=twilio_enabled
+        ),
         parameters=parameters,
         template=template,
     )
 
 
-def compile_package(path: Path = EXPECTED_PARAMETER_PATH) -> dict[str, str]:
+def compile_package(
+    twilio_enabled: bool = False,
+    path: Path | None = None,
+) -> dict[str, Any]:
     """Return the reviewed digest evidence while retaining the legacy API."""
 
-    return compile_package_bundle(path).evidence
+    return compile_package_bundle(twilio_enabled, path).evidence
 
 
 def _read_protected_json(path: Path, expected: Path, label: str) -> dict[str, Any]:
@@ -802,6 +1085,9 @@ def collect_observations(
     g2_rules = {
         node: _read_rules(node + "-nsg", runner=runner) for node in G2_NODES
     }
+    g3_rules = {
+        node: _read_rules(node + "-nsg", runner=runner) for node in G3_NODES
+    }
     budget_url = (
         "https://management.azure.com/subscriptions/{}/resourceGroups/{}/providers/"
         "Microsoft.Consumption/budgets/{}?api-version=2023-11-01"
@@ -837,6 +1123,7 @@ def collect_observations(
         "budget": budget,
         "cp1Rules": cp1_rules,
         "g2Rules": g2_rules,
+        "g3Rules": g3_rules,
         "generation3Authority": generation3_authority,
         "nodes": nodes,
         "overlayDeploymentState": overlay_deployment_state,
@@ -1024,7 +1311,9 @@ def _decimal(value: Any, label: str) -> Decimal:
     return result
 
 
-def _validate_cp1_rules(rules: Any) -> tuple[str, list[dict[str, Any]]]:
+def _validate_cp1_rules(
+    rules: Any, *, target_twilio_enabled: bool
+) -> tuple[str, list[dict[str, Any]]]:
     if not isinstance(rules, list):
         raise OverlayError("CP1 rule inventory is malformed")
     contracts = sorted([_contract_rule(item) for item in rules], key=lambda item: item["name"])
@@ -1036,12 +1325,12 @@ def _validate_cp1_rules(rules: Any) -> tuple[str, list[dict[str, Any]]]:
         if observed_by_name.get(name) != expected:
             raise OverlayError("CP1 synthetic base NSG rule drifted: {}".format(name))
     extras = set(observed_by_name) - set(base_by_name)
-    if not extras.issubset(OVERLAY_BY_NAME):
+    if not extras.issubset(ALL_OVERLAY_BY_NAME):
         raise OverlayError("CP1 NSG contains an unapproved extra custom rule")
     overlays: list[dict[str, Any]] = []
     raw_by_name = {item.get("name"): item for item in rules if isinstance(item, dict)}
     for name in sorted(extras):
-        if observed_by_name[name] != OVERLAY_BY_NAME[name]:
+        if observed_by_name[name] != ALL_OVERLAY_BY_NAME[name]:
             raise OverlayError("CP1 carrier overlay rule drifted: {}".format(name))
         etag = raw_by_name[name].get("etag")
         if not isinstance(etag, str) or not etag:
@@ -1052,31 +1341,44 @@ def _validate_cp1_rules(rules: Any) -> tuple[str, list[dict[str, Any]]]:
             "name": name,
             "rule": observed_by_name[name],
         })
+    target_by_name = {
+        item["name"]: item for item in _target_overlay_rules(target_twilio_enabled)
+    }
     state = (
         "ABSENT"
         if not extras
         else "EXACT"
-        if extras == set(OVERLAY_BY_NAME)
+        if extras == set(target_by_name)
+        else "SUPERSET"
+        if set(target_by_name).issubset(extras)
         else "PARTIAL"
     )
     return state, overlays
 
 
 def _validate_what_if(
-    value: Any, overlay_rules: Sequence[Mapping[str, Any]]
+    value: Any,
+    overlay_rules: Sequence[Mapping[str, Any]],
+    *,
+    target_twilio_enabled: bool,
 ) -> dict[str, Any]:
+    target_by_name = {
+        item["name"]: item for item in _target_overlay_rules(target_twilio_enabled)
+    }
     if not isinstance(value, dict) or value.get("status") != "Succeeded":
         raise OverlayError("provider-level group what-if did not succeed")
     changes = value.get("changes")
-    if not isinstance(changes, list) or len(changes) != 2:
-        raise OverlayError("provider what-if must contain exactly two child-rule changes")
-    expected_ids = {_rule_id(name).lower() for name in OVERLAY_BY_NAME}
+    if not isinstance(changes, list) or len(changes) != len(target_by_name):
+        raise OverlayError("provider what-if must contain every exact child-rule change")
+    expected_ids = {_rule_id(name).lower() for name in target_by_name}
     present = {str(item.get("name")) for item in overlay_rules}
-    if not present.issubset(OVERLAY_BY_NAME):
-        raise OverlayError("provider what-if overlay presence is malformed")
+    if not present.issubset(ALL_OVERLAY_BY_NAME):
+        raise OverlayError(
+            "provider what-if overlay presence is malformed"
+        )
     expected_by_id = {
         _rule_id(name).lower(): "NoChange" if name in present else "Create"
-        for name in OVERLAY_BY_NAME
+        for name in target_by_name
     }
     normalized = []
     for change in changes:
@@ -1098,6 +1400,7 @@ def validate_observations(
     observations: Mapping[str, Any],
     *,
     action: str,
+    target_twilio_enabled: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     if action not in {"apply", "teardown"} or observations.get("action") != action:
@@ -1196,12 +1499,28 @@ def validate_observations(
         actual = sorted([_contract_rule(item) for item in g2[node]], key=lambda item: item["name"])
         if actual != G2_RULES_BY_NODE[node]:
             raise OverlayError("generation-2 synthetic NSG drifted for {}".format(node))
-    overlay_state, overlay_rules = _validate_cp1_rules(observations.get("cp1Rules"))
+    g3 = observations.get("g3Rules")
+    if not isinstance(g3, dict) or set(g3) != set(G3_NODES):
+        raise OverlayError("generation-3 NSG observations are incomplete")
+    for node in G3_NODES:
+        actual = sorted(
+            [_contract_rule(item) for item in g3[node]],
+            key=lambda item: item["name"],
+        )
+        if actual != G3_RULES_BY_NODE[node]:
+            raise OverlayError(
+                "generation-3 Direct Routing NSG drifted for {}".format(node)
+            )
+    overlay_state, overlay_rules = _validate_cp1_rules(
+        observations.get("cp1Rules"),
+        target_twilio_enabled=target_twilio_enabled,
+    )
     budget = _validate_budget(observations.get("budget"), observed_at=current)
     core = {
         "account": observations["account"],
         "cp1BaseRules": CP1_BASE_RULES,
         "g2SyntheticRules": G2_RULES_BY_NODE,
+        "g3DirectRoutingRules": G3_RULES_BY_NODE,
         "generation3Authority": generation3_authority,
         "nodeBindings": bindings,
         "resourceGroup": {
@@ -1213,7 +1532,11 @@ def validate_observations(
     }
     what_if = None
     if action == "apply" and observations.get("whatIf") is not None:
-        what_if = _validate_what_if(observations["whatIf"], overlay_rules)
+        what_if = _validate_what_if(
+            observations["whatIf"],
+            overlay_rules,
+            target_twilio_enabled=target_twilio_enabled,
+        )
     return {
         "budget": budget,
         "coreStateSha256": _digest(core),
@@ -1232,14 +1555,22 @@ def _utc(value: datetime) -> str:
 def create_plan(
     action: str,
     observations: Mapping[str, Any],
-    package: Mapping[str, str],
+    package: Mapping[str, Any],
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     if action not in {"apply", "teardown"}:
         raise OverlayError("plan action must be apply or teardown")
+    target_twilio_enabled = package.get("twilioEnabled")
+    if not isinstance(target_twilio_enabled, bool):
+        raise OverlayError("reviewed package lacks an exact Twilio target")
     observed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
-    evidence = validate_observations(observations, action=action, now=observed_at)
+    evidence = validate_observations(
+        observations,
+        action=action,
+        target_twilio_enabled=target_twilio_enabled,
+        now=observed_at,
+    )
     if action == "apply" and evidence["providerWhatIf"] is None:
         raise OverlayError("apply plan requires provider-level what-if")
     expires = observed_at + timedelta(minutes=PLAN_MAX_AGE_MINUTES)
@@ -1253,6 +1584,15 @@ def create_plan(
         },
         "budget": evidence["budget"],
         "confirmationPhrase": APPLY_CONFIRMATION if action == "apply" else TEARDOWN_CONFIRMATION,
+        "conditionalDeletes": (
+            [
+                item
+                for item in evidence["overlayRules"]
+                if item["name"] in {rule["name"] for rule in TWILIO_OVERLAY_RULES}
+            ]
+            if action == "apply" and not target_twilio_enabled
+            else []
+        ),
         "coreStateSha256": evidence["coreStateSha256"],
         "deploymentName": DEPLOYMENT_NAME,
         "expiresAtUtc": _utc(expires),
@@ -1264,6 +1604,7 @@ def create_plan(
         "overlayState": evidence["overlayState"],
         "package": dict(package),
         "providerWhatIf": evidence["providerWhatIf"],
+        "targetTwilioEnabled": target_twilio_enabled,
     }
     return {**body, "planSha256": _digest(body), "status": "CP1_CARRIER_NSG_OVERLAY_PLAN_VALID"}
 
@@ -1299,10 +1640,11 @@ def read_plan(path: Path, *, supplied_sha256: str, confirmation: str, now: datet
         raise OverlayError("saved plan must be one object")
     expected_keys = {
         "action", "apiVersion", "authority", "budget", "confirmationPhrase",
+        "conditionalDeletes",
         "coreStateSha256", "deploymentName", "expiresAtUtc", "generatedAtUtc",
         "generation3Authority", "kind", "nodeBindings", "overlayRules",
         "overlayState", "package",
-        "planSha256", "providerWhatIf", "status",
+        "planSha256", "providerWhatIf", "status", "targetTwilioEnabled",
     }
     if set(value) != expected_keys:
         raise OverlayError("saved plan fields are not exact")
@@ -1330,11 +1672,29 @@ def read_plan(path: Path, *, supplied_sha256: str, confirmation: str, now: datet
         "status"
     ) != "CP1_CARRIER_NSG_OVERLAY_PLAN_VALID":
         raise OverlayError("saved plan contract identity drifted")
+    target_twilio_enabled = value.get("targetTwilioEnabled")
+    if not isinstance(target_twilio_enabled, bool):
+        raise OverlayError("saved plan Twilio target drifted")
+    expected_conditional_deletes = (
+        [
+            item
+            for item in value.get("overlayRules", [])
+            if isinstance(item, dict)
+            and item.get("name") in {rule["name"] for rule in TWILIO_OVERLAY_RULES}
+        ]
+        if value.get("action") == "apply" and not target_twilio_enabled
+        else []
+    )
+    if value.get("conditionalDeletes") != expected_conditional_deletes:
+        raise OverlayError("saved plan conditional deletion authority drifted")
     _require_plan_fresh(value, now=now)
     if value.get("package") != {
         "bicepCompilerVersion": EXPECTED_BICEP_VERSION,
-        "compiledParametersSha256": EXPECTED_COMPILED_PARAMETERS_SHA256,
+        "compiledParametersSha256": EXPECTED_COMPILED_PARAMETERS_SHA256[
+            target_twilio_enabled
+        ],
         "compiledTemplateSha256": EXPECTED_COMPILED_TEMPLATE_SHA256,
+        "twilioEnabled": target_twilio_enabled,
     }:
         raise OverlayError("saved plan package digests drifted")
     return value
@@ -1382,7 +1742,10 @@ def _require_plan_fresh(
 def _require_package_at_mutation(
     plan: Mapping[str, Any], artifacts: CompiledArtifacts
 ) -> None:
-    fresh = compile_package()
+    target_twilio_enabled = plan.get("targetTwilioEnabled")
+    if not isinstance(target_twilio_enabled, bool):
+        raise OverlayError("mutation plan lacks an exact Twilio target")
+    fresh = compile_package(target_twilio_enabled)
     if fresh != plan.get("package"):
         raise OverlayError("fresh compiled package differs at the mutation boundary")
     artifacts.verify(fresh)
@@ -1483,8 +1846,13 @@ def apply_plan(
     artifacts: CompiledArtifacts | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    target_twilio_enabled = plan.get("targetTwilioEnabled")
+    if not isinstance(target_twilio_enabled, bool):
+        raise OverlayError("mutation plan lacks an exact Twilio target")
     if artifacts is None:
-        with CompiledArtifacts(compile_package_bundle()) as materialized:
+        with CompiledArtifacts(
+            compile_package_bundle(target_twilio_enabled)
+        ) as materialized:
             return apply_plan(
                 plan,
                 runner=runner,
@@ -1504,8 +1872,24 @@ def apply_plan(
             artifacts=artifacts,
             now=now,
         )
-        evidence = validate_observations(observations, action="apply", now=now)
+        evidence = validate_observations(
+            observations,
+            action="apply",
+            target_twilio_enabled=target_twilio_enabled,
+            now=now,
+        )
         _require_reobserved(plan, evidence)
+        expected_conditional_deletes = (
+            [
+                item
+                for item in evidence["overlayRules"]
+                if item["name"] in {rule["name"] for rule in TWILIO_OVERLAY_RULES}
+            ]
+            if not target_twilio_enabled
+            else []
+        )
+        if plan.get("conditionalDeletes") != expected_conditional_deletes:
+            raise OverlayError("conditional Twilio deletion authority changed")
         _require_package_at_mutation(plan, artifacts)
         _require_plan_fresh(
             plan,
@@ -1534,6 +1918,14 @@ def apply_plan(
             "provisioningState"
         ) != "Succeeded":
             raise OverlayError("provider deployment did not complete exactly")
+        for item in plan.get("conditionalDeletes", []):
+            _require_plan_fresh(plan, now=now)
+            runner([
+                "az", "rest", "--method", "delete",
+                "--url", "https://management.azure.com{}?api-version=2023-11-01".format(item["id"]),
+                "--headers", "If-Match={}".format(item["etag"]),
+                *_common(),
+            ])
         post = validate_observations(
             collect_observations(
                 "apply",
@@ -1543,6 +1935,7 @@ def apply_plan(
                 artifacts=artifacts,
             ),
             action="apply",
+            target_twilio_enabled=target_twilio_enabled,
         )
         if post["coreStateSha256"] != plan["coreStateSha256"] or post[
             "overlayState"
@@ -1554,6 +1947,7 @@ def apply_plan(
             "overlayState": "EXACT",
             "planSha256": plan["planSha256"],
             "status": "CP1_CARRIER_NSG_OVERLAY_APPLIED",
+            "twilioEnabled": target_twilio_enabled,
         }
 
     if action != "teardown":
@@ -1566,7 +1960,12 @@ def apply_plan(
         artifacts=artifacts,
         now=now,
     )
-    evidence = validate_observations(observations, action="teardown", now=now)
+    evidence = validate_observations(
+        observations,
+        action="teardown",
+        target_twilio_enabled=target_twilio_enabled,
+        now=now,
+    )
     if evidence["coreStateSha256"] != plan.get("coreStateSha256"):
         raise OverlayError("Azure topology changed after teardown planning")
     planned = {item["name"]: item for item in plan.get("overlayRules", [])}
@@ -1595,6 +1994,7 @@ def apply_plan(
             artifacts=artifacts,
         ),
         action="teardown",
+        target_twilio_enabled=target_twilio_enabled,
     )
     if post["coreStateSha256"] != plan["coreStateSha256"] or post[
         "overlayState"
@@ -1614,16 +2014,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     plan_parser = subparsers.add_parser("plan", help="read-only exact live plan")
     plan_parser.add_argument("--action", choices=("apply", "teardown"), required=True)
+    plan_parser.add_argument(
+        "--twilio-mode", choices=("disabled", "enabled"), required=True
+    )
     plan_parser.add_argument("--direct-replacement-plan-sha256", required=True)
     execute_parser = subparsers.add_parser("execute", help="execute one protected fresh plan")
     execute_parser.add_argument("--plan", type=Path, required=True)
     execute_parser.add_argument("--plan-sha256", required=True)
     execute_parser.add_argument("--confirm", required=True)
+    validate_g3_parser = subparsers.add_parser(
+        "validate-g3-rules",
+        help="validate one sanitized generation-3 NSG rule inventory",
+    )
+    validate_g3_parser.add_argument("--node", choices=G3_NODES, required=True)
     args = parser.parse_args(argv)
     try:
-        package = compile_package_bundle()
-        with CompiledArtifacts(package) as artifacts:
-            if args.command == "plan":
+        if args.command == "validate-g3-rules":
+            raw = sys.stdin.read(256 * 1024 + 1)
+            print(
+                json.dumps(
+                    validate_generation3_rule_inventory(args.node, raw),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        elif args.command == "plan":
+            target_twilio_enabled = args.twilio_mode == "enabled"
+            package = compile_package_bundle(target_twilio_enabled)
+            with CompiledArtifacts(package) as artifacts:
                 observations = collect_observations(
                     args.action,
                     approved_direct_plan_sha256=args.direct_replacement_plan_sha256,
@@ -1638,12 +2056,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                         separators=(",", ":"),
                     )
                 )
-            else:
-                plan = read_plan(
-                    args.plan,
-                    supplied_sha256=args.plan_sha256,
-                    confirmation=args.confirm,
-                )
+        else:
+            plan = read_plan(
+                args.plan,
+                supplied_sha256=args.plan_sha256,
+                confirmation=args.confirm,
+            )
+            target_twilio_enabled = plan["targetTwilioEnabled"]
+            package = compile_package_bundle(target_twilio_enabled)
+            with CompiledArtifacts(package) as artifacts:
                 print(
                     json.dumps(
                         apply_plan(plan, artifacts=artifacts),

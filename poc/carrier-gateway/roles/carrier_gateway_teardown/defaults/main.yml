@@ -9,10 +9,31 @@ carrier_gateway_runtime_uid: 10003
 carrier_gateway_rootless_home: /var/lib/vivolution/carrier-gateway/rootless-home
 carrier_gateway_rootless_runtime_dir: /run/user/10003
 carrier_gateway_rootless_quadlet_root: /var/lib/vivolution/carrier-gateway/rootless-home/.config/containers/systemd
+carrier_gateway_rootless_storage_root: /var/lib/vivolution/carrier-gateway/rootless-home/.local/share/containers
 carrier_gateway_remove_image: false
+carrier_gateway_remove_image_acknowledgement: ''
 carrier_gateway_image_tag: localhost/vivolution/carrier-gateway-asterisk:22.10.1-srtp1-autobind1
 carrier_gateway_remove_call_records: false
 carrier_gateway_remove_call_records_acknowledgement: ''
 carrier_gateway_remove_pki: false
 carrier_gateway_remove_pki_acknowledgement: ''
 carrier_gateway_host_firewall_disabled_acknowledgement: ''
+carrier_gateway_external_dns_removed_acknowledgement: ''
+carrier_gateway_external_nsg_removed_acknowledgement: ''
+carrier_gateway_external_dns_receipt_path: /var/lib/vivolution/carrier-gateway/external-teardown-evidence/dns-receipt.json
+carrier_gateway_external_dns_receipt_sha256_path: /var/lib/vivolution/carrier-gateway/external-teardown-evidence/dns-receipt.sha256
+carrier_gateway_external_nsg_receipt_path: /var/lib/vivolution/carrier-gateway/external-teardown-evidence/nsg-receipt.json
+carrier_gateway_external_nsg_receipt_sha256_path: /var/lib/vivolution/carrier-gateway/external-teardown-evidence/nsg-receipt.sha256
+carrier_gateway_remove_runtime_identity: false
+carrier_gateway_remove_runtime_identity_acknowledgement: ''
+carrier_gateway_remove_host_packages: false
+carrier_gateway_host_packages_acknowledgement: ''
+carrier_gateway_host_packages:
+  - fuse-overlayfs
+  - jq
+  - podman
+  - slirp4netns
+  - uidmap
+carrier_certificate_cache_root: /var/cache/vivolution-carrier-certificate
+carrier_certificate_state_root: /var/lib/vivolution-carrier-certificate
+carrier_certificate_libexec_root: /usr/local/libexec/vivolution-carrier-certificate

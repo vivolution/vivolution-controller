@@ -1,7 +1,11 @@
 # Vivolution Control Plane and SBC
 
-Status: provider-neutral Ubuntu CP1 turnkey installer release candidate; local
-tests pass and clean Ubuntu 24.04 qualification is the next release gate.
+Status: `v0.3.0-rc8` is the approved universal-launcher beta source for public
+prerelease packaging. Static and security gates pass. Clean Ubuntu 24.04.4
+ARM64 qualification reaches the expected NAT/ACME boundary, and a clean Ubuntu
+24.04 AMD64 Azure run completes the standalone Controller installation with
+trusted Let's Encrypt certificates for both FQDNs. Production, Controller HA,
+complete SBC deployment, and live Teams/SIP acceptance remain pending.
 
 ## Turnkey Controller installer
 
@@ -9,29 +13,101 @@ The product installer configures an administrator-supplied Ubuntu Server VM or
 physical host. It does **not** create Azure, AWS, GCP, VMware, DNS, NAT, public
 IP, or load-balancer resources.
 
-The first released mode is standalone CP1. CP2 and CP3 are deliberately hidden
-until replication, fencing, quorum, failover, and rejoin acceptance tests pass;
-the installer will never disguise independent databases as an HA cluster.
+The first released mode is one standalone Controller. Additional Controller
+nodes are deliberately unavailable until replication, fencing, quorum,
+failover, and rejoin acceptance tests pass; the installer will never disguise
+independent databases as an HA cluster.
 
-On a fresh Ubuntu Server 24.04 LTS host, clone or unpack the reviewed source and
-run:
+On a fresh Ubuntu Server 24.04 LTS host, run the permanent, checksum-verifying
+public bootstrap:
 
 ```sh
-sudo ./installer/install.sh
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/main/install.sh | sudo sh
 ```
 
-The wizard validates the host and public DNS, preserves the active SSH source,
-asks for the node/shared FQDNs and initial operator, generates protected
-credentials, installs PostgreSQL/PgBouncer/Podman/Caddy, deploys the controller,
-runs health checks, and prints the console URL. Interrupted runs use
-`sudo ./installer/install.sh resume`.
+The rc8 wizard validates the host and public DNS, detects and confirms the
+public IPv4, asks for the node/shared FQDNs, firewall ownership, initial
+operator, Let's Encrypt ACME contact, IANA timezone, and Chrony policy,
+generates protected credentials, installs PostgreSQL/PgBouncer/Podman/Caddy,
+deploys the Controller, runs health checks, and prints the console URL.
+Interrupted rc8 runs must use the exact version-pinned bootstrap:
+
+```sh
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/vivolution/vivolution-install/v0.3.0-rc8/install.sh | sudo sh -s -- resume
+```
 
 - [Installer guide](installer/README.md)
 - [Turnkey architecture and HA contract](architecture/turnkey-installer.md)
 - [Controller application and operator guide](controller/README.md)
 
-The older Azure and SBC material retained below is research and disposable POC
-history. It is not a dependency of the provider-neutral installer.
+The separate public `vivolution-install` repository uses immutable tags and
+minimal checksum-pinned assets. The `v0.3.0-rc8` prerelease promotes one
+permanent universal-launcher command and retains a separate enrollment-only
+Edge archive for compatibility. The latter does not install an SBC, SIP/RTP,
+Teams, or a carrier profile, and neither artifact claims Controller high
+availability.
+
+The standalone Controller installs exact Caddy `2.11.4` from its verified
+official stable repository and pins the Let's Encrypt production ACME directory
+as its only certificate issuer. Caddy requests and automatically renews public
+certificates for both the unique Controller VM FQDN and stable shared FQDN;
+trusted HTTPS readiness fails closed if issuance is unavailable. This
+Controller certificate flow is separate from future Teams/SBC signaling
+certificates.
+
+The rc8 beta requires a fresh installation and does not claim to convert an
+rc5 ledger or a certificate already cached by an older host.
+
+### v0.3.0-rc8 beta boundary
+
+The rc8 launcher provides one permanent installer command and this neutral
+menu:
+
+```text
+Vivolution Turnkey Installer
+
+> Create a new Controller Plane
+  Join an existing Controller Plane          [Unavailable]
+  Deploy an Edge Appliance (SBC)             [Unavailable]
+  Manage an existing installation
+  Diagnostics / network readiness test
+```
+
+It does not suggest CP1/CP2/CP3/SBC1/SBC2 hostnames. The enabled scope is one
+new standalone Controller, non-mutating diagnostics, and Manage actions for
+status, a redacted support bundle, resume, reconcile, and discard only when
+schema-5 evidence proves that an incomplete run never crossed the mutation
+boundary. Recognized rc3-rc5 state is detected and can be previewed, but rc8
+refuses to delete it because the older removable lock cannot provide the same
+race-free safety guarantee.
+
+The candidate adds multi-source HTTPS public-IP prefill with operator
+confirmation, interactive DNS wait/retry, explicit infrastructure-managed or
+installer-managed firewall ownership, IANA timezone selection, Chrony
+automatic/custom NTP configuration, an explicit systemd-timesyncd-to-Chrony
+provider handoff, and audit-grade redacted logging. It begins
+the secured-namespace migration with installer state/logs and scoped host
+ownership evidence beneath `/var/lib/vivolution` and `/var/log/vivolution`.
+Moving releases to `/opt/vivolution/releases` and completing the broader FHS
+migration and mutation manifest remain future lifecycle work.
+
+Controller joining/HA, full Edge voice installation, upgrade, rollback,
+repair, backup/restore, and post-mutation uninstall remain design-only. The
+private complete voice-plane POC currently expects Debian 13 AMD64; the public
+Controller and bounded enrollment-only Edge expect Ubuntu 24.04. Therefore rc8
+must keep **Deploy an Edge Appliance (SBC)** unavailable until one declared
+Edge OS contract is ported and independently qualified.
+
+rc8 does not claim in-place migration or resume from the rc5 schema-4 ledger.
+It can detect and preview an exact recognized legacy state set, but automated
+legacy deletion is deliberately refused. Fresh Ubuntu 24.04 remains the
+acceptance path. Any rc5 host requires either replacement or a separately
+reviewed offline cleanup/migration procedure.
+
+The Hosted SBC material below is a separate guarded POC module. Its invariant
+is **Microsoft Teams -> Common Teams Leg -> SBC routing/media -> Generic SIP
+Trunk Leg -> customer-selected provider**. Twilio is the first example profile,
+not a hard-coded product dependency.
 
 ## Working hypothesis
 
@@ -56,53 +132,45 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 
 ## Current boundary
 
-- Jay authorized a disposable local CP1 lab on this Mac. Debian 13.6 ARM64 runs
-  in UTM, and the first Django/PostgreSQL controller vertical slice is deployed
-  through the repeatable Ansible kit.
-- Clean UTM rebuilds and the local functional suite passed on August 27 and 28,
-  including HTTPS/admin access, backup/restore, controlled database outage,
-  failed-release recovery, reboot recovery, and two-minute readiness soaks.
-  The latest untouched-OS run recorded 904 successful requests, zero failures,
-  101.46 MiB peak controller memory, and 3.01% peak CPU.
-- An independent August 28 audit withdrew the broader “qualified” conclusion.
-  It proved the prior `changed=0` result hid changing PostgreSQL SCRAM state and
-  found material RLS, Caddy-admin, mutable-image, credential, evidence, and
-  coverage gaps. Those historical runs remain credible bounded functional
-  evidence, not current security/release acceptance.
-- Remediation was promoted through a one-release signed-RLS compatibility
-  bridge to the signed-only/least-privilege Lab release. The UTM kit can now
-  create the protected primary from a truly empty registry without a template
-  VM, then run the signed current-release and distinct N-1 gates. The latest
-  verified evidence, rather than this narrative, is authoritative for pass/fail
-  status; the bridge itself is not the final isolation boundary.
-- The authorized three-node POC implementation now includes a fail-closed
-  OpenSIPS/RTPengine Edge bootstrap, signed desired-state verifier/compiler,
-  transactional activation and rollback, public-certificate automation, a
-  private no-PSTN SIP/TLS/RTP fixture, first-tenant CP1 catalog reconciliation,
-  replacement-controller restore automation, and a guarded Microsoft 365
-  onboarding package. This is source readiness, not a deployment claim: Azure
-  host qualification, end-to-end calls, failover, and signed final evidence
-  remain pending until the new CP1/SBC1/SBC2 environment is built and tested.
-- Trivy is pinned for the replacement qualification. The signed gate blocks
-  every fixable HIGH/CRITICAL finding in the committed source, exact running
-  OCI image, and guest package database. It also retains the complete unfixed
-  HIGH/CRITICAL inventory as signed evidence; findings for which Trivy reports
-  no fixed version remain explicit residual risk rather than being hidden or
-  mislabeled as remediated.
-- The Azure acceptance kit includes a deliberately self-contained
-  `azure-single` profile: one Debian 13 AMD64 VM runs PostgreSQL, PgBouncer,
-  Caddy, Podman, and the immutable CP1 application. It does not depend on Azure
-  Database for PostgreSQL or another managed runtime service. The separately
-  retained `azure` profile continues to require an external PostgreSQL service.
-  Signed evidence, rather than this narrative, is authoritative for the latest
-  Azure qualification result.
-- No vendor purchase, customer pilot, live traffic, or production deployment is
-  authorized. Microsoft supportability, certified-SBC licensing, carrier
-  agreements, and UAE regulatory feasibility remain mandatory gates.
-- The private synthetic gate cannot be described as a live Teams/PSTN pass.
-  Live Direct Routing remains blocked by the unverified
-  `voice.vivolution.ae` Microsoft 365 domain, absent Teams/Phone System test
-  licenses and users, and acceptance of the non-certified support boundary.
+- The `v0.3.0-rc8` source has separate deterministic Controller and Edge
+  enrollment archives, checksum-pinned bootstraps, exact allowlists, and tamper
+  tests. It corrects the stock Ubuntu 24.04 `/etc/os-release` symlink preflight,
+  safely retires a package-replaced but still-running systemd-timesyncd process,
+  and avoids rejecting a newly synchronized Chrony client solely because its
+  initial frequency-skew estimate has not converged. It also pins Ubuntu's
+  `runc` runtime so AppArmor and no-new-privileges remain enforced, and pins
+  verified Caddy `2.11.4` for current Let's Encrypt order finalization. A clean
+  disposable Azure VM completed installation and trusted public HTTPS for both
+  FQDNs.
+- The bounded Edge enrollment client accepts the canonical Controller shared
+  HTTPS URL plus a display-once grant, creates a local Ed25519 identity, enters
+  pending approval, and reports signed heartbeat visibility after fingerprint
+  approval. It provides no desired-state delivery, remote actions, mTLS, or
+  voice data plane.
+- The Hosted SBC implementation includes fail-closed OpenSIPS/RTPengine Edge
+  bootstrap, signed desired state, transactional activation and rollback,
+  certificate automation, a private no-PSTN fixture, a guarded one-call broker,
+  provider-neutral CDR adapters, and a generic outbound SIP-provider profile.
+- The common Teams process is restricted to RTP `30000-30063`; the isolated
+  provider-egress process is restricted to `30064-30127`. Each receives only
+  its own root-owned `0440` certificate copy and UID-scoped nftables authority.
+- Offline verification passes 58 carrier tests, 252 deployment tests, 83
+  Controller tests (12 PostgreSQL-only skips), 87 installer tests, 20 installer
+  Ansible tests, and 42 Edge enrollment tests (one root-only tmpfs skip), plus
+  syntax, digest-compatibility, whitespace, and independent security gates.
+  This is source readiness, not a live-call or production claim.
+- A 2026-09-01 Azure audit found no current Vivolution POC resource group, VM,
+  or compute resource. The existing DNS zones remain, but the planned
+  controller, SBC, and carrier records are absent. Historical UTM/Azure evidence
+  remains bounded historical evidence only.
+- Live acceptance still requires fresh hosts, reviewed DNS and certificates, a
+  Microsoft Teams administrator session and test identity, a protected customer
+  SIP profile, and an explicitly approved destination and spend ceiling for the
+  controlled call. No live Teams-to-provider call has yet been claimed.
+- OpenSIPS/RTPengine remains explicitly non-Microsoft-certified. No vendor
+  purchase, customer pilot, production traffic, or production deployment is
+  implied; supportability, carrier agreements, and UAE regulatory feasibility
+  remain production gates.
 
 ## Working documents
 
@@ -110,6 +178,7 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 - [Architecture options](architecture/options.md)
 - [Reference architecture](architecture/reference-architecture.md)
 - [Architecture diagram](architecture/reference-architecture.html)
+- [Modular turnkey architecture](architecture/modular-turnkey-architecture.html)
 - [Open-source reference path](architecture/open-source-reference.md)
 - [Provider-neutral fleet management](architecture/fleet-management.md)
 - [Control plane high availability](architecture/control-plane-ha.md)
@@ -135,5 +204,5 @@ Customer-owned cloud or on-premises VMs are supported as a separate **Customer-H
 - [Research sources](research/sources.md)
 - [Decision log](decisions/decision-log.md)
 - [Controller vertical slice](controller/README.md)
-- [Repeatable CP1 deployment kit](deploy/README.md)
+- [Historical repeatable standalone-Controller deployment kit](deploy/README.md)
 - [Disposable UTM lab](lab/utm/README.md)

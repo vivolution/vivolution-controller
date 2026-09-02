@@ -1,0 +1,13 @@
+[Unit]
+Description=Poll Vivolution Edge approval and report outbound heartbeat
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec={{ edge_enrollment_poll_seconds | int }}s
+RandomizedDelaySec=5s
+AccuracySec=1s
+Persistent=false
+Unit=vivolution-edge-enrollment.service
+
+[Install]
+WantedBy=timers.target

@@ -1,4 +1,138 @@
-# CP1 controller release notes
+# Controller release notes
+
+## v0.3.0-rc8 Azure runtime and trusted-HTTPS qualification fix
+
+- Pins the Controller Quadlet to Ubuntu's `/usr/sbin/runc` runtime while
+  preserving the enforced `containers-default` AppArmor profile,
+  `NoNewPrivileges=true`, a read-only root filesystem, and a fully dropped
+  capability set. This fixes the Azure Ubuntu 24.04 AppArmor/profile-stacking
+  failure where `crun` denied Gunicorn's AF_INET socket creation even though
+  the application bound only to loopback TCP 8000.
+- Installs and verifies the official Caddy stable package at exact version
+  `2.11.4`. The immutable repository bootstrap verifies the complete primary
+  signing-key fingerprint
+  `65760C51EDEA2017CEA2CA15155B6D79CA56EA34` and signing-key file SHA-256
+  `783dfee04b19e851a928cd87b34710213ebbe7628f98d9f34595ab83be578c00`,
+  pins the package through APT policy, and verifies the installed package,
+  binary, and repository origin before ingress activation.
+- Replaces Ubuntu Noble's Caddy `2.6.2`, which accepted both live
+  TLS-ALPN-01 challenges but failed current Let's Encrypt production order
+  finalization, with the exact qualified release. Caddy `2.11.4` obtained
+  trusted production certificates for both temporary Azure qualification
+  FQDNs and served verified HTTPS successfully.
+- A patched rc7 recovery run first proved both corrections, and a subsequently
+  rebuilt clean Ubuntu 24.04 Azure VM completed the rc8 installer from zero
+  state. The fresh run passed the Controller health gate, session maintenance,
+  trusted local/shared HTTPS, public recovery, node-FQDN readiness, protected
+  documentation redirect, and the complete Ansible activation with zero
+  failures. Both FQDNs returned HTTP 200 with publicly trusted Let's Encrypt
+  certificates.
+
+## v0.3.0-rc7 Ubuntu time-provider qualification fix
+
+- Fixes a deterministic Ubuntu 24.04 failure where the temporary package
+  service-start guard allowed `systemd-timesyncd` to remain active after its
+  package unit was replaced by Chrony. The handoff now handles both a normally
+  loaded unit and the package-replaced `LoadState=not-found`/`ActiveState=active`
+  state before Controller services are activated.
+- Keeps the strict Chrony readiness contract for bounded clock correction,
+  normal leap status, valid stratum, and systemd NTP synchronization, while no
+  longer rejecting a newly synchronized host solely because its initial
+  frequency-skew estimate has not yet converged.
+- A clean Ubuntu 24.04.4 ARM64 UTM run now passes the host base, SSH safety,
+  PostgreSQL, PgBouncer, Podman image build, migrations, Controller activation,
+  and session-maintenance stages. It then fails closed at trusted HTTPS exactly
+  as expected on a NAT-only network where public TCP 80/443 cannot reach Caddy.
+  Public certificate issuance on Azure remains the live acceptance gate.
+
+## v0.3.0-rc6 turnkey-installer beta
+
+This section records the rc6 prerelease scope. Static, regression, and security
+verification pass; fresh Ubuntu 24.04 installation and certificate issuance
+remain live acceptance gates.
+
+### Enabled beta paths
+
+- Replaces the role-name prompt with a neutral five-option launcher:
+  **Create a new Controller Plane**, **Join an existing Controller Plane**,
+  **Deploy an Edge Appliance (SBC)**, **Manage an existing installation**, and
+  **Diagnostics / network readiness test**.
+- Enables only new one-node Controller creation, non-mutating diagnostics, and
+  bounded Manage actions for status, redacted support bundle, resume,
+  reconcile, and safe discard of a run proven to be pre-mutation.
+- Keeps Controller join/HA and full SBC deployment visibly unavailable. The
+  bounded Ubuntu Edge enrollment client is not presented as an SBC, and the
+  complete private Debian 13 AMD64 voice POC is not presented as Ubuntu-ready.
+- Removes ordinal Controller and Edge naming guidance from product UX. Immutable node
+  IDs and authoritative topology state are independent of operator-selected
+  FQDNs/display names.
+
+### Operator preflight contract
+
+- Best-effort public-IP prefill compares multiple short-timeout HTTPS sources,
+  warns that egress NAT may differ from the inbound service address, and
+  requires confirmation/manual override.
+- DNS validation retains entered answers and offers retry, bounded timed retry,
+  change, a propagation-check link, and safe exit while reporting resolver
+  lookup failure, wrong A, and unsupported AAAA; retries best-effort flush the
+  local systemd-resolved cache. Authoritative/recursive and CAA diagnosis remain
+  future work.
+- Adds explicit `Infrastructure-managed` (default, no UFW ownership) and
+  `Installer-managed` (previewed lockout-safe UFW) firewall modes.
+- Selects timezone from the IANA list and configures Chrony with
+  automatic/provider or validated custom NTP sources before Controller service
+  activation. Durable timestamps remain UTC.
+
+### Evidence, ownership, and failure cleanup
+
+- Advances new rc6 runs to ledger schema 5, moves installer transaction state
+  beneath `/var/lib/vivolution/installer`, moves installer evidence beneath
+  `/var/log/vivolution/installer`, and records exact host ownership beneath
+  `/var/lib/vivolution/ownership`.
+- The complete FHS target still separates immutable releases in `/opt`,
+  configuration/secrets in `/etc`, state in `/var/lib`, evidence in `/var/log`,
+  staging in `/var/cache`, and volatile files in `/run`; rc6 does not claim the
+  complete runtime/release migration.
+- Adds levelled `TRACE` through `FATAL` records plus `AUDIT` events, RFC 3339
+  UTC context, sanitized command metadata/output, 10 MiB/five-generation log
+  rotation, and bounded per-command output. There is no unredacted or
+  shell-trace mode; compression and longer-term export/retention remain future.
+- The support bundle remains allowlist-based and excludes credentials, grants,
+  private keys, database URLs, authorization headers, carrier secrets, and
+  customer-sensitive call data.
+- Adds only a fail-closed **schema-5 pre-mutation discard** contract: exact
+  allow-listed objects are previewed by dry-run and removed only after
+  `DISCARD-INCOMPLETE` when schema-5 evidence proves no mutation. Legacy state
+  is detection/preview-only. Post-mutation
+  uninstall, repair, rollback, upgrade, backup/restore, and node removal are not
+  implemented by this candidate.
+
+### rc5 migration boundary
+
+- rc6 does not claim in-place resume or upgrade of an rc5 schema-4 run.
+- It may detect and preview a recognized rc3-rc5 ledger when the exact legacy
+  allowlist and phase states prove that no mutation began, but it refuses
+  automated deletion because the legacy lock is not race-safe. Fresh Ubuntu
+  24.04 remains the rc6 acceptance path.
+- A possibly mutated rc5 host requires inspection and a separately qualified
+  migration/removal procedure; pre-mutation discard refuses it.
+
+## Let's Encrypt-only Controller HTTPS
+
+- Adds a separately validated ACME contact email to the interactive and
+  answer-file installer contracts.
+- Pins Caddy to the Let's Encrypt production ACME directory as its single
+  certificate issuer for both the unique Controller VM FQDN and stable shared
+  FQDN, with no alternate public CA or local/self-signed fallback.
+- Rejects published AAAA records because the standalone profile deliberately
+  exposes only IPv4 ingress, and retains trusted HTTPS probes so incomplete
+  public issuance fails installation closed.
+- Leaves certificate storage and automatic renewal under Caddy's managed
+  service lifecycle. Future Teams/SBC signaling certificates remain outside
+  this Controller-web certificate scope.
+- Advances the installer ledger schema so rc2 resume/reconcile is refused;
+  existing alternate-CA certificate storage is not mislabeled as converted to
+  the new Let's Encrypt-only contract.
 
 ## Release-matched operator documentation
 
@@ -11,7 +145,8 @@
   isolation, permissions restrictions, and search-engine exclusion to both document surfaces.
 - Adds strictly selected, bounded PostgreSQL sessions to the standalone Ubuntu installer with
   immediate server-side logout revocation, while retaining the legacy-safe file default and
-  explicit signed-cookie compatibility. CP2/CP3 and round-robin remain planned, not released.
+  explicit signed-cookie compatibility. Additional Controller nodes and
+  round-robin remain planned, not released.
 - Allows the privileged operator reconciler to validate, normalize and idempotently maintain
   an optional contact email without exposing identity administration to the runtime console.
 

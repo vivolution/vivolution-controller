@@ -53,16 +53,26 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
         self.assertIn("cp_min_memory_mb | int >= 4096", tasks)
         self.assertIn("cp_min_root_disk_gb | int >= 40", tasks)
         self.assertIn("NTPSynchronized", tasks)
+        self.assertIn("timedatectl", tasks)
+        self.assertIn("list-timezones", tasks)
+        self.assertIn("cp_timezone in cp_host_timezone_choices.stdout_lines", tasks)
+        self.assertIn("cp_ntp_mode in ['automatic', 'custom']", tasks)
+        self.assertIn("cp_firewall_mode in ['infrastructure', 'installer']", tasks)
         self.assertIn("/var/run/reboot-required", tasks)
 
     def test_preflight_validates_node_shared_fqdns_and_exact_public_ip(self):
         tasks = read("roles/ubuntu_preflight/tasks/main.yml")
+        self.assertIn("^cp1-[0-9a-f]{64}$", tasks)
         for token in (
             "cp_node_fqdn",
             "cp_shared_fqdn",
             "cp_public_ipv4",
             "cp_ingress_server_name == cp_shared_fqdn",
+            "cp_acme_email is defined",
+            "cp_acme_email is match",
             "resolve exclusively to",
+            "must not publish an IPv6 AAAA record",
+            "socket.AF_INET6",
             "address.is_global",
         ):
             self.assertIn(token, tasks)
@@ -82,8 +92,16 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
             "/etc/pgbouncer/pgbouncer.ini",
             "/etc/caddy/Caddyfile",
             "/etc/containers/systemd/vivolution-cp-web.container",
+            "/var/lib/vivolution/releases",
+            "/var/lib/vivolution/artifacts",
+            "/var/lib/vivolution/backups",
+            "/var/lib/vivolution/ownership",
         ):
             self.assertIn(collision, tasks)
+        self.assertNotRegex(tasks, re.compile(r"(?m)^\s+- /var/lib/vivolution$"))
+        self.assertIn("/var/lib/vivolution/installer transaction subtree", tasks)
+        self.assertIn("Inspect the pre-install Chrony provider configuration", tasks)
+        self.assertIn("cp_chrony_config_preexisting", tasks)
 
     def test_full_pgdg_primary_fingerprint_is_verified_before_repository(self):
         tasks = read("roles/ubuntu_base_os/tasks/main.yml")
@@ -95,19 +113,49 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
         self.assertIn("noble-pgdg", tasks)
         self.assertIn("Signed-By: {{ cp_pgdg_keyring_path }}", tasks)
 
+    def test_caddy_repository_key_and_exact_release_are_pinned(self):
+        defaults = read("roles/ubuntu_base_os/defaults/main.yml")
+        tasks = read("roles/ubuntu_base_os/tasks/main.yml")
+
+        fingerprint = "65760C51EDEA2017CEA2CA15155B6D79CA56EA34"
+        key_sha256 = "783dfee04b19e851a928cd87b34710213ebbe7628f98d9f34595ab83be578c00"
+        self.assertIn(f"cp_caddy_signing_key_fingerprint: {fingerprint}", defaults)
+        self.assertIn(f"cp_caddy_signing_key_sha256: {key_sha256}", defaults)
+        self.assertIn("cp_caddy_package_version: '2.11.4'", defaults)
+        self.assertIn("https://dl.cloudsmith.io/public/caddy/stable/gpg.key", defaults)
+        self.assertIn("checksum: \"sha256:{{ cp_caddy_signing_key_sha256 }}\"", tasks)
+        self.assertIn(fingerprint, tasks)
+        self.assertIn(key_sha256, tasks)
+        self.assertIn("/etc/apt/sources.list.d/caddy-stable.sources", tasks)
+        self.assertIn("/etc/apt/preferences.d/vivolution-caddy", tasks)
+        self.assertIn("Pin-Priority: 1001", tasks)
+        self.assertIn('name: "caddy={{ cp_caddy_package_version }}"', tasks)
+        self.assertIn("allow_downgrade: true", tasks)
+        self.assertIn("argv: [/usr/bin/caddy, version]", tasks)
+        self.assertIn("current", tasks)
+        self.assertIn("order finalization", tasks)
+        self.assertIn("cp_caddy_repository_url in cp_caddy_installed_package_policy.stdout", tasks)
+        self.assertIn("caddy-stable.gpg.key", tasks)
+        self.assertIn("caddy-stable-archive-keyring.gpg", tasks)
+
     def test_required_packages_are_installed_while_auto_start_is_blocked(self):
         tasks = read("roles/ubuntu_base_os/tasks/main.yml")
         for package in (
-            "caddy",
+            "chrony",
             "podman",
             "pgbouncer",
             "postgresql-17",
             "postgresql-client-17",
             "postgresql-contrib-17",
-            "ufw",
+            "runc",
             "unattended-upgrades",
         ):
             self.assertRegex(tasks, rf"(?m)^\s+- {re.escape(package)}$")
+        self.assertIn("argv: [/usr/sbin/runc, --version]", tasks)
+        self.assertIn("preserve both AppArmor confinement", tasks)
+        self.assertIn('name: "caddy={{ cp_caddy_package_version }}"', tasks)
+        self.assertIn("name: ufw", tasks)
+        self.assertIn("when: cp_firewall_mode == 'installer'", tasks)
         self.assertLess(tasks.index("/usr/sbin/policy-rc.d"), tasks.index("postgresql-17"))
         self.assertIn("/run/vivolution-installer-policy-rc-active", tasks)
         self.assertIn("exit 0", tasks)
@@ -116,7 +164,8 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
             tasks.index("Install standalone controller foundation packages"),
         )
         self.assertIn("/var/run/reboot-required", tasks)
-        self.assertIn("sudo ./installer/install.sh resume", tasks)
+        self.assertIn("/v0.3.0-rc8/install.sh", tasks)
+        self.assertIn("sudo sh -s -- resume", tasks)
         for unit in (
             "caddy.service",
             "pgbouncer.service",
@@ -212,6 +261,8 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
 
     def test_firewall_preserves_active_client_and_has_no_broad_ssh_rule(self):
         tasks = read("roles/ubuntu_firewall/tasks/main.yml")
+        defaults = read("roles/ubuntu_firewall/defaults/main.yml")
+        self.assertIn("cp_firewall_mode: infrastructure", defaults)
         self.assertIn("SSH_CONNECTION", tasks)
         self.assertIn("cp_active_ssh_client_ipv4 ~ '/32'", tasks)
         self.assertEqual(tasks.count("- 0.0.0.0/0"), 1)
@@ -228,6 +279,112 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
             tasks,
         )
         self.assertNotIn("(cp_firewall_ssh_source_ipv4_cidrs | length) + 4", tasks)
+        self.assertIn("Preserve infrastructure-managed firewall ownership", tasks)
+        self.assertIn("managed_policy=ufw", tasks)
+        self.assertIn("managed_policy=none", tasks)
+        self.assertGreaterEqual(
+            tasks.count("when: cp_firewall_mode == 'installer'"),
+            14,
+        )
+
+    def test_chrony_timezone_and_utc_gate_precede_controller_services(self):
+        defaults = read("roles/ubuntu_base_os/defaults/main.yml")
+        tasks = read("roles/ubuntu_base_os/tasks/main.yml")
+        chrony = read("roles/ubuntu_base_os/templates/chrony.conf.j2")
+        playbook = read("install-controller.yml")
+
+        self.assertIn("cp_timezone: Etc/UTC", defaults)
+        self.assertIn("cp_ntp_mode: automatic", defaults)
+        self.assertIn("cp_ntp_servers: []", defaults)
+        self.assertIn("timedatectl, set-timezone", tasks)
+        self.assertIn("timedatectl, set-local-rtc, '0'", tasks)
+        self.assertIn("chronyc", tasks)
+        self.assertIn("waitsync", tasks)
+        self.assertIn(
+            "      - '60'\n      - '1.0'\n      - '0'\n      - '2'",
+            tasks,
+        )
+        self.assertNotIn("      - '100.0'", tasks)
+        self.assertIn("systemd-timesyncd", tasks)
+        self.assertIn("--property=LoadState", tasks)
+        self.assertIn("--property=ActiveState", tasks)
+        self.assertIn("Stop and disable a loaded systemd-timesyncd provider", tasks)
+        self.assertIn("Stop an active package-replaced systemd-timesyncd provider", tasks)
+        self.assertIn("argv: [systemctl, stop, systemd-timesyncd.service]", tasks)
+        self.assertIn("'ActiveState=active'", tasks)
+        self.assertIn("'LoadState=loaded' not in", tasks)
+        self.assertIn("enabled: false", tasks)
+        self.assertIn("state: stopped", tasks)
+        self.assertIn("only active host time authority", tasks)
+        self.assertIn("cp_systemd_timesyncd_state.rc in [3, 4]", tasks)
+        self.assertIn("['active', 'activating', 'reloading', 'deactivating']", tasks)
+        self.assertIn("NTPSynchronized=yes", tasks)
+        self.assertIn("controller, database, and ingress services remain masked", tasks)
+        self.assertLess(tasks.index("waitsync"), tasks.index("Require PostgreSQL 17"))
+        self.assertLess(
+            playbook.index("name: ubuntu_base_os"),
+            playbook.index("name: postgres_local"),
+        )
+
+        self.assertIn("{% for server in cp_ntp_servers %}", chrony)
+        self.assertIn("server {{ server }} iburst", chrony)
+        self.assertIn("rtcsync", chrony)
+        self.assertIn("port 0", chrony)
+        self.assertIn("cmdport 0", chrony)
+        self.assertIn("when: cp_ntp_mode == 'custom'", tasks)
+        self.assertIn("Automatic mode preserves safe provider sources", tasks)
+        self.assertIn("chrony-preinstall.state", tasks)
+        self.assertIn("original-host/chrony.conf", tasks)
+        chrony_policy = tasks.index("Require a valid client-only Chrony policy")
+        loaded_handoff = tasks.index("Stop and disable a loaded systemd-timesyncd provider")
+        replaced_handoff = tasks.index(
+            "Stop an active package-replaced systemd-timesyncd provider"
+        )
+        chrony_activation = tasks.index("Activate the managed Chrony time client")
+        timesyncd_postcondition = tasks.index(
+            "Require Chrony to be the only active host time authority"
+        )
+        self.assertLess(chrony_policy, loaded_handoff)
+        self.assertLess(loaded_handoff, chrony_activation)
+        self.assertLess(chrony_policy, replaced_handoff)
+        self.assertLess(replaced_handoff, chrony_activation)
+        self.assertLess(chrony_activation, timesyncd_postcondition)
+
+    def test_owned_host_artifacts_have_protected_scoped_manifests(self):
+        base = read("roles/ubuntu_base_os/tasks/main.yml")
+        ssh = read("roles/ubuntu_ssh_safety/tasks/main.yml")
+        firewall = read("roles/ubuntu_firewall/tasks/main.yml")
+        manifest = read("roles/ubuntu_base_os/templates/ubuntu-host.manifest.j2")
+
+        self.assertIn("/var/lib/vivolution/ownership", base)
+        self.assertIn("mode: '0700'", base)
+        self.assertIn("ubuntu-host.manifest", base)
+        self.assertIn("ubuntu-ssh.manifest", ssh)
+        self.assertIn("ubuntu-firewall.manifest", firewall)
+        for content in (base, ssh, firewall):
+            self.assertIn("mode: '0600'", content)
+        self.assertIn("managed_file=/etc/chrony/chrony.conf", manifest)
+        self.assertIn("managed_setting=hardware-clock-utc", manifest)
+        self.assertIn("managed_setting=systemd-timesyncd-inactive", manifest)
+        self.assertIn("managed_package=caddy:2.11.4", manifest)
+        self.assertIn("managed_package=runc", manifest)
+
+    def test_controller_runtime_pins_runc_without_weakening_sandboxing(self):
+        quadlet = (
+            ANSIBLE_ROOT.parents[1]
+            / "deploy/roles/controller_services/templates/vivolution-cp-web.container.j2"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Network=host", quadlet)
+        self.assertIn("ReadOnly=true", quadlet)
+        self.assertIn("DropCapability=all", quadlet)
+        self.assertIn("PodmanArgs=--runtime=/usr/sbin/runc", quadlet)
+        self.assertIn("NoNewPrivileges=true", quadlet)
+        self.assertNotIn("apparmor=unconfined", quadlet)
+        self.assertLess(
+            quadlet.index("PodmanArgs=--runtime=/usr/sbin/runc"),
+            quadlet.index("NoNewPrivileges=true"),
+        )
 
     def test_caddy_serves_both_fqdns_and_disables_admin_api(self):
         caddyfile = read("roles/ubuntu_ingress/templates/Caddyfile.j2")
@@ -235,7 +392,19 @@ class StandaloneAnsibleLayerTests(unittest.TestCase):
         self.assertIn("https://{{ cp_shared_fqdn }}:443", caddyfile)
         self.assertIn("https://{{ cp_node_fqdn }}:443", caddyfile)
         self.assertIn("admin off", caddyfile)
+        self.assertEqual(caddyfile.count("cert_issuer acme"), 1)
+        self.assertIn(
+            "dir https://acme-v02.api.letsencrypt.org/directory", caddyfile
+        )
+        self.assertIn("email {{ cp_acme_email | to_json }}", caddyfile)
+        self.assertNotIn("zerossl", caddyfile.lower())
+        self.assertNotIn("tls internal", caddyfile.lower())
+        self.assertIn("@edge_api path /api/edge/*", caddyfile)
+        self.assertIn("request_body @edge_api", caddyfile)
+        self.assertIn("max_size 16384B", caddyfile)
         self.assertIn("':2019' not in cp_caddy_listeners.stdout", tasks)
+        self.assertIn("Require only the Let's Encrypt production ACME issuer", tasks)
+        self.assertIn("cp_caddy_tls_policies[0].issuers | length == 1", tasks)
 
     def test_post_install_checks_readiness_recovery_docs_and_node_name(self):
         playbook = read("install-controller.yml")

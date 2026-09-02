@@ -12,15 +12,16 @@ import contextlib
 import datetime
 import email.utils
 import fcntl
-import getpass
 import hashlib
 import io
 import ipaddress
 import json
 import os
 import platform
+import pwd
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import stat
@@ -28,20 +29,27 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
+import zoneinfo
 from pathlib import Path
 
 
-INSTALLER_VERSION = "0.3.0"
-LEDGER_SCHEMA_VERSION = 3
+INSTALLER_VERSION = "0.3.0-rc8"
+LEDGER_SCHEMA_VERSION = 5
 SUPPORTED_OS_ID = "ubuntu"
 SUPPORTED_OS_VERSION = "24.04"
-DEFAULT_STATE_DIR = "/var/lib/vivolution-installer"
-DEFAULT_LOG_DIR = "/var/log/vivolution-installer"
-DEFAULT_DRY_RUN_STATE_DIR = "/var/lib/vivolution-installer-dry-run"
-DEFAULT_DRY_RUN_LOG_DIR = "/var/log/vivolution-installer-dry-run"
+DEFAULT_STATE_DIR = "/var/lib/vivolution/installer"
+DEFAULT_LOG_DIR = "/var/log/vivolution/installer"
+DEFAULT_DRY_RUN_STATE_DIR = "/var/lib/vivolution/installer-dry-run"
+DEFAULT_DRY_RUN_LOG_DIR = "/var/log/vivolution/installer-dry-run"
+LEGACY_STATE_DIR = "/var/lib/vivolution-installer"
+LEGACY_LOG_DIR = "/var/log/vivolution-installer"
 DEFAULT_PLAYBOOK = "installer/ansible/install-controller.yml"
 DEFAULT_ANSIBLE_CONFIG = "installer/ansible/ansible.cfg"
+LETS_ENCRYPT_PRODUCTION_DIRECTORY = (
+    "https://acme-v02.api.letsencrypt.org/directory"
+)
 
 PHASES = (
     "preflight",
@@ -54,7 +62,27 @@ PHASES = (
     "summary",
 )
 CONFIRMATION_TOKEN = "INSTALL"
-BOOTSTRAP_PACKAGES = ("ansible-core", "ca-certificates", "python3-apt", "ufw")
+DISCARD_CONFIRMATION_TOKEN = "DISCARD-INCOMPLETE"
+BASE_BOOTSTRAP_PACKAGES = ("ansible-core", "ca-certificates", "python3-apt")
+INSTALLER_FIREWALL_PACKAGES = ("ufw",)
+BOOTSTRAP_PACKAGES = BASE_BOOTSTRAP_PACKAGES + INSTALLER_FIREWALL_PACKAGES
+PUBLIC_IPV4_SOURCES = (
+    "https://ifconfig.me/ip",
+    "https://api.ipify.org",
+    "https://checkip.amazonaws.com",
+)
+LOG_LEVELS = ("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL")
+LOG_ROTATE_BYTES = 10 * 1024 * 1024
+LOG_ROTATE_COUNT = 5
+COMMAND_OUTPUT_MAX_LINES = 10000
+COMMAND_OUTPUT_MAX_BYTES = 4 * 1024 * 1024
+MENU_OPTIONS = (
+    ("create-controller", "Create a new Controller Plane", True),
+    ("join-controller", "Join an existing Controller Plane", False),
+    ("deploy-edge", "Deploy an Edge Appliance (SBC)", False),
+    ("manage", "Manage an existing installation", True),
+    ("diagnostics", "Diagnostics / network readiness test", True),
+)
 ANSWER_KEYS = {
     "deployment_mode",
     "node_fqdn",
@@ -63,17 +91,41 @@ ANSWER_KEYS = {
     "ssh_source_cidrs",
     "admin_username",
     "admin_email",
+    "acme_email",
     "ssh_allowed_user",
+    "firewall_mode",
+    "timezone",
+    "ntp_mode",
+    "ntp_servers",
 }
-REQUIRED_ANSWER_KEYS = ANSWER_KEYS - {"ssh_allowed_user"}
+REQUIRED_ANSWER_KEYS = ANSWER_KEYS - {
+    "ssh_allowed_user",
+    "acme_email",
+    "firewall_mode",
+    "timezone",
+    "ntp_mode",
+    "ntp_servers",
+    "ssh_source_cidrs",
+}
 SECRET_KEYS = {
     "cp_controller_admin_password",
     "cp_db_owner_password",
     "cp_db_runtime_password",
     "cp_django_secret_key",
+    "cp_edge_enrollment_token_pepper",
     "cp_rls_context_key",
 }
-SENSITIVE_KEY_PARTS = ("password", "secret", "token", "private_key", "credential")
+SENSITIVE_KEY_PARTS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "private_key",
+    "credential",
+    "authorization",
+)
 RESERVED_ADMIN_USERS = {
     "root",
     "postgres",
@@ -101,6 +153,16 @@ def utc_now():
     return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
 
 
+def effective_process_identity():
+    """Return the kernel effective UID and its account name, never env/login state."""
+    effective_uid = os.geteuid()
+    try:
+        effective_user = pwd.getpwuid(effective_uid).pw_name
+    except KeyError:
+        effective_user = str(effective_uid)
+    return effective_uid, effective_user
+
+
 def _fsync_directory(path):
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
@@ -112,13 +174,162 @@ def _fsync_directory(path):
         os.close(fd)
 
 
+def _directory_metadata(path):
+    """Return lstat metadata for a real directory without following links."""
+    path = Path(path)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise InstallerError("Could not inspect secure directory %s: %s" % (path, exc))
+    if stat.S_ISLNK(metadata.st_mode):
+        raise InstallerError("Secure directory ancestry must not contain a symbolic link: %s" % path)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise InstallerError("Secure directory ancestry contains a non-directory: %s" % path)
+    return metadata
+
+
+def _validate_secure_directory_metadata(metadata, component, boundary, expected_uid):
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise InstallerError("Secure directory ancestry contains a non-directory: %s" % component)
+    if metadata.st_uid != expected_uid:
+        raise InstallerError(
+            "Secure directory must be owned by UID %d: %s"
+            % (expected_uid, component)
+        )
+    unsafe_write_bits = stat.S_IMODE(metadata.st_mode) & 0o022
+    # Ubuntu Noble with rsyslog may package /var/log as root:syslog 0775.
+    # This is the sole fixed OS-anchor exception: it remains a real,
+    # root-owned directory and is never chmodded by us.  The Vivolution child
+    # and every other component remain non-group/world-writable.
+    if component == boundary / "var/log":
+        unsafe_write_bits &= ~0o020
+    if unsafe_write_bits:
+        raise InstallerError(
+            "Secure directory must not be group/world writable: %s" % component
+        )
+
+
+def _validate_secure_directory_chain(path, boundary, expected_uid):
+    """Validate every existing directory from ``boundary`` through ``path``.
+
+    The live installer passes ``/`` and UID 0.  Unit tests pass their explicit
+    fake root and the test process UID, so security failures can be exercised
+    without weakening or special-casing the individual installer paths.
+    """
+    path = Path(path)
+    boundary = Path(boundary)
+    if not path.is_absolute() or not boundary.is_absolute():
+        raise InstallerError("Secure directory paths must be absolute")
+    try:
+        relative = path.relative_to(boundary)
+    except ValueError:
+        raise InstallerError("Secure path %s escapes trusted root %s" % (path, boundary))
+
+    components = [boundary]
+    current = boundary
+    for part in relative.parts:
+        current = current / part
+        components.append(current)
+
+    missing_parent = False
+    for component in components:
+        metadata = _directory_metadata(component)
+        if metadata is None:
+            missing_parent = True
+            continue
+        if missing_parent:
+            raise InstallerError(
+                "Secure directory ancestry is inconsistent at %s" % component
+            )
+        _validate_secure_directory_metadata(
+            metadata, component, boundary, expected_uid
+        )
+    return True
+
+
+def _secure_ensure_private_directory(path, boundary, expected_uid):
+    """Create a private directory chain only after validating its ancestry."""
+    path = Path(path)
+    boundary = Path(boundary)
+    _validate_secure_directory_chain(path, boundary, expected_uid)
+    try:
+        relative = path.relative_to(boundary)
+    except ValueError:
+        raise InstallerError("Secure path %s escapes trusted root %s" % (path, boundary))
+
+    if _directory_metadata(boundary) is None:
+        raise InstallerError("Trusted filesystem root does not exist: %s" % boundary)
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(str(boundary), flags)
+    except OSError as exc:
+        raise InstallerError("Could not securely open trusted root %s: %s" % (boundary, exc))
+    current = boundary
+    try:
+        _validate_secure_directory_metadata(
+            os.fstat(descriptor), current, boundary, expected_uid
+        )
+        for part in relative.parts:
+            current = current / part
+            try:
+                child = os.open(part, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                except OSError as exc:
+                    raise InstallerError(
+                        "Could not create secure directory %s: %s" % (current, exc)
+                    )
+                try:
+                    child = os.open(part, flags, dir_fd=descriptor)
+                except OSError as exc:
+                    raise InstallerError(
+                        "Could not securely open new directory %s: %s" % (current, exc)
+                    )
+            except OSError as exc:
+                raise InstallerError(
+                    "Could not securely open directory %s: %s" % (current, exc)
+                )
+            try:
+                _validate_secure_directory_metadata(
+                    os.fstat(child), current, boundary, expected_uid
+                )
+            except Exception:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+
+        # Existing safe private roots may be 0750/0755. Narrow only the opened
+        # installer-owned leaf; never chmod a re-resolved absolute path.
+        os.fchmod(descriptor, 0o700)
+        _validate_secure_directory_metadata(
+            os.fstat(descriptor), path, boundary, expected_uid
+        )
+    finally:
+        os.close(descriptor)
+    _validate_secure_directory_chain(path, boundary, expected_uid)
+    return path
+
+
 def ensure_private_directory(path):
     path = Path(path)
-    if path.is_symlink():
-        raise InstallerError("Private directory must not be a symbolic link: %s" % path)
-    if path.exists():
-        if not path.is_dir():
-            raise InstallerError("Private path is not a directory: %s" % path)
+    metadata = _directory_metadata(path)
+    if metadata is not None:
+        if metadata.st_uid != os.geteuid():
+            raise InstallerError("Private directory has an unexpected owner: %s" % path)
+        if stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise InstallerError(
+                "Private directory must not be group/world writable: %s" % path
+            )
     else:
         path.mkdir(mode=0o700, parents=True)
     os.chmod(str(path), 0o700)
@@ -167,19 +378,56 @@ def read_json_file(path):
 def append_private_line(path, line):
     path = Path(path)
     ensure_private_directory(path.parent)
+    encoded = (line.rstrip("\n") + "\n").encode("utf-8", errors="replace")
+    if path.exists() and not path.is_symlink():
+        try:
+            needs_rotation = path.stat().st_size + len(encoded) > LOG_ROTATE_BYTES
+        except OSError as exc:
+            raise InstallerError("Could not inspect installer log %s: %s" % (path, exc))
+        if needs_rotation:
+            for index in range(LOG_ROTATE_COUNT - 1, 0, -1):
+                source = path.with_name("%s.%d" % (path.name, index))
+                destination = path.with_name("%s.%d" % (path.name, index + 1))
+                if source.exists() and not source.is_symlink():
+                    os.replace(str(source), str(destination))
+            os.replace(str(path), str(path.with_name("%s.1" % path.name)))
+            _fsync_directory(path.parent)
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(str(path), flags, 0o600)
     try:
         os.fchmod(fd, 0o600)
-        os.write(fd, (line.rstrip("\n") + "\n").encode("utf-8", errors="replace"))
+        os.write(fd, encoded)
         os.fsync(fd)
     finally:
         os.close(fd)
 
 
 class Redactor:
+    _authorization_pattern = re.compile(
+        r"(?im)\b((?:proxy-)?authorization)\s*:\s*[^\r\n]+"
+    )
+    _assignment_pattern = re.compile(
+        r"(?i)([\"']?(?:password|passwd|token|access[_-]?token|refresh[_-]?token|"
+        r"secret|api[_-]?key|apikey|client[_-]?secret)[\"']?\s*[:=]\s*)"
+        r"(\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;}\]\r\n]+)"
+    )
+    _credential_url_pattern = re.compile(
+        r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s]+)@"
+    )
+    _private_key_pattern = re.compile(
+        r"-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----.*?"
+        r"(?:-----END \1-----|\Z)",
+        re.DOTALL,
+    )
+    _private_key_begin_pattern = re.compile(
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"
+    )
+    _private_key_end_pattern = re.compile(
+        r"-----END [A-Z0-9 ]*PRIVATE KEY-----"
+    )
+
     def __init__(self, secret_values=None):
         self._values = set()
         self.add_values(secret_values or [])
@@ -194,17 +442,135 @@ class Redactor:
         lowered = str(key).lower()
         return any(part in lowered for part in SENSITIVE_KEY_PARTS)
 
-    def text(self, value):
-        rendered = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    @staticmethod
+    def _quoted_redaction(match):
+        prefix = match.group(1)
+        original = match.group(2)
+        if len(original) >= 2 and original[0] in ("\"", "'") and original[-1] == original[0]:
+            replacement = "%s[REDACTED]%s" % (original[0], original[0])
+        else:
+            replacement = "[REDACTED]"
+        return prefix + replacement
+
+    @staticmethod
+    def _private_key_redaction(match):
+        # Keep the same physical line count so surrounding diagnostics retain
+        # useful record boundaries without retaining any key material.
+        rendered = match.group(0)
+        line_count = max(1, len(rendered.splitlines()))
+        ending = "\n" if rendered.endswith("\n") else ""
+        return "\n".join("[REDACTED PRIVATE KEY]" for _unused in range(line_count)) + ending
+
+    def _patterns(self, value):
+        rendered = str(value)
         for secret_value in sorted(self._values, key=len, reverse=True):
             rendered = rendered.replace(secret_value, "[REDACTED]")
+        rendered = self._private_key_pattern.sub(
+            self._private_key_redaction, rendered
+        )
+        rendered = self._authorization_pattern.sub(
+            lambda match: "%s: [REDACTED]" % match.group(1), rendered
+        )
+        rendered = self._assignment_pattern.sub(
+            self._quoted_redaction, rendered
+        )
+        rendered = self._credential_url_pattern.sub(
+            lambda match: "%s[REDACTED]@" % match.group(1), rendered
+        )
         return rendered
+
+    @staticmethod
+    def _escape_controls(rendered, preserve_newlines=False):
+        safe = []
+        for character in rendered:
+            codepoint = ord(character)
+            if character == "\n" and preserve_newlines:
+                safe.append("\n")
+            elif character == "\n":
+                safe.append("\\n")
+            elif character == "\r":
+                safe.append("\\r")
+            elif character == "\t":
+                safe.append("\\t")
+            elif codepoint < 32 or 127 <= codepoint <= 159:
+                safe.append("\\x%02x" % codepoint)
+            else:
+                safe.append(character)
+        return "".join(safe)
+
+    def text(self, value):
+        return self._escape_controls(self._patterns(value))
+
+    def multiline_text(self, value):
+        return self._escape_controls(
+            self._patterns(value), preserve_newlines=True
+        )
+
+    def stream_line(self, value, private_key_active=False):
+        """Redact one subprocess line while carrying PEM-block state."""
+        rendered = str(value)
+        begins = bool(self._private_key_begin_pattern.search(rendered))
+        ends = bool(self._private_key_end_pattern.search(rendered))
+        if private_key_active or begins:
+            return "[REDACTED PRIVATE KEY]", bool((private_key_active or begins) and not ends)
+        return self.text(rendered), False
+
+    def argv(self, command):
+        """Redact an argv vector, including secrets in a following argument."""
+        sensitive_options = {
+            "--password",
+            "--passwd",
+            "--token",
+            "--access-token",
+            "--refresh-token",
+            "--secret",
+            "--api-key",
+            "--apikey",
+            "--client-secret",
+            "--client_secret",
+            "--authorization",
+            "--proxy-authorization",
+            "--user",
+            "--userpwd",
+        }
+        safe = []
+        next_mode = None
+        for raw_argument in command:
+            argument = str(raw_argument)
+            if next_mode == "secret":
+                safe.append("[REDACTED]")
+                next_mode = None
+                continue
+            if next_mode == "header":
+                safe.append(self.text(argument))
+                next_mode = None
+                continue
+
+            safe.append(self.text(argument))
+            lowered = argument.lower()
+            if lowered in sensitive_options:
+                next_mode = "secret"
+            elif argument == "-H" or lowered == "--header":
+                # Preserve harmless headers, while text() removes Authorization
+                # and Proxy-Authorization values from the following argument.
+                next_mode = "header"
+        return safe
 
     def value(self, value, key=None):
         if key is not None and self._sensitive_key(key):
             return "[REDACTED]"
         if isinstance(value, dict):
-            return {str(k): self.value(v, key=k) for k, v in value.items()}
+            result = {}
+            for item_key, item_value in value.items():
+                rendered_key = str(item_key)
+                normalized_key = rendered_key.lower().replace("-", "_")
+                if normalized_key in ("argv", "command") and isinstance(
+                    item_value, (list, tuple)
+                ):
+                    result[rendered_key] = self.argv(item_value)
+                else:
+                    result[rendered_key] = self.value(item_value, key=item_key)
+            return result
         if isinstance(value, list):
             return [self.value(item) for item in value]
         if isinstance(value, tuple):
@@ -219,19 +585,76 @@ class InstallerLog:
         self.human_path = Path(human_path)
         self.event_path = Path(event_path)
         self.redactor = redactor or Redactor()
+        self.context = {}
 
-    def info(self, message):
+    def bind(self, **fields):
+        for key, value in fields.items():
+            if value is None:
+                self.context.pop(key, None)
+            else:
+                self.context[key] = value
+
+    def write(self, level, message, category="installer"):
+        normalized_level = str(level).upper()
+        if normalized_level not in LOG_LEVELS:
+            raise InstallerError("Unknown installer log level: %s" % level)
+        safe_message = self.redactor.text(message)
         append_private_line(
             self.human_path,
-            "%s INFO %s" % (utc_now(), self.redactor.text(message)),
+            "%s %-5s [%s] %s"
+            % (utc_now(), normalized_level, str(category), safe_message),
+        )
+        self.event(
+            "log",
+            level=normalized_level,
+            category=str(category),
+            message=safe_message,
+        )
+
+    def trace(self, message, category="installer"):
+        self.write("TRACE", message, category)
+
+    def debug(self, message, category="installer"):
+        self.write("DEBUG", message, category)
+
+    def info(self, message, category="installer"):
+        self.write("INFO", message, category)
+
+    def warn(self, message, category="installer"):
+        self.write("WARN", message, category)
+
+    def error(self, message, category="installer"):
+        self.write("ERROR", message, category)
+
+    def fatal(self, message, category="installer"):
+        self.write("FATAL", message, category)
+
+    def audit(self, event_name, **fields):
+        audit_category = str(fields.pop("category", "lifecycle"))
+        self.event(
+            event_name,
+            level="INFO",
+            category="AUDIT",
+            audit_category=audit_category,
+            **fields,
+        )
+        rendered = self.redactor.text(event_name)
+        append_private_line(
+            self.human_path,
+            "%s AUDIT [%s] %s"
+            % (utc_now(), audit_category, rendered),
         )
 
     def event(self, event_name, **fields):
         record = {
             "timestamp": utc_now(),
             "event": event_name,
-            "fields": self.redactor.value(fields),
+            "fields": self.redactor.value({**self.context, **fields}),
         }
+        if "level" in fields:
+            record["level"] = str(fields["level"]).upper()
+        if "category" in fields:
+            record["category"] = str(fields["category"])
         append_private_line(self.event_path, json.dumps(record, sort_keys=True))
 
 
@@ -241,6 +664,9 @@ def run_streamed_command(
     prefix,
     runner=subprocess.Popen,
     console_stream=None,
+    show_output=True,
+    max_output_lines=COMMAND_OUTPUT_MAX_LINES,
+    max_output_bytes=COMMAND_OUTPUT_MAX_BYTES,
     **kwargs,
 ):
     """Run a command while durably logging and displaying each redacted line.
@@ -251,6 +677,26 @@ def run_streamed_command(
     and is not used by the installer CLI.
     """
     console_stream = sys.stdout if console_stream is None else console_stream
+    safe_command = log.redactor.argv(command)
+    safe_cwd = log.redactor.text(kwargs.get("cwd", os.getcwd()))
+    effective_uid, effective_user = effective_process_identity()
+    started_at = utc_now()
+    started_monotonic = time.monotonic()
+    log.info(
+        "Command started: %s" % " ".join(shlex.quote(item) for item in safe_command),
+        category="command",
+    )
+    log.event(
+        "command_started",
+        level="INFO",
+        category="command",
+        command=safe_command,
+        step=prefix,
+        cwd=safe_cwd,
+        effective_uid=effective_uid,
+        effective_user=effective_user,
+        started_at=started_at,
+    )
     process = runner(
         command,
         stdin=subprocess.DEVNULL,
@@ -262,14 +708,29 @@ def run_streamed_command(
         **kwargs,
     )
 
+    output_lines = 0
+    output_bytes = 0
+    output_truncated = False
+    private_key_active = False
+
     def emit(raw_line):
+        nonlocal output_lines, output_bytes, output_truncated, private_key_active
         line = str(raw_line).rstrip("\r\n")
-        safe_line = log.redactor.text(line)
+        safe_line, private_key_active = log.redactor.stream_line(
+            line, private_key_active=private_key_active
+        )
+        encoded_size = len(safe_line.encode("utf-8", errors="replace")) + 1
+        if output_lines >= max_output_lines or output_bytes + encoded_size > max_output_bytes:
+            output_truncated = True
+            return
+        output_lines += 1
+        output_bytes += encoded_size
         # append_private_line fsyncs every line before it is shown, so a power
         # loss cannot leave console progress that never reached the log.
-        log.info("%s: %s" % (prefix, safe_line))
-        console_stream.write("%s: %s\n" % (prefix, safe_line))
-        console_stream.flush()
+        log.debug("%s: %s" % (prefix, safe_line), category="command-output")
+        if show_output:
+            console_stream.write("%s: %s\n" % (prefix, safe_line))
+            console_stream.flush()
 
     output = getattr(process, "stdout", None)
     if isinstance(output, str):
@@ -287,20 +748,87 @@ def run_streamed_command(
         return_code = getattr(process, "returncode", None)
     if not isinstance(return_code, int):
         raise InstallerError("Command runner did not provide an exit code")
+    if output_truncated:
+        log.warn(
+            "Command output was truncated after %d lines / %d bytes"
+            % (output_lines, output_bytes),
+            category="command-output",
+        )
+        log.event(
+            "command_output_truncated",
+            level="WARN",
+            category="command-output",
+            captured_lines=output_lines,
+            captured_bytes=output_bytes,
+            line_limit=max_output_lines,
+            byte_limit=max_output_bytes,
+            step=prefix,
+        )
+    duration_ms = max(0, round((time.monotonic() - started_monotonic) * 1000))
+    signal_number = -return_code if return_code < 0 else None
+    log.event(
+        "command_completed",
+        level="INFO" if return_code == 0 else "ERROR",
+        category="command",
+        command=safe_command,
+        step=prefix,
+        cwd=safe_cwd,
+        effective_uid=effective_uid,
+        effective_user=effective_user,
+        started_at=started_at,
+        completed_at=utc_now(),
+        duration_ms=duration_ms,
+        exit_code=return_code if return_code >= 0 else None,
+        signal=signal_number,
+    )
+    log.info(
+        "Command completed in %d ms with %s"
+        % (
+            duration_ms,
+            "signal %d" % signal_number
+            if signal_number is not None
+            else "exit code %d" % return_code,
+        ),
+        category="command",
+    )
     return return_code
 
 
 class ExclusiveInstallerLock:
-    def __init__(self, path):
+    def __init__(self, path, security_root=None, expected_uid=None):
         self.path = Path(path)
+        self.security_root = Path(security_root) if security_root is not None else None
+        self.expected_uid = os.geteuid() if expected_uid is None else int(expected_uid)
         self._handle = None
 
     def __enter__(self):
-        ensure_private_directory(self.path.parent)
-        flags = os.O_RDWR | os.O_CREAT
+        if self.security_root is None:
+            ensure_private_directory(self.path.parent)
+        else:
+            _secure_ensure_private_directory(
+                self.path.parent, self.security_root, self.expected_uid
+            )
+        try:
+            existing = self.path.lstat()
+        except FileNotFoundError:
+            existing = None
+        except OSError as exc:
+            raise InstallerError("Could not inspect installer lock %s: %s" % (self.path, exc))
+        if existing is not None:
+            if (
+                not stat.S_ISREG(existing.st_mode)
+                or existing.st_uid != self.expected_uid
+                or stat.S_IMODE(existing.st_mode) & 0o022
+            ):
+                raise InstallerError("Installer lock file is unsafe: %s" % self.path)
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         fd = os.open(str(self.path), flags, 0o600)
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_uid != self.expected_uid:
+            os.close(fd)
+            raise InstallerError("Installer lock file is unsafe: %s" % self.path)
         os.fchmod(fd, 0o600)
         self._handle = os.fdopen(fd, "a+", encoding="ascii")
         try:
@@ -328,12 +856,31 @@ class InstallerPaths:
         root_path = Path(root)
         if not root_path.is_absolute():
             raise InstallerError("--root must be an absolute path")
-        self.root = root_path.resolve()
+        if ".." in root_path.parts:
+            raise InstallerError("--root must not contain '..'")
+        # Do not resolve here: resolution would silently traverse an attacker-
+        # controlled fake-root symlink before the secure ancestry check runs.
+        self.root = root_path
         self.dry_run = bool(dry_run)
         if state_dir is None:
             state_dir = DEFAULT_DRY_RUN_STATE_DIR if self.dry_run else DEFAULT_STATE_DIR
         if log_dir is None:
             log_dir = DEFAULT_DRY_RUN_LOG_DIR if self.dry_run else DEFAULT_LOG_DIR
+        if self.root == Path("/"):
+            approved_state = (
+                DEFAULT_DRY_RUN_STATE_DIR if self.dry_run else DEFAULT_STATE_DIR
+            )
+            approved_log = DEFAULT_DRY_RUN_LOG_DIR if self.dry_run else DEFAULT_LOG_DIR
+            if str(Path(state_dir)) != approved_state:
+                raise InstallerError(
+                    "--state-dir overrides are refused on the live host; approved path is %s"
+                    % approved_state
+                )
+            if str(Path(log_dir)) != approved_log:
+                raise InstallerError(
+                    "--log-dir overrides are refused on the live host; approved path is %s"
+                    % approved_log
+                )
         self.state_dir = self._rooted(state_dir)
         self.log_dir = self._rooted(log_dir)
         self.ledger = self.state_dir / "ledger.json"
@@ -342,9 +889,16 @@ class InstallerPaths:
         self.credentials = self.state_dir / "credentials.txt"
         self.summary = self.state_dir / "summary.json"
         self.inventory = self.state_dir / "inventory.json"
-        self.lock = self.state_dir / "installer.lock"
+        self.ownership = self.state_dir / "ownership.json"
+        self.tombstone = self.state_dir / "tombstone.json"
+        lock_name = "installer-dry-run.lock" if self.dry_run else "installer.lock"
+        self.lock = self.host_path("/run/vivolution/%s" % lock_name)
         self.human_log = self.log_dir / "install.log"
         self.event_log = self.log_dir / "events.jsonl"
+        self.legacy_state_dir = self._rooted(LEGACY_STATE_DIR)
+        self.legacy_log_dir = self._rooted(LEGACY_LOG_DIR)
+        self.legacy_ledger = self.legacy_state_dir / "ledger.json"
+        self.legacy_lock = self.legacy_state_dir / "installer.lock"
 
     def _rooted(self, logical_path):
         path = Path(logical_path)
@@ -359,24 +913,103 @@ class InstallerPaths:
     def host_path(self, logical_path):
         return self._rooted(logical_path)
 
+    @property
+    def security_uid(self):
+        return 0 if self.root == Path("/") else os.geteuid()
+
+    def validate_critical_paths(self):
+        """Validate state, log, and runtime-lock ancestry without writing."""
+        for directory in (self.state_dir, self.log_dir, self.lock.parent):
+            _validate_secure_directory_chain(
+                directory, self.root, self.security_uid
+            )
+        return True
+
+    def ensure_lock_directory(self):
+        self.validate_critical_paths()
+        return _secure_ensure_private_directory(
+            self.lock.parent, self.root, self.security_uid
+        )
+
+    def ensure_state_log_directories(self):
+        self.validate_critical_paths()
+        for directory in (self.state_dir, self.log_dir):
+            _secure_ensure_private_directory(
+                directory, self.root, self.security_uid
+            )
+        self.validate_critical_paths()
+
+    def exclusive_lock(self):
+        # Validate all three namespaces before the first lock-directory mkdir
+        # or lock-file write, then have the lock validate again at open time.
+        self.ensure_lock_directory()
+        return ExclusiveInstallerLock(
+            self.lock,
+            security_root=self.root,
+            expected_uid=self.security_uid,
+        )
+
 
 def parse_os_release(path):
     values = {}
     path = Path(path)
-    if path.is_symlink() or not path.is_file():
-        raise InstallerError("OS metadata is missing or unsafe: %s" % path)
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise InstallerError("Could not read %s: %s" % (path, exc))
+        path_metadata = path.lstat()
+    except OSError:
+        raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+
+    read_path = path
+    if stat.S_ISLNK(path_metadata.st_mode):
+        try:
+            link_target = os.readlink(path)
+        except OSError:
+            raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+        if link_target == "../usr/lib/os-release":
+            read_path = path.parent.parent / "usr/lib/os-release"
+        else:
+            raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+    elif not stat.S_ISREG(path_metadata.st_mode):
+        raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    descriptor = None
+    try:
+        descriptor = os.open(read_path, flags)
+        opened_metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_metadata.st_mode) or opened_metadata.st_size > 65536:
+            raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+        if path == Path("/etc/os-release") and (
+            opened_metadata.st_uid != 0 or opened_metadata.st_mode & 0o022
+        ):
+            raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+        chunks = []
+        remaining = 65537
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        if len(content) > 65536 or b"\x00" in content:
+            raise InstallerError("OS metadata is missing or unsafe: %s" % path)
+        lines = content.decode("utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise InstallerError("Could not read %s: %s" % (read_path, exc))
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     for line in lines:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, raw_value = line.split("=", 1)
+        key = key.strip()
+        if key in values:
+            raise InstallerError("OS metadata contains a duplicate key: %s" % key)
         value = raw_value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        values[key.strip()] = value
+        values[key] = value
     return values
 
 
@@ -411,7 +1044,9 @@ def validate_public_ipv4(value, field_name="public_ipv4"):
 
 
 def validate_ssh_cidrs(value):
-    if isinstance(value, str):
+    if value is None:
+        values = []
+    elif isinstance(value, str):
         values = [item.strip() for item in value.split(",") if item.strip()]
     elif isinstance(value, list):
         values = value
@@ -479,22 +1114,179 @@ def validate_ssh_username(value):
     return username
 
 
-def validate_admin_email(value):
+def validate_contact_email(value, field_name):
     if not isinstance(value, str):
-        raise InstallerError("admin_email must be a string")
+        raise InstallerError("%s must be a string" % field_name)
     candidate = value.strip()
     if len(candidate) > 254 or "\n" in candidate or "\r" in candidate:
-        raise InstallerError("admin_email is invalid")
+        raise InstallerError("%s is invalid" % field_name)
     display_name, address = email.utils.parseaddr(candidate)
     if display_name or address != candidate or address.count("@") != 1:
-        raise InstallerError("admin_email must be one plain email address")
+        raise InstallerError("%s must be one plain email address" % field_name)
     local_part, domain = address.rsplit("@", 1)
     if not local_part or len(local_part) > 64:
-        raise InstallerError("admin_email has an invalid local part")
+        raise InstallerError("%s has an invalid local part" % field_name)
     if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+", local_part):
-        raise InstallerError("admin_email has an invalid local part")
-    normalized_domain = validate_fqdn(domain, "admin_email domain")
+        raise InstallerError("%s has an invalid local part" % field_name)
+    normalized_domain = validate_fqdn(domain, "%s domain" % field_name)
     return "%s@%s" % (local_part, normalized_domain)
+
+
+def validate_admin_email(value):
+    return validate_contact_email(value, "admin_email")
+
+
+def validate_acme_email(value):
+    return validate_contact_email(value, "acme_email")
+
+
+def validate_firewall_mode(value):
+    candidate = str(value or "infrastructure").strip().lower()
+    if candidate not in ("infrastructure", "installer"):
+        raise InstallerError("firewall_mode must be infrastructure or installer")
+    return candidate
+
+
+def available_timezones():
+    """Return canonical IANA timezone choices without accepting free-form paths."""
+    try:
+        names = zoneinfo.available_timezones()
+    except (OSError, RuntimeError) as exc:
+        raise InstallerError("Could not load the host IANA timezone database: %s" % exc)
+    safe = sorted(
+        name
+        for name in names
+        if name
+        and not name.startswith(("posix/", "right/"))
+        and ".." not in name
+        and not name.startswith("/")
+    )
+    if "Etc/UTC" not in safe:
+        raise InstallerError("The host timezone database does not contain Etc/UTC")
+    return tuple(safe)
+
+
+def validate_timezone(value, choices=None):
+    candidate = str(value or "Etc/UTC").strip()
+    allowed = set(available_timezones() if choices is None else choices)
+    if candidate not in allowed:
+        raise InstallerError("timezone must be selected from the host IANA timezone list")
+    return candidate
+
+
+def validate_ntp_server(value):
+    if not isinstance(value, str):
+        raise InstallerError("Every NTP server must be a string")
+    candidate = value.strip().rstrip(".").lower()
+    if not candidate or len(candidate) > 253 or any(ch.isspace() for ch in candidate):
+        raise InstallerError("NTP server is invalid")
+    with contextlib.suppress(ValueError):
+        address = ipaddress.ip_address(candidate)
+        if address.is_unspecified or address.is_multicast:
+            raise InstallerError("NTP server address is unusable: %s" % candidate)
+        return str(address)
+    return validate_fqdn(candidate, "NTP server")
+
+
+def validate_ntp_settings(mode, servers):
+    normalized_mode = str(mode or "automatic").strip().lower()
+    if normalized_mode not in ("automatic", "custom"):
+        raise InstallerError("ntp_mode must be automatic or custom")
+    if servers is None:
+        values = []
+    elif isinstance(servers, str):
+        values = [item.strip() for item in servers.split(",") if item.strip()]
+    elif isinstance(servers, list):
+        values = servers
+    else:
+        raise InstallerError("ntp_servers must be a JSON list or comma-separated string")
+    normalized = []
+    for value in values:
+        server = validate_ntp_server(value)
+        if server not in normalized:
+            normalized.append(server)
+    if len(normalized) > 4:
+        raise InstallerError("At most four NTP servers are supported")
+    if normalized_mode == "automatic" and normalized:
+        raise InstallerError("ntp_servers must be empty when ntp_mode is automatic")
+    if normalized_mode == "custom" and not normalized:
+        raise InstallerError("Custom NTP mode requires at least one NTP server")
+    return normalized_mode, normalized
+
+
+def _https_ipv4_fetch(url, timeout=8):
+    if not str(url).startswith("https://"):
+        raise InstallerError("Public IPv4 discovery sources must use HTTPS")
+    curl = shutil.which("curl")
+    if curl is None:
+        raise InstallerError("curl is unavailable for forced-IPv4 HTTPS discovery")
+    try:
+        completed = subprocess.run(
+            [
+                curl,
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--tlsv1.2",
+                "--ipv4",
+                "--connect-timeout",
+                "5",
+                "--max-time",
+                str(timeout),
+                "--user-agent",
+                "Vivolution-Installer/%s" % INSTALLER_VERSION,
+                url,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=timeout + 2,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise InstallerError("HTTPS request failed: %s" % exc)
+    if completed.returncode != 0:
+        raise InstallerError("HTTPS IPv4 discovery request failed")
+    payload = completed.stdout
+    if len(payload) > 64:
+        raise InstallerError("Public IPv4 discovery returned an oversized response")
+    try:
+        rendered = payload.decode("ascii").strip()
+    except UnicodeDecodeError:
+        raise InstallerError("Public IPv4 discovery returned non-ASCII data")
+    return validate_public_ipv4(rendered, "discovered public IPv4")
+
+
+def discover_public_ipv4(fetcher=_https_ipv4_fetch, sources=PUBLIC_IPV4_SOURCES):
+    """Best-effort multi-source discovery; never treats one echo service as truth."""
+    observations = []
+    errors = []
+    for source in sources:
+        try:
+            address = validate_public_ipv4(fetcher(source), "discovered public IPv4")
+            observations.append({"source": source, "address": address})
+        except (InstallerError, OSError, ValueError) as exc:
+            errors.append({"source": source, "error": str(exc)})
+    counts = {}
+    for observation in observations:
+        counts[observation["address"]] = counts.get(observation["address"], 0) + 1
+    address = None
+    if counts:
+        ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        if len(ranked) == 1 or ranked[0][1] > ranked[1][1]:
+            address = ranked[0][0]
+    return {
+        "address": address,
+        "confirmed_by": counts.get(address, 0) if address else 0,
+        "observations": observations,
+        "errors": errors,
+        "disagreement": len(counts) > 1,
+    }
 
 
 def validate_answers(raw_answers, environment=None):
@@ -509,8 +1301,8 @@ def validate_answers(raw_answers, environment=None):
     mode = str(raw_answers.get("deployment_mode", "")).strip().lower()
     if mode != "standalone":
         raise InstallerError(
-            "Only standalone CP1 installation is implemented; join/HA mode '%s' is refused"
-            % mode
+            "Only Create a new Controller Plane is implemented; mode '%s' is unavailable"
+            % (mode or "missing")
         )
     ssh_user_value = raw_answers.get("ssh_allowed_user")
     if not ssh_user_value:
@@ -520,46 +1312,374 @@ def validate_answers(raw_answers, environment=None):
         raise InstallerError(
             "ssh_allowed_user is required when a non-root SUDO_USER cannot be detected"
         )
-    ssh_cidrs = validate_ssh_cidrs(raw_answers["ssh_source_cidrs"])
+    raw_firewall_mode = raw_answers.get("firewall_mode")
+    if raw_firewall_mode is None:
+        # Compatibility for validated answer files created before schema 5.
+        raw_firewall_mode = (
+            "installer" if raw_answers.get("ssh_source_cidrs") else "infrastructure"
+        )
+    firewall_mode = validate_firewall_mode(raw_firewall_mode)
+    if firewall_mode == "installer":
+        ssh_cidrs = validate_ssh_cidrs(raw_answers.get("ssh_source_cidrs"))
+    else:
+        raw_cidrs = raw_answers.get("ssh_source_cidrs")
+        if raw_cidrs not in (None, "", []):
+            raise InstallerError(
+                "ssh_source_cidrs must be empty when firewall_mode is infrastructure"
+            )
+        ssh_cidrs = []
     active_client = current_ssh_client_cidr(environment=environment)
-    if active_client is not None and active_client not in ssh_cidrs:
+    if (
+        firewall_mode == "installer"
+        and active_client is not None
+        and active_client not in ssh_cidrs
+    ):
         ssh_cidrs = validate_ssh_cidrs(ssh_cidrs + [active_client])
     node_fqdn = validate_fqdn(raw_answers["node_fqdn"], "node_fqdn")
     shared_fqdn = validate_fqdn(raw_answers["shared_fqdn"], "shared_fqdn")
     if node_fqdn == shared_fqdn:
         raise InstallerError("node_fqdn and shared_fqdn must be different DNS names")
+    admin_email = validate_admin_email(raw_answers["admin_email"])
+    acme_email = validate_acme_email(raw_answers.get("acme_email") or admin_email)
+    ntp_mode, ntp_servers = validate_ntp_settings(
+        raw_answers.get("ntp_mode"), raw_answers.get("ntp_servers")
+    )
     return {
         "deployment_mode": "standalone",
         "node_fqdn": node_fqdn,
         "shared_fqdn": shared_fqdn,
         "public_ipv4": validate_public_ipv4(raw_answers["public_ipv4"]),
         "ssh_source_cidrs": ssh_cidrs,
+        "firewall_mode": firewall_mode,
+        "timezone": validate_timezone(raw_answers.get("timezone") or "Etc/UTC"),
+        "ntp_mode": ntp_mode,
+        "ntp_servers": ntp_servers,
         "admin_username": validate_admin_username(raw_answers["admin_username"]),
-        "admin_email": validate_admin_email(raw_answers["admin_email"]),
+        "admin_email": admin_email,
+        "acme_email": acme_email,
         "ssh_allowed_user": validate_ssh_username(ssh_user_value),
     }
 
 
-def prompt_answers(input_function=input):
-    print("Vivolution CP1 standalone installer")
-    print("Join/HA modes are intentionally unavailable in this release.\n")
-    detected_ssh_user = os.environ.get("SUDO_USER", "").strip() or None
-    questions = (
-        ("deployment_mode", "Deployment mode", "standalone"),
-        ("node_fqdn", "This controller's public FQDN", None),
-        ("shared_fqdn", "Shared controller web FQDN", None),
-        ("public_ipv4", "This controller's public IPv4", None),
-        ("ssh_source_cidrs", "Allowed administrator SSH /32 CIDRs (comma separated)", None),
-        ("admin_username", "Initial web administrator username", "cpadmin"),
-        ("admin_email", "Initial web administrator email", None),
-        ("ssh_allowed_user", "Existing non-root Linux SSH administrator", detected_ssh_user),
+def _numbered_select(title, options, input_function=input, output_function=print):
+    output_function(title)
+    for index, option in enumerate(options, start=1):
+        enabled = option[2] if len(option) == 3 else True
+        suffix = "" if enabled else " (not yet available)"
+        output_function("  %d. %s%s" % (index, option[1], suffix))
+    while True:
+        response = input_function("Select an option by number: ").strip()
+        try:
+            index = int(response) - 1
+        except ValueError:
+            output_function("Enter one of the displayed option numbers.")
+            continue
+        if index < 0 or index >= len(options):
+            output_function("Enter one of the displayed option numbers.")
+            continue
+        option = options[index]
+        enabled = option[2] if len(option) == 3 else True
+        if not enabled:
+            output_function(
+                "%s is reserved for a future reviewed release; no action was taken."
+                % option[1]
+            )
+            continue
+        return option[0]
+
+
+def _next_enabled_index(options, selected, direction):
+    if direction not in (-1, 1):
+        raise InstallerError("Menu movement direction must be -1 or 1")
+    candidate = selected
+    for _unused in range(len(options)):
+        candidate = (candidate + direction) % len(options)
+        option = options[candidate]
+        if len(option) < 3 or option[2]:
+            return candidate
+    raise InstallerError("Menu does not contain an enabled option")
+
+
+def _tty_arrow_select(title, options, input_stream, output_stream):
+    """Dependency-free Up/Down selector used only with a controlling TTY."""
+    import termios
+    import tty
+
+    selected = next(
+        (index for index, option in enumerate(options) if len(option) < 3 or option[2]),
+        0,
     )
-    collected = {}
-    for key, label, default in questions:
-        suffix = " [%s]" % default if default is not None else ""
-        response = input_function("%s%s: " % (label, suffix)).strip()
-        collected[key] = response if response else default
-    return validate_answers(collected)
+    descriptor = input_stream.fileno()
+    old_settings = termios.tcgetattr(descriptor)
+    drawn = False
+    output_stream.write("%s\n" % title)
+    try:
+        tty.setraw(descriptor)
+        while True:
+            if drawn:
+                output_stream.write("\x1b[%dA" % len(options))
+            drawn = True
+            for index, option in enumerate(options):
+                enabled = option[2] if len(option) == 3 else True
+                marker = "\u203a" if index == selected else " "
+                suffix = "" if enabled else " (not yet available)"
+                output_stream.write("\x1b[2K%s %s%s\r\n" % (marker, option[1], suffix))
+            output_stream.flush()
+            key = input_stream.read(1)
+            if key in ("\r", "\n"):
+                option = options[selected]
+                if len(option) < 3 or option[2]:
+                    output_stream.write("\r\n")
+                    output_stream.flush()
+                    return option[0]
+            elif key == "\x03":
+                raise KeyboardInterrupt
+            elif key == "\x1b":
+                sequence = input_stream.read(2)
+                if sequence == "[A":
+                    selected = _next_enabled_index(options, selected, -1)
+                elif sequence == "[B":
+                    selected = _next_enabled_index(options, selected, 1)
+    finally:
+        termios.tcsetattr(descriptor, termios.TCSADRAIN, old_settings)
+
+
+def select_option(
+    title,
+    options,
+    input_function=input,
+    output_function=print,
+    input_stream=None,
+    output_stream=None,
+):
+    input_stream = sys.stdin if input_stream is None else input_stream
+    output_stream = sys.stdout if output_stream is None else output_stream
+    can_use_arrow = (
+        input_function is input
+        and output_function is print
+        and hasattr(input_stream, "isatty")
+        and hasattr(output_stream, "isatty")
+        and input_stream.isatty()
+        and output_stream.isatty()
+    )
+    if can_use_arrow:
+        try:
+            return _tty_arrow_select(title, options, input_stream, output_stream)
+        except (ImportError, OSError, RuntimeError):
+            pass
+    return _numbered_select(title, options, input_function, output_function)
+
+
+def select_installer_action(input_function=input, output_function=print):
+    return select_option(
+        "Vivolution Turnkey Installer",
+        MENU_OPTIONS,
+        input_function=input_function,
+        output_function=output_function,
+    )
+
+
+def select_manage_action(paths, input_function=input, output_function=print):
+    status = installer_status(paths)
+    current = status.get("status")
+    has_schema5 = paths.ledger.exists()
+    incomplete = current in ("pending", "running", "failed")
+    complete = current == "complete"
+    legacy = current == "legacy-state-detected"
+    return select_option(
+        "Manage an existing Vivolution installation",
+        (
+            ("status", "Show installer status", True),
+            ("support-bundle", "Create a redacted support bundle", has_schema5),
+            ("resume", "Resume an incomplete installation", has_schema5 and incomplete),
+            ("reconcile", "Reconcile a completed installation", has_schema5 and complete),
+            (
+                "discard-incomplete",
+                "Discard proven pre-mutation incomplete installer state",
+                has_schema5 and incomplete,
+            ),
+            (
+                "preview-legacy-cleanup",
+                "Preview recognized legacy rc3-rc5 cleanup (deletion unavailable)",
+                legacy,
+            ),
+        ),
+        input_function=input_function,
+        output_function=output_function,
+    )
+
+
+def select_timezone(input_function=input, output_function=print, choices=None):
+    zones = tuple(available_timezones() if choices is None else choices)
+    regions = {}
+    for zone in zones:
+        region = zone.split("/", 1)[0] if "/" in zone else "Other"
+        regions.setdefault(region, []).append(zone)
+    region_options = []
+    if "Etc/UTC" in zones:
+        region_options.append(("__utc__", "Etc/UTC (recommended)", True))
+    for region in sorted(regions):
+        region_options.append((region, region, True))
+    selected_region = select_option(
+        "Select the host timezone region (application timestamps remain UTC):",
+        region_options,
+        input_function=input_function,
+        output_function=output_function,
+    )
+    if selected_region == "__utc__":
+        return "Etc/UTC"
+    region_zones = sorted(regions[selected_region])
+    return select_option(
+        "Select a canonical IANA timezone from %s:" % selected_region,
+        [(zone, zone, True) for zone in region_zones],
+        input_function=input_function,
+        output_function=output_function,
+    )
+
+
+def prompt_answers(
+    input_function=input,
+    output_function=print,
+    environment=None,
+    public_ip_discoverer=discover_public_ipv4,
+    timezone_selector=select_timezone,
+):
+    environment = os.environ if environment is None else environment
+    output_function("Vivolution Controller Plane installer")
+    output_function(
+        "This release creates a new standalone Controller Plane. "
+        "Controller joining and Edge voice deployment are not implemented.\n"
+    )
+    detected_ssh_user = environment.get("SUDO_USER", "").strip() or None
+    detected_ssh_cidr = current_ssh_client_cidr(environment=environment)
+    collected = {"deployment_mode": "standalone"}
+    for key, label in (
+        ("node_fqdn", "This controller's public FQDN"),
+        ("shared_fqdn", "Shared controller web FQDN"),
+    ):
+        collected[key] = input_function("%s: " % label).strip()
+
+    discovery = public_ip_discoverer()
+    discovered = discovery.get("address") if isinstance(discovery, dict) else None
+    if discovered:
+        output_function(
+            "Detected outbound public IPv4 %s (%d agreeing HTTPS source%s)."
+            % (
+                discovered,
+                discovery.get("confirmed_by", 0),
+                "" if discovery.get("confirmed_by", 0) == 1 else "s",
+            )
+        )
+        if discovery.get("disagreement"):
+            output_function(
+                "Warning: public-IP services disagreed; the displayed address is only "
+                "the majority observation. Confirm the actual inbound NAT/load-balancer "
+                "IPv4 before continuing."
+            )
+        use_detected = input_function(
+            "Use %s as this controller's inbound public IPv4? [Y/n]: " % discovered
+        ).strip().lower()
+        if use_detected in ("", "y", "yes"):
+            collected["public_ipv4"] = discovered
+    if "public_ipv4" not in collected:
+        if isinstance(discovery, dict) and discovery.get("disagreement"):
+            output_function(
+                "Public-IP services disagreed. Enter the inbound/NAT/load-balancer IPv4 manually."
+            )
+        elif not discovered:
+            output_function(
+                "Public IPv4 could not be discovered. Outbound HTTPS is required for "
+                "installation; enter the inbound address manually."
+            )
+            output_function(
+                "Required outbound network access: TCP 80/443, UDP/TCP 53 (DNS), "
+                "and UDP 123 (NTP). No inbound NTP port is required."
+            )
+        while True:
+            candidate = input_function("This controller's public IPv4: ").strip()
+            try:
+                collected["public_ipv4"] = validate_public_ipv4(candidate)
+                break
+            except InstallerError as exc:
+                output_function("Invalid public IPv4: %s" % exc)
+
+    collected["firewall_mode"] = select_option(
+        "Select firewall ownership:",
+        (
+            (
+                "infrastructure",
+                "Infrastructure-managed (installer does not modify UFW)",
+                True,
+            ),
+            (
+                "installer",
+                "Installer-managed (UFW deny-by-default; SSH restricted to /32s)",
+                True,
+            ),
+        ),
+        input_function=input_function,
+        output_function=output_function,
+    )
+    collected["ssh_source_cidrs"] = []
+    if collected["firewall_mode"] == "installer":
+        while True:
+            suffix = " [%s]" % detected_ssh_cidr if detected_ssh_cidr else ""
+            candidate = input_function(
+                "Allowed administrator SSH /32 CIDRs (comma separated)%s: " % suffix
+            ).strip() or detected_ssh_cidr
+            try:
+                ssh_cidrs = validate_ssh_cidrs(candidate)
+                if detected_ssh_cidr and detected_ssh_cidr not in ssh_cidrs:
+                    ssh_cidrs = validate_ssh_cidrs(ssh_cidrs + [detected_ssh_cidr])
+                collected["ssh_source_cidrs"] = ssh_cidrs
+                break
+            except InstallerError as exc:
+                output_function("Invalid SSH source restriction: %s" % exc)
+                if not detected_ssh_cidr:
+                    output_function(
+                        "Enter exact administrator IPv4 /32 addresses; "
+                        "0.0.0.0/0 is intentionally refused."
+                    )
+
+    admin_response = input_function("Initial web administrator username [cpadmin]: ").strip()
+    collected["admin_username"] = admin_response or "cpadmin"
+    collected["admin_email"] = input_function("Initial web administrator email: ").strip()
+    acme_response = input_function(
+        "Let's Encrypt ACME contact email [%s]: " % collected["admin_email"]
+    ).strip()
+    collected["acme_email"] = acme_response or collected["admin_email"]
+    ssh_suffix = " [%s]" % detected_ssh_user if detected_ssh_user else ""
+    ssh_response = input_function(
+        "Existing non-root Linux SSH administrator%s: " % ssh_suffix
+    ).strip()
+    collected["ssh_allowed_user"] = ssh_response or detected_ssh_user
+
+    collected["timezone"] = timezone_selector(
+        input_function=input_function, output_function=output_function
+    )
+    collected["ntp_mode"] = select_option(
+        "Select time synchronization source mode:",
+        (
+            ("automatic", "Automatic / Ubuntu or provider defaults", True),
+            ("custom", "Custom NTP servers", True),
+        ),
+        input_function=input_function,
+        output_function=output_function,
+    )
+    collected["ntp_servers"] = []
+    if collected["ntp_mode"] == "custom":
+        while True:
+            primary = input_function("NTP server 1: ").strip()
+            secondary = input_function("NTP server 2 (optional): ").strip()
+            try:
+                _mode, servers = validate_ntp_settings(
+                    "custom", [item for item in (primary, secondary) if item]
+                )
+                collected["ntp_servers"] = servers
+                break
+            except InstallerError as exc:
+                output_function("Invalid NTP configuration: %s" % exc)
+    return validate_answers(collected, environment=environment)
 
 
 def load_answers(answer_file=None, input_function=input):
@@ -572,14 +1692,25 @@ def configuration_summary_lines(answers):
     """Return the fixed, non-secret fields shown before host mutation."""
     answers = validate_answers(answers)
     return (
-        "Deployment mode: %s" % answers["deployment_mode"],
+        "Action: Create a new Controller Plane",
         "Node FQDN: %s" % answers["node_fqdn"],
         "Shared FQDN: %s" % answers["shared_fqdn"],
         "Public IPv4: %s" % answers["public_ipv4"],
         "SSH administrator: %s" % answers["ssh_allowed_user"],
-        "SSH source /32s: %s" % ", ".join(answers["ssh_source_cidrs"]),
+        "Firewall ownership: %s" % answers["firewall_mode"],
+        "SSH source /32s: %s"
+        % (", ".join(answers["ssh_source_cidrs"]) or "infrastructure-managed"),
+        "Timezone: %s" % answers["timezone"],
+        "NTP mode: %s" % answers["ntp_mode"],
+        "NTP servers: %s"
+        % (", ".join(answers["ntp_servers"]) or "Ubuntu/provider defaults"),
         "Web administrator: %s" % answers["admin_username"],
         "Web administrator email: %s" % answers["admin_email"],
+        "Let's Encrypt ACME email: %s" % answers["acme_email"],
+        "ACME directory: %s" % LETS_ENCRYPT_PRODUCTION_DIRECTORY,
+        "Inbound: TCP 22 (firewall-owner policy), TCP 80/443 (public)",
+        "Outbound: TCP 80/443, UDP/TCP 53, UDP 123",
+        "Never expose publicly: TCP 5432, 6432, 8000",
     )
 
 
@@ -607,8 +1738,176 @@ def validate_answer_dns(answers, resolver=socket.getaddrinfo):
                 "%s must resolve exclusively to declared public IPv4 %s; got %s"
                 % (name, expected, rendered)
             )
+        try:
+            ipv6_results = resolver(name, 443, socket.AF_INET6, socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            no_ipv6_errors = {
+                code
+                for code in (
+                    getattr(socket, "EAI_NONAME", None),
+                    getattr(socket, "EAI_NODATA", None),
+                    getattr(socket, "EAI_ADDRFAMILY", None),
+                )
+                if code is not None
+            }
+            if exc.errno not in no_ipv6_errors:
+                raise InstallerError("IPv6 DNS lookup failed for %s: %s" % (name, exc))
+            ipv6_results = []
+        except OSError as exc:
+            raise InstallerError("IPv6 DNS lookup failed for %s: %s" % (name, exc))
+        ipv6_addresses = sorted(
+            {
+                item[4][0].split("%", 1)[0]
+                for item in ipv6_results
+                if len(item) >= 5 and item[4] and item[4][0]
+            }
+        )
+        if ipv6_addresses:
+            raise InstallerError(
+                "%s must not publish IPv6 AAAA records because this standalone "
+                "installer exposes no IPv6 ingress; got %s"
+                % (name, ", ".join(ipv6_addresses))
+            )
         resolved_by_name[name] = addresses
     return resolved_by_name
+
+
+def _edit_dns_answers(answers, input_function=input, output_function=print):
+    updated = dict(validate_answers(answers))
+    output_function("Enter only DNS hostnames, without http:// or https://.")
+    for key, label in (
+        ("node_fqdn", "This controller's public FQDN"),
+        ("shared_fqdn", "Shared controller web FQDN"),
+        ("public_ipv4", "Inbound public IPv4"),
+    ):
+        response = input_function("%s [%s]: " % (label, updated[key])).strip()
+        if response:
+            updated[key] = response
+    return validate_answers(updated)
+
+
+def flush_local_dns_cache(command_finder=shutil.which, runner=subprocess.run):
+    """Best-effort flush of systemd-resolved's local cache before a retry."""
+    resolvectl = command_finder("resolvectl")
+    if resolvectl is None:
+        return {"attempted": False, "success": False, "reason": "resolvectl unavailable"}
+    try:
+        completed = runner(
+            [resolvectl, "flush-caches"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"attempted": True, "success": False, "reason": str(exc)}
+    return {
+        "attempted": True,
+        "success": completed.returncode == 0,
+        "exit_code": completed.returncode,
+    }
+
+
+def wait_for_answer_dns(
+    answers,
+    resolver=socket.getaddrinfo,
+    interactive=True,
+    input_function=input,
+    output_function=print,
+    auto_retry_delays=(0, 2, 5),
+    sleep_function=time.sleep,
+    cache_flusher=flush_local_dns_cache,
+    answers_changed=None,
+):
+    """Validate DNS with bounded unattended retries and interactive recovery."""
+    current = validate_answers(answers)
+
+    def attempt():
+        return validate_answer_dns(current, resolver=resolver)
+
+    def refresh_cache():
+        result = cache_flusher()
+        if result.get("attempted") and result.get("success"):
+            output_function("Flushed the local systemd-resolved DNS cache.")
+        elif result.get("attempted"):
+            output_function(
+                "Warning: local DNS cache flush failed; continuing with resolver retry."
+            )
+        return result
+
+    if not interactive:
+        last_error = None
+        for index, delay in enumerate(auto_retry_delays):
+            if delay:
+                sleep_function(delay)
+            if index:
+                refresh_cache()
+            try:
+                return current, attempt()
+            except InstallerError as exc:
+                last_error = exc
+        raise InstallerError(
+            "DNS validation did not pass after %d bounded attempts: %s"
+            % (len(auto_retry_delays), last_error)
+        )
+
+    while True:
+        try:
+            return current, attempt()
+        except InstallerError as exc:
+            output_function("\nDNS validation is not ready: %s" % exc)
+            for dns_name in (current["node_fqdn"], current["shared_fqdn"]):
+                output_function(
+                    "Propagation check for %s: "
+                    "https://toolbox.googleapps.com/apps/dig/#A/%s"
+                    % (dns_name, dns_name)
+                )
+        action = select_option(
+            "DNS recovery options:",
+            (
+                ("retry", "Retry now", True),
+                ("wait", "Wait and retry automatically (bounded)", True),
+                ("change", "Change FQDN or public IPv4", True),
+                ("exit", "Exit safely and resume later", True),
+            ),
+            input_function=input_function,
+            output_function=output_function,
+        )
+        if action == "retry":
+            refresh_cache()
+            continue
+        if action == "change":
+            current = _edit_dns_answers(
+                current,
+                input_function=input_function,
+                output_function=output_function,
+            )
+            if answers_changed is not None:
+                # Persist the validated edit before the next resolver call or
+                # a later safe exit, so `resume` never restores stale DNS data.
+                answers_changed(dict(current))
+            continue
+        if action == "exit":
+            raise InstallerError(
+                "DNS validation was deferred; no host packages or services were changed. "
+                "Create/correct the records and use resume."
+            )
+        last_error = None
+        for delay in auto_retry_delays:
+            if delay:
+                output_function("Waiting %d seconds before DNS retry..." % delay)
+                sleep_function(delay)
+            refresh_cache()
+            try:
+                return current, attempt()
+            except InstallerError as exc:
+                last_error = exc
+        output_function(
+            "DNS is still not ready after %d attempts: %s"
+            % (len(auto_retry_delays), last_error)
+        )
 
 
 def confirm_configuration(
@@ -646,6 +1945,7 @@ def generate_secrets():
         "cp_db_owner_password": secrets.token_urlsafe(48),
         "cp_db_runtime_password": secrets.token_urlsafe(48),
         "cp_django_secret_key": secrets.token_urlsafe(64),
+        "cp_edge_enrollment_token_pepper": secrets.token_hex(32),
         "cp_rls_context_key": secrets.token_hex(32),
     }
     if set(generated) != SECRET_KEYS:
@@ -663,6 +1963,17 @@ def validate_secrets(secret_values):
             raise InstallerError("Protected installer secret has unsafe characters: %s" % key)
     if not re.fullmatch(r"[0-9a-f]{64}", secret_values["cp_rls_context_key"]):
         raise InstallerError("cp_rls_context_key must be exactly 64 lowercase hexadecimal characters")
+    if not re.fullmatch(
+        r"[0-9a-f]{64}", secret_values["cp_edge_enrollment_token_pepper"]
+    ):
+        raise InstallerError(
+            "cp_edge_enrollment_token_pepper must be exactly 64 lowercase hexadecimal characters"
+        )
+    if secrets.compare_digest(
+        secret_values["cp_edge_enrollment_token_pepper"],
+        secret_values["cp_rls_context_key"],
+    ):
+        raise InstallerError("Enrollment and RLS keys must be independent")
     return secret_values
 
 
@@ -716,6 +2027,7 @@ def controller_source_manifest(controller_dir):
 
 def calculate_controller_release_id(controller_dir):
     manifest = controller_source_manifest(controller_dir)
+    # Internal compatibility identifier; never presented as hostname guidance.
     return "cp1-%s" % hashlib.sha256(manifest).hexdigest()
 
 
@@ -756,6 +2068,7 @@ class PhaseLedger:
             "kind": "install",
             "status": "running",
             "started_at": now,
+            "correlation_id": str(uuid.uuid4()),
             "resumed_at": [],
         }
         value = {
@@ -782,6 +2095,11 @@ class PhaseLedger:
         value = read_json_file(path)
         if not isinstance(value, dict) or value.get("schema_version") != LEDGER_SCHEMA_VERSION:
             raise InstallerError("Installer ledger has an unsupported schema")
+        if value.get("installer_version") != INSTALLER_VERSION:
+            raise InstallerError(
+                "Installer ledger belongs to a different installer version; use the exact "
+                "version-pinned bootstrap that created this run"
+            )
         phases = value.get("phases")
         if not isinstance(phases, dict) or set(phases) != set(PHASES):
             raise InstallerError("Installer ledger has an invalid phase set")
@@ -803,9 +2121,15 @@ class PhaseLedger:
         return self.value["phases"][phase].get("status") == "completed"
 
     def start_phase(self, phase):
+        previous = self.value["phases"].get(phase, {})
+        attempt = int(previous.get("attempt", 0)) + 1
         self.value["status"] = "running"
         self.value["current_phase"] = phase
-        self.value["phases"][phase] = {"status": "running", "started_at": utc_now()}
+        self.value["phases"][phase] = {
+            "status": "running",
+            "started_at": utc_now(),
+            "attempt": attempt,
+        }
         self.save()
 
     def complete_phase(self, phase, details=None):
@@ -868,6 +2192,7 @@ class PhaseLedger:
                 "reconcile_number": self.value["reconcile_count"],
                 "status": "running",
                 "started_at": now,
+                "correlation_id": str(uuid.uuid4()),
                 "resumed_at": [],
             }
         )
@@ -877,6 +2202,195 @@ class PhaseLedger:
         self.value["current_phase"] = None
         self.value["last_reconcile_started_at"] = now
         self.save()
+
+
+def ownership_namespace_roots(paths):
+    return [
+        str(paths.state_dir),
+        str(paths.log_dir),
+        "/opt/vivolution",
+        "/etc/vivolution",
+        "/var/lib/vivolution",
+        "/var/log/vivolution",
+        "/var/cache/vivolution",
+        "/run/vivolution",
+    ]
+
+
+def initialize_ownership_manifest(paths, ledger):
+    value = {
+        "schema_version": 1,
+        "installation_id": ledger.value["installation_id"],
+        "created_at": utc_now(),
+        "state": "installing",
+        # Namespace roots are documentation/placement boundaries, not a
+        # recursive deletion allowlist. Lifecycle removal must consume only
+        # exact, separately recorded object records.
+        "namespace_roots": ownership_namespace_roots(paths),
+        "system_integrations": [],
+        "packages": {
+            "requested": [],
+            "preexisting": [],
+            "installed_by_installer": [],
+        },
+        "tombstone_path": str(paths.tombstone),
+    }
+    atomic_write_json(paths.ownership, value)
+    return value
+
+
+def validate_pre_mutation_ownership_manifest(paths, ledger, ownership):
+    """Fail closed unless ownership is the exact pristine schema-1 contract."""
+    expected_keys = {
+        "schema_version",
+        "installation_id",
+        "created_at",
+        "state",
+        "namespace_roots",
+        "system_integrations",
+        "packages",
+        "tombstone_path",
+    }
+    if not isinstance(ownership, dict) or set(ownership) != expected_keys:
+        raise InstallerError(
+            "Discard refused an invalid pre-mutation ownership manifest shape"
+        )
+    if ownership["schema_version"] != 1:
+        raise InstallerError("Discard refused an unexpected ownership manifest schema")
+    if ownership["installation_id"] != ledger.get("installation_id"):
+        raise InstallerError("Discard refused an ownership/ledger installation ID mismatch")
+    if not isinstance(ownership["created_at"], str) or not ownership["created_at"]:
+        raise InstallerError("Discard refused an invalid ownership creation timestamp")
+    if ownership["state"] != "installing":
+        raise InstallerError("Discard refused a non-pristine ownership lifecycle state")
+    if ownership["namespace_roots"] != ownership_namespace_roots(paths):
+        raise InstallerError("Discard refused mismatched ownership namespace roots")
+    if ownership["tombstone_path"] != str(paths.tombstone):
+        raise InstallerError("Discard refused a mismatched ownership tombstone path")
+    if ownership["system_integrations"] != []:
+        raise InstallerError("Discard refused ownership system-integration evidence")
+
+    packages = ownership["packages"]
+    expected_package_keys = {
+        "requested",
+        "preexisting",
+        "installed_by_installer",
+    }
+    if not isinstance(packages, dict) or set(packages) != expected_package_keys:
+        raise InstallerError("Discard refused an invalid ownership package manifest shape")
+    for key in sorted(expected_package_keys):
+        if not isinstance(packages[key], list) or packages[key]:
+            raise InstallerError(
+                "Discard refused ownership package mutation evidence in %s" % key
+            )
+    return ownership
+
+
+def update_ownership_packages(paths, requested, preexisting=None, completed=False):
+    if paths.ownership.exists():
+        value = read_json_file(paths.ownership)
+    else:
+        raise InstallerError("Installer ownership manifest is missing")
+    requested = sorted(set(requested))
+    preexisting = sorted(set(preexisting or []))
+    value["packages"] = {
+        "requested": requested,
+        "preexisting": preexisting,
+        "installed_by_installer": (
+            sorted(set(requested) - set(preexisting)) if completed else []
+        ),
+    }
+    value["updated_at"] = utc_now()
+    atomic_write_json(paths.ownership, value)
+    return value
+
+
+def update_ownership_state(paths, state):
+    value = read_json_file(paths.ownership)
+    value["state"] = str(state)
+    value["updated_at"] = utc_now()
+    atomic_write_json(paths.ownership, value)
+    return value
+
+
+def query_preexisting_packages(packages, runner=subprocess.run, log=None):
+    installed = []
+    for package in packages:
+        command = [
+            "dpkg-query",
+            "--show",
+            "--showformat=${db:Status-Status}",
+            package,
+        ]
+        if log is not None:
+            log.event(
+                "command_started",
+                level="INFO",
+                category="command",
+                command=command,
+                purpose="preexisting-package-state",
+            )
+        try:
+            completed = runner(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise InstallerError("Could not inspect pre-existing package state: %s" % exc)
+        if log is not None:
+            log.event(
+                "command_completed",
+                level="INFO" if completed.returncode in (0, 1) else "ERROR",
+                category="command",
+                command=command,
+                purpose="preexisting-package-state",
+                exit_code=completed.returncode,
+            )
+        if completed.returncode == 0 and (completed.stdout or "").strip() == "installed":
+            installed.append(package)
+        elif completed.returncode not in (0, 1):
+            raise InstallerError(
+                "Could not inspect pre-existing package state for %s" % package
+            )
+    return installed
+
+
+def detect_legacy_state(paths):
+    """Read-only detection for rc3-rc5 schema-4 state at the old locations."""
+    if not paths.legacy_state_dir.exists() and not paths.legacy_log_dir.exists():
+        return None
+    if paths.legacy_state_dir.is_symlink() or paths.legacy_log_dir.is_symlink():
+        raise InstallerError("Legacy installer paths must not be symbolic links")
+    result = {
+        "state_dir": str(paths.legacy_state_dir),
+        "log_dir": str(paths.legacy_log_dir),
+        "ledger": str(paths.legacy_ledger),
+        "schema_version": None,
+        "status": "unknown",
+    }
+    if paths.legacy_ledger.exists():
+        value = read_json_file(paths.legacy_ledger)
+        if not isinstance(value, dict) or value.get("schema_version") != 4:
+            raise InstallerError(
+                "Legacy installer state exists but is not a recognized rc3-rc5 schema-4 ledger"
+            )
+        result.update(
+            schema_version=4,
+            status=value.get("status", "unknown"),
+            installation_id=value.get("installation_id"),
+            current_phase=value.get("current_phase"),
+            phases={
+                key: item.get("status")
+                for key, item in value.get("phases", {}).items()
+                if isinstance(item, dict)
+            },
+        )
+    return result
 
 
 def _safe_glob_exists(parent, pattern):
@@ -928,7 +2442,7 @@ def _read_only_command(command, runner=subprocess.run):
 
 
 def run_runtime_preflight(paths, runner=subprocess.run, command_finder=shutil.which):
-    """Check clock/reboot/listener safety without changing the target host."""
+    """Check reboot/listener safety and record initial clock state read-only."""
     reboot_marker = paths.host_path("/var/run/reboot-required")
     if reboot_marker.exists() or reboot_marker.is_symlink():
         raise InstallerError(
@@ -954,10 +2468,6 @@ def run_runtime_preflight(paths, runner=subprocess.run, command_finder=shutil.wh
         if "=" in line:
             key, value = line.split("=", 1)
             clock_values[key.strip()] = value.strip().lower()
-    if clock_values.get("NTP") != "yes" or clock_values.get("NTPSynchronized") != "yes":
-        raise InstallerError(
-            "System clock is not NTP-synchronized; fix timedatectl before installation"
-        )
     listener_output = _read_only_command(
         [ss_command, "-H", "-ltnp"], runner=runner
     )
@@ -976,27 +2486,35 @@ def run_runtime_preflight(paths, runner=subprocess.run, command_finder=shutil.wh
     ):
         raise InstallerError("TCP port 22 is listening but is not exclusively owned by sshd")
     return {
-        "clock_ntp_enabled": True,
-        "clock_synchronized": True,
+        "clock_ntp_enabled": clock_values.get("NTP") == "yes",
+        "clock_synchronized": clock_values.get("NTPSynchronized") == "yes",
         "pending_reboot": False,
         "reserved_tcp_ports_free": list(reserved),
         "ssh_listener_verified": bool(ssh_owners),
     }
 
 
-def run_preflight(paths, runner=subprocess.run, command_finder=shutil.which):
-    if paths.root == Path("/") and os.geteuid() != 0:
-        raise InstallerError("Run the installer as root (for example, sudo ./install.sh)")
+def validate_host_os(paths):
     os_release = parse_os_release(paths.host_path("/etc/os-release"))
     if os_release.get("ID", "").lower() != SUPPORTED_OS_ID:
         raise InstallerError("Only Ubuntu Server is supported")
     if os_release.get("VERSION_ID") != SUPPORTED_OS_VERSION:
         raise InstallerError("Only Ubuntu Server 24.04 LTS is supported")
+    return {
+        "os_id": os_release.get("ID"),
+        "os_version": os_release.get("VERSION_ID"),
+    }
+
+
+def run_preflight(paths, runner=subprocess.run, command_finder=shutil.which):
+    if paths.root == Path("/") and os.geteuid() != 0:
+        raise InstallerError("Run the installer as root (for example, sudo ./install.sh)")
+    os_identity = validate_host_os(paths)
     if paths.root == Path("/") and not paths.host_path("/run/systemd/system").is_dir():
         raise InstallerError("The target must be booted with systemd")
     markers = (
-        paths.host_path("/etc/vivolution"),
-        paths.host_path("/var/lib/vivolution"),
+        paths.host_path("/etc/vivolution/installation-owner"),
+        paths.host_path("/var/lib/vivolution/controller"),
         paths.host_path("/etc/containers/systemd/vivolution-cp-web.container"),
     )
     found = [str(path) for path in markers if path.exists() or path.is_symlink()]
@@ -1008,11 +2526,12 @@ def run_preflight(paths, runner=subprocess.run, command_finder=shutil.which):
             "Fresh-host preflight found an existing Vivolution installation: %s"
             % ", ".join(found)
         )
+    effective_uid, effective_user = effective_process_identity()
     result = {
-        "os_id": os_release.get("ID"),
-        "os_version": os_release.get("VERSION_ID"),
+        **os_identity,
         "architecture": platform.machine(),
-        "effective_user": getpass.getuser(),
+        "effective_uid": effective_uid,
+        "effective_user": effective_user,
     }
     if paths.root == Path("/"):
         result.update(
@@ -1023,7 +2542,15 @@ def run_preflight(paths, runner=subprocess.run, command_finder=shutil.which):
     return result
 
 
-def bootstrap_commands(apt_get):
+def bootstrap_packages_for_answers(answers):
+    normalized = validate_answers(answers)
+    packages = list(BASE_BOOTSTRAP_PACKAGES)
+    if normalized["firewall_mode"] == "installer":
+        packages.extend(INSTALLER_FIREWALL_PACKAGES)
+    return tuple(packages)
+
+
+def bootstrap_commands(apt_get, packages=BOOTSTRAP_PACKAGES):
     """Return the bounded apt operations used by the bootstrap phase."""
     return [
         [apt_get, "update"],
@@ -1033,7 +2560,7 @@ def bootstrap_commands(apt_get):
             "--yes",
             "--no-install-recommends",
         ]
-        + list(BOOTSTRAP_PACKAGES),
+        + list(packages),
     ]
 
 
@@ -1041,6 +2568,8 @@ def run_bootstrap(
     log,
     runner=subprocess.Popen,
     apt_get="apt-get",
+    packages=BOOTSTRAP_PACKAGES,
+    verbose=False,
     console_stream=None,
 ):
     """Install prerequisites while streaming redacted apt output durably."""
@@ -1056,7 +2585,7 @@ def run_bootstrap(
     environment = os.environ.copy()
     environment["DEBIAN_FRONTEND"] = "noninteractive"
     environment["APT_LISTCHANGES_FRONTEND"] = "none"
-    for command in bootstrap_commands(resolved_apt):
+    for command in bootstrap_commands(resolved_apt, packages=packages):
         log.info("Bootstrap command: %s" % " ".join(command))
         log.event("bootstrap_command_started", command=command)
         return_code = run_streamed_command(
@@ -1065,6 +2594,7 @@ def run_bootstrap(
             "apt",
             runner=runner,
             console_stream=console_stream,
+            show_output=verbose,
             env=environment,
         )
         if return_code != 0:
@@ -1073,7 +2603,7 @@ def run_bootstrap(
                 % (return_code, " ".join(command[:2]))
             )
         log.event("bootstrap_command_completed", command=command, exit_code=0)
-    return {"packages": list(BOOTSTRAP_PACKAGES), "result": "completed"}
+    return {"packages": list(packages), "result": "completed"}
 
 
 def resolve_source_path(source_root, candidate):
@@ -1120,9 +2650,14 @@ def build_ansible_vars(answers, secret_values, release_id, controller_base_image
         "cp_shared_fqdn": answers["shared_fqdn"],
         "cp_public_ipv4": answers["public_ipv4"],
         "cp_firewall_ssh_source_ipv4_cidrs": answers["ssh_source_cidrs"],
+        "cp_firewall_mode": answers["firewall_mode"],
+        "cp_timezone": answers["timezone"],
+        "cp_ntp_mode": answers["ntp_mode"],
+        "cp_ntp_servers": answers["ntp_servers"],
         "cp_ssh_allowed_user": answers["ssh_allowed_user"],
         "cp_controller_admin_username": answers["admin_username"],
         "cp_controller_admin_email": answers["admin_email"],
+        "cp_acme_email": answers["acme_email"],
         "cp_controller_release_id": release_id,
         "cp_controller_base_image": controller_base_image,
         "cp_ingress_server_name": answers["shared_fqdn"],
@@ -1151,6 +2686,7 @@ class InstallerEngine:
         bootstrap_runner=subprocess.Popen,
         dns_resolver=socket.getaddrinfo,
         apt_get="apt-get",
+        verbose=False,
     ):
         self.paths = paths
         self.source_root = Path(source_root).resolve()
@@ -1168,6 +2704,7 @@ class InstallerEngine:
         self.bootstrap_runner = bootstrap_runner
         self.dns_resolver = dns_resolver
         self.apt_get = apt_get
+        self.verbose = bool(verbose)
         self.redactor = Redactor()
         self.log = InstallerLog(paths.human_log, paths.event_log, self.redactor)
         self.ledger = None
@@ -1195,8 +2732,15 @@ class InstallerEngine:
             and self.runner in (subprocess.Popen, subprocess.run)
         ):
             raise InstallerError("--root overrides require --dry-run outside the unit-test harness")
-        ensure_private_directory(self.paths.state_dir)
-        ensure_private_directory(self.paths.log_dir)
+        legacy = detect_legacy_state(self.paths)
+        if legacy is not None and not self.paths.ledger.exists():
+            raise InstallerError(
+                "Legacy rc3-rc5 installer state was detected at %s. It cannot be "
+                "resumed under schema 5; inspect status and use discard-incomplete "
+                "only if the plan proves no host mutation occurred."
+                % legacy["state_dir"]
+            )
+        self.paths.ensure_state_log_directories()
         self._purge_abandoned_vars()
         if resume:
             if not self.paths.ledger.exists():
@@ -1208,8 +2752,21 @@ class InstallerEngine:
                 raise InstallerError("Resume must use the same --dry-run setting as the original run")
             self._load_secrets_if_present()
             self.ledger.mark_resumed()
+            if not self.paths.ownership.exists():
+                raise InstallerError("Schema-5 ownership manifest is missing; refusing resume")
+            self.log.bind(
+                installation_id=self.ledger.value["installation_id"],
+                run_number=self.ledger.value["run_count"],
+                correlation_id=self.ledger.value["runs"][-1]["correlation_id"],
+            )
+            if self.paths.answers.exists():
+                resumed_answers = validate_answers(read_json_file(self.paths.answers))
+                self.log.bind(
+                    node_fqdn=resumed_answers["node_fqdn"],
+                    shared_fqdn=resumed_answers["shared_fqdn"],
+                )
             self.log.info("Resuming installation %s" % self.ledger.value["installation_id"])
-            self.log.event("installation_resumed", installation_id=self.ledger.value["installation_id"])
+            self.log.audit("installation_resumed")
         else:
             if self.paths.ledger.exists():
                 existing = PhaseLedger.load(self.paths.ledger)
@@ -1218,8 +2775,17 @@ class InstallerEngine:
                     % existing.value.get("status", "unknown")
                 )
             self.ledger = PhaseLedger.create(self.paths.ledger, dry_run=self.dry_run)
-            self.log.info("Started standalone CP1 installation %s" % self.ledger.value["installation_id"])
-            self.log.event("installation_started", installation_id=self.ledger.value["installation_id"])
+            initialize_ownership_manifest(self.paths, self.ledger)
+            self.log.bind(
+                installation_id=self.ledger.value["installation_id"],
+                run_number=self.ledger.value["run_count"],
+                correlation_id=self.ledger.value["runs"][-1]["correlation_id"],
+            )
+            self.log.info(
+                "Started Controller Plane installation %s"
+                % self.ledger.value["installation_id"]
+            )
+            self.log.audit("installation_started")
 
     def _begin_reconcile(self):
         if self.dry_run or self.paths.dry_run:
@@ -1228,8 +2794,7 @@ class InstallerEngine:
             raise InstallerError("Reconcile requires root")
         if self.paths.root != Path("/") and self.runner in (subprocess.Popen, subprocess.run):
             raise InstallerError("--root overrides cannot run a real reconcile")
-        ensure_private_directory(self.paths.state_dir)
-        ensure_private_directory(self.paths.log_dir)
+        self.paths.ensure_state_log_directories()
         self._purge_abandoned_vars()
         if not self.paths.ledger.exists():
             raise InstallerError("No completed real installation exists to reconcile")
@@ -1240,18 +2805,23 @@ class InstallerEngine:
             raise InstallerError(
                 "Reconcile requires completed state; use resume for incomplete or failed state"
             )
-        validate_answers(read_json_file(self.paths.answers))
+        reconciled_answers = validate_answers(read_json_file(self.paths.answers))
         protected = validate_secrets(read_json_file(self.paths.secrets))
         self.redactor.add_values(protected.values())
         self.ledger.prepare_reconcile()
+        self.log.bind(
+            installation_id=self.ledger.value["installation_id"],
+            run_number=self.ledger.value["run_count"],
+            correlation_id=self.ledger.value["runs"][-1]["correlation_id"],
+            node_fqdn=reconciled_answers["node_fqdn"],
+            shared_fqdn=reconciled_answers["shared_fqdn"],
+        )
         self.log.info(
             "Started reconcile %d for installation %s"
             % (self.ledger.value["reconcile_count"], self.ledger.value["installation_id"])
         )
-        self.log.event(
+        self.log.audit(
             "reconcile_started",
-            installation_id=self.ledger.value["installation_id"],
-            run_number=self.ledger.value["run_count"],
             reconcile_number=self.ledger.value["reconcile_count"],
         )
 
@@ -1261,6 +2831,10 @@ class InstallerEngine:
             self.log.event("phase_skipped", phase=phase)
             return
         self.ledger.start_phase(phase)
+        self.log.bind(
+            phase=phase,
+            attempt=self.ledger.value["phases"][phase]["attempt"],
+        )
         self.log.info("Starting phase: %s" % phase)
         self.log.event("phase_started", phase=phase)
         try:
@@ -1268,14 +2842,15 @@ class InstallerEngine:
         except Exception as exc:
             safe_error = self.redactor.text(exc)
             self.ledger.fail_phase(phase, safe_error)
-            self.log.info("Phase failed: %s: %s" % (phase, safe_error))
-            self.log.event("phase_failed", phase=phase, error=safe_error)
+            self.log.error("Phase failed: %s: %s" % (phase, safe_error), category="phase")
+            self.log.audit("phase_failed", phase=phase, error=safe_error)
             if isinstance(exc, InstallerError):
                 raise
             raise InstallerError("Phase %s failed: %s" % (phase, safe_error))
         self.ledger.complete_phase(phase, details=details)
         self.log.info("Completed phase: %s" % phase)
         self.log.event("phase_completed", phase=phase, details=details or {})
+        self.log.bind(phase=None, attempt=None)
 
     def _phase_preflight(self):
         return run_preflight(self.paths)
@@ -1283,16 +2858,28 @@ class InstallerEngine:
     def _phase_bootstrap(self):
         answers = validate_answers(read_json_file(self.paths.answers))
         validate_answer_dns(answers, resolver=self.dns_resolver)
+        packages = bootstrap_packages_for_answers(answers)
+        preexisting_packages = (
+            query_preexisting_packages(packages, log=self.log)
+            if self.paths.root == Path("/") and not self.dry_run
+            else []
+        )
+        update_ownership_packages(
+            self.paths,
+            packages,
+            preexisting=preexisting_packages,
+            completed=False,
+        )
         if self.paths.root == Path("/"):
             # The question/confirmation interval can be arbitrarily long, and
             # resume may occur days later. Recheck mutable host safety at the
             # final read-only boundary immediately before apt.
             run_runtime_preflight(self.paths)
-        commands = bootstrap_commands(self.apt_get)
+        commands = bootstrap_commands(self.apt_get, packages=packages)
         if self.dry_run:
             self.log.event("bootstrap_planned", commands=commands, dry_run=True)
             return {
-                "packages": list(BOOTSTRAP_PACKAGES),
+                "packages": list(packages),
                 "result": "not-executed",
                 "reason": "dry-run",
             }
@@ -1302,23 +2889,56 @@ class InstallerEngine:
         ):
             self.log.event("bootstrap_planned", commands=commands, filesystem_root=str(self.paths.root))
             return {
-                "packages": list(BOOTSTRAP_PACKAGES),
+                "packages": list(packages),
                 "result": "not-executed",
                 "reason": "filesystem-root override",
             }
-        return run_bootstrap(
+        result = run_bootstrap(
             self.log,
             runner=self.bootstrap_runner,
             apt_get=self.apt_get,
+            packages=packages,
+            verbose=self.verbose,
             console_stream=self.output_stream,
         )
+        update_ownership_packages(
+            self.paths,
+            packages,
+            preexisting=preexisting_packages,
+            completed=True,
+        )
+        return result
 
     def _phase_answers(self):
         if self.paths.answers.exists():
             answers = validate_answers(read_json_file(self.paths.answers))
         else:
-            answers = load_answers(self.answer_file, input_function=self.input_function)
+            if self.answer_file is None:
+                discovery = discover_public_ipv4()
+                self.log.event(
+                    "public_ipv4_discovery_completed",
+                    level="INFO",
+                    category="network",
+                    result=discovery,
+                )
+                answers = prompt_answers(
+                    input_function=self.input_function,
+                    output_function=(
+                        print
+                        if self.output_stream is sys.stdout
+                        else lambda message: self.output_stream.write("%s\n" % message)
+                    ),
+                    public_ip_discoverer=lambda: discovery,
+                )
+            else:
+                answers = load_answers(
+                    self.answer_file, input_function=self.input_function
+                )
             atomic_write_json(self.paths.answers, answers)
+        self.log.bind(
+            node_fqdn=answers["node_fqdn"],
+            shared_fqdn=answers["shared_fqdn"],
+        )
         return {
             "deployment_mode": answers["deployment_mode"],
             "node_fqdn": answers["node_fqdn"],
@@ -1327,7 +2947,18 @@ class InstallerEngine:
 
     def _phase_confirmation(self):
         answers = validate_answers(read_json_file(self.paths.answers))
-        resolved = validate_answer_dns(answers, resolver=self.dns_resolver)
+        answers, resolved = wait_for_answer_dns(
+            answers,
+            resolver=self.dns_resolver,
+            interactive=self.answer_file is None,
+            input_function=self.input_function,
+            output_function=lambda message: self.output_stream.write("%s\n" % message),
+            answers_changed=lambda updated: atomic_write_json(
+                self.paths.answers, updated
+            ),
+        )
+        atomic_write_json(self.paths.answers, answers)
+        self.log.audit("dns_validation_passed", dns_names=sorted(resolved))
         lines = configuration_summary_lines(answers)
         self.log.info("Validated configuration presented for confirmation")
         for line in lines:
@@ -1392,7 +3023,9 @@ class InstallerEngine:
         secret_values = validate_secrets(read_json_file(self.paths.secrets))
         self.redactor.add_values(secret_values.values())
         release_id = self.ledger.value.get("controller_release_id")
-        if not isinstance(release_id, str) or not re.fullmatch(r"cp1-[0-9a-f]{64}", release_id):
+        if not isinstance(release_id, str) or not re.fullmatch(
+            r"cp1-[0-9a-f]{64}", release_id
+        ):
             raise InstallerError("Controller release ID is missing from the installer ledger")
         if release_id != calculate_controller_release_id(self.source_root / "controller"):
             raise InstallerError("Controller source changed after release identity calculation")
@@ -1436,6 +3069,7 @@ class InstallerEngine:
                 "ansible",
                 runner=self.runner,
                 console_stream=self.output_stream,
+                show_output=self.verbose,
                 cwd=str(self.source_root),
                 env=environment,
             )
@@ -1465,6 +3099,12 @@ class InstallerEngine:
             "recovery_url": "https://%s/recovery/" % answers["shared_fqdn"],
             "admin_username": answers["admin_username"],
             "admin_email": answers["admin_email"],
+            "acme_email": answers["acme_email"],
+            "acme_ca": LETS_ENCRYPT_PRODUCTION_DIRECTORY,
+            "firewall_mode": answers["firewall_mode"],
+            "timezone": answers["timezone"],
+            "ntp_mode": answers["ntp_mode"],
+            "ntp_servers": answers["ntp_servers"],
             "credentials_file": str(self.paths.credentials),
             "human_log": str(self.paths.human_log),
             "event_log": str(self.paths.event_log),
@@ -1480,10 +3120,15 @@ class InstallerEngine:
             "Recovery URL: {recovery_url}\n"
             "Administrator: {admin_username}\n"
             "Administrator email: {admin_email}\n"
+            "Let's Encrypt ACME email: {acme_email}\n"
+            "ACME directory: {acme_ca}\n"
             "Administrator password: {admin_password}\n"
         ).format(admin_password=secret_values["cp_controller_admin_password"], **summary)
         atomic_write_bytes(self.paths.credentials, credential_text.encode("utf-8"), mode=0o600)
         atomic_write_json(self.paths.summary, summary)
+        update_ownership_state(
+            self.paths, "dry-run-complete" if self.dry_run else "installed"
+        )
         return {
             "console_url": summary["console_url"],
             "documentation_url": summary["documentation_url"],
@@ -1494,7 +3139,7 @@ class InstallerEngine:
     def run(self, resume=False, reconcile=False):
         if resume and reconcile:
             raise InstallerError("resume and reconcile are mutually exclusive")
-        with ExclusiveInstallerLock(self.paths.lock):
+        with self.paths.exclusive_lock():
             if reconcile:
                 self._begin_reconcile()
             else:
@@ -1526,30 +3171,299 @@ class InstallerEngine:
 
 
 def installer_status(paths):
-    with ExclusiveInstallerLock(paths.lock):
-        if not paths.ledger.exists():
-            return {
-                "status": "not-installed",
-                "dry_run_state": paths.dry_run,
-                "state_dir": str(paths.state_dir),
-                "log_dir": str(paths.log_dir),
-                "ledger": str(paths.ledger),
-            }
-        ledger = PhaseLedger.load(paths.ledger).value
+    if not paths.ledger.exists():
+        legacy = detect_legacy_state(paths)
         return {
-            "status": ledger.get("status"),
-            "installation_id": ledger.get("installation_id"),
-            "current_phase": ledger.get("current_phase"),
-            "controller_release_id": ledger.get("controller_release_id"),
-            "dry_run": ledger.get("dry_run"),
+            "status": "legacy-state-detected" if legacy else "not-installed",
+            "dry_run_state": paths.dry_run,
             "state_dir": str(paths.state_dir),
             "log_dir": str(paths.log_dir),
             "ledger": str(paths.ledger),
-            "run_count": ledger.get("run_count"),
-            "reconcile_count": ledger.get("reconcile_count"),
-            "runs": ledger.get("runs"),
-            "phases": {key: value.get("status") for key, value in ledger["phases"].items()},
+            "legacy": legacy,
         }
+    # Ledger writes use atomic rename, so a reader sees either the prior or the
+    # next complete document. Status and diagnostics deliberately do not create
+    # or rewrite the volatile lock: `/run` is cleared on reboot, while status
+    # must remain available for an existing durable ledger.
+    ledger = PhaseLedger.load(paths.ledger).value
+    return {
+        "status": ledger.get("status"),
+        "installation_id": ledger.get("installation_id"),
+        "current_phase": ledger.get("current_phase"),
+        "controller_release_id": ledger.get("controller_release_id"),
+        "dry_run": ledger.get("dry_run"),
+        "state_dir": str(paths.state_dir),
+        "log_dir": str(paths.log_dir),
+        "ledger": str(paths.ledger),
+        "run_count": ledger.get("run_count"),
+        "reconcile_count": ledger.get("reconcile_count"),
+        "runs": ledger.get("runs"),
+        "phases": {key: value.get("status") for key, value in ledger["phases"].items()},
+    }
+
+
+def _diagnose_dns_name(name, expected, resolver=socket.getaddrinfo):
+    record = {"name": name, "expected_ipv4": expected, "ipv4": [], "ipv6": []}
+    for family, key in ((socket.AF_INET, "ipv4"), (socket.AF_INET6, "ipv6")):
+        try:
+            results = resolver(name, 443, family, socket.SOCK_STREAM)
+            record[key] = sorted(
+                {
+                    item[4][0].split("%", 1)[0]
+                    for item in results
+                    if len(item) >= 5 and item[4] and item[4][0]
+                }
+            )
+        except (OSError, socket.gaierror) as exc:
+            record["%s_error" % key] = str(exc)
+    record["ready"] = record["ipv4"] == [expected] and not record["ipv6"]
+    return record
+
+
+def diagnostics_report(
+    paths,
+    node_fqdn=None,
+    shared_fqdn=None,
+    public_ipv4=None,
+    public_ip_discoverer=discover_public_ipv4,
+    resolver=socket.getaddrinfo,
+    runner=subprocess.run,
+    command_finder=shutil.which,
+):
+    """Run read-only readiness checks without creating installer state or locks."""
+    report = {
+        "timestamp": utc_now(),
+        "installer_version": INSTALLER_VERSION,
+        "state": installer_status(paths),
+        "network_contract": {
+            "inbound_tcp": [22, 80, 443],
+            "outbound_tcp": [53, 80, 443],
+            "outbound_udp": [53, 123],
+            "never_public": [5432, 6432, 8000],
+        },
+    }
+    try:
+        report["host_os"] = {"ready": True, **validate_host_os(paths)}
+    except InstallerError as exc:
+        report["host_os"] = {"ready": False, "error": str(exc)}
+    report["public_ipv4_discovery"] = public_ip_discoverer()
+
+    timedatectl = command_finder("timedatectl")
+    if timedatectl:
+        try:
+            output = _read_only_command(
+                [
+                    timedatectl,
+                    "show",
+                    "--property=NTP",
+                    "--property=NTPSynchronized",
+                    "--property=Timezone",
+                    "--no-pager",
+                ],
+                runner=runner,
+            )
+            values = dict(
+                line.split("=", 1) for line in output.splitlines() if "=" in line
+            )
+            report["time"] = {
+                "ntp_enabled": values.get("NTP", "").lower() == "yes",
+                "synchronized": values.get("NTPSynchronized", "").lower() == "yes",
+                "timezone": values.get("Timezone"),
+            }
+        except InstallerError as exc:
+            report["time"] = {"error": str(exc)}
+    else:
+        report["time"] = {"error": "timedatectl is unavailable"}
+
+    if any(value is not None for value in (node_fqdn, shared_fqdn, public_ipv4)):
+        if not all((node_fqdn, shared_fqdn, public_ipv4)):
+            raise InstallerError(
+                "DNS diagnostics require --node-fqdn, --shared-fqdn and --public-ip together"
+            )
+        expected = validate_public_ipv4(public_ipv4)
+        report["dns"] = [
+            _diagnose_dns_name(
+                validate_fqdn(name), expected, resolver=resolver
+            )
+            for name in (node_fqdn, shared_fqdn)
+        ]
+    return report
+
+
+def _discard_state_descriptor(paths):
+    if paths.ledger.exists():
+        ledger = PhaseLedger.load(paths.ledger).value
+        return {
+            "kind": "schema-5",
+            "ledger": ledger,
+            "state_dir": paths.state_dir,
+            "log_dir": paths.log_dir,
+            "lock": paths.lock,
+            "allowed_state_names": {
+                "ledger.json",
+                "answers.json",
+                "ownership.json",
+                "tombstone.json",
+                "installer.lock",
+            },
+        }
+    legacy = detect_legacy_state(paths)
+    if legacy and paths.legacy_ledger.exists():
+        return {
+            "kind": "legacy-schema-4",
+            "ledger": read_json_file(paths.legacy_ledger),
+            "state_dir": paths.legacy_state_dir,
+            "log_dir": paths.legacy_log_dir,
+            "lock": paths.legacy_lock,
+            "allowed_state_names": {
+                "ledger.json",
+                "answers.json",
+                "installer.lock",
+            },
+        }
+    raise InstallerError("No recognized incomplete installer ledger is available to discard")
+
+
+def _prove_pre_mutation_ledger(descriptor, paths):
+    ledger = descriptor["ledger"]
+    expected_schema = 5 if descriptor["kind"] == "schema-5" else 4
+    if ledger.get("schema_version") != expected_schema:
+        raise InstallerError("Discard refused an unexpected installer ledger schema")
+    phases = ledger.get("phases")
+    if not isinstance(phases, dict):
+        raise InstallerError("Discard refused an invalid installer phase ledger")
+    for phase in ("bootstrap", "secrets", "ansible", "summary"):
+        record = phases.get(phase)
+        if not isinstance(record, dict) or record.get("status") != "pending":
+            raise InstallerError(
+                "Discard is safe only before host mutation; phase %s is %s"
+                % (phase, record.get("status") if isinstance(record, dict) else "missing")
+            )
+    if ledger.get("status") in ("complete", "dry-run-complete"):
+        raise InstallerError("Completed installations cannot be discarded as incomplete")
+    if descriptor["kind"] == "schema-5":
+        ownership = read_json_file(paths.ownership)
+        validate_pre_mutation_ownership_manifest(paths, ledger, ownership)
+    markers = (
+        paths.host_path("/etc/vivolution/installation-owner"),
+        paths.host_path("/var/lib/vivolution/controller"),
+        paths.host_path("/etc/containers/systemd/vivolution-cp-web.container"),
+    )
+    if any(path.exists() or path.is_symlink() for path in markers):
+        raise InstallerError("Discard refused because installed runtime markers exist")
+    return True
+
+
+def _discard_allowlisted_entries(descriptor):
+    state_dir = descriptor["state_dir"]
+    log_dir = descriptor["log_dir"]
+    if state_dir.is_symlink() or log_dir.is_symlink():
+        raise InstallerError("Discard paths must not be symbolic links")
+    entries = []
+    if state_dir.exists():
+        for item in state_dir.iterdir():
+            if item.name not in descriptor["allowed_state_names"]:
+                raise InstallerError("Discard refused unexpected state object: %s" % item)
+            if item.is_symlink() or not item.is_file():
+                raise InstallerError("Discard refused unsafe state object: %s" % item)
+            entries.append(item)
+    if log_dir.exists():
+        for item in log_dir.iterdir():
+            allowed = re.fullmatch(r"(?:install\.log|events\.jsonl)(?:\.[1-5])?", item.name)
+            if not allowed:
+                raise InstallerError("Discard refused unexpected log object: %s" % item)
+            if item.is_symlink() or not item.is_file():
+                raise InstallerError("Discard refused unsafe log object: %s" % item)
+            entries.append(item)
+    return sorted(entries, key=lambda item: str(item))
+
+
+def discard_incomplete(
+    paths,
+    dry_run=False,
+    confirmation_token=None,
+    input_function=input,
+    output_stream=None,
+):
+    """Discard only a strictly allowlisted pre-mutation installer journal."""
+    if paths.root == Path("/") and os.geteuid() != 0:
+        raise InstallerError("Discarding incomplete installer state requires root")
+    # The schema-5 runtime lock is outside the removable state/log trees.  Hold
+    # this same descriptor from the first proof/plan read through the operator
+    # prompt, revalidation, and deletion.  This both coordinates compliant
+    # installer processes and closes the former plan/confirmation TOCTOU gap.
+    with paths.exclusive_lock():
+        descriptor = _discard_state_descriptor(paths)
+        _prove_pre_mutation_ledger(descriptor, paths)
+        entries = _discard_allowlisted_entries(descriptor)
+        plan = {
+            "action": "discard-incomplete",
+            "source": descriptor["kind"],
+            "installation_id": descriptor["ledger"].get("installation_id"),
+            "pre_mutation_proven": True,
+            "packages_removed": [],
+            "services_changed": [],
+            "files": [str(item) for item in entries],
+            "directories": [str(descriptor["state_dir"]), str(descriptor["log_dir"])],
+            "dry_run": bool(dry_run),
+        }
+        if dry_run:
+            return plan
+        if descriptor["kind"] == "legacy-schema-4":
+            raise InstallerError(
+                "Legacy rc3-rc5 cleanup is plan-only because its removable lock file "
+                "cannot provide race-free concurrency with the old installer. Recreate "
+                "the fresh VM or perform reviewed offline cleanup after proving no "
+                "installer process is running."
+            )
+        output_stream = sys.stdout if output_stream is None else output_stream
+        output_stream.write(
+            "\nExact discard plan (no packages or services will be changed):\n%s\n"
+            % json.dumps(plan, indent=2, sort_keys=True)
+        )
+        output_stream.flush()
+        token = confirmation_token
+        if token is None:
+            token = input_function(
+                "Type %s to remove only the listed incomplete installer state: "
+                % DISCARD_CONFIRMATION_TOKEN
+            ).strip()
+        if token != DISCARD_CONFIRMATION_TOKEN:
+            raise InstallerError(
+                "Incomplete state was not discarded; confirmation token did not match"
+            )
+
+        current_descriptor = _discard_state_descriptor(paths)
+        _prove_pre_mutation_ledger(current_descriptor, paths)
+        current_entries = _discard_allowlisted_entries(current_descriptor)
+        if (
+            current_descriptor["kind"] != descriptor["kind"]
+            or current_descriptor["ledger"].get("installation_id")
+            != descriptor["ledger"].get("installation_id")
+            or [str(item) for item in current_entries] != plan["files"]
+            or [
+                str(current_descriptor["state_dir"]),
+                str(current_descriptor["log_dir"]),
+            ]
+            != plan["directories"]
+        ):
+            raise InstallerError(
+                "Incomplete state changed after the displayed discard plan; nothing was deleted"
+            )
+
+        # Delete the exact, revalidated set shown to the operator.  Never
+        # substitute a newly enumerated set after confirmation.
+        for item in entries:
+            item.unlink()
+        for directory in (descriptor["state_dir"], descriptor["log_dir"]):
+            with contextlib.suppress(FileNotFoundError):
+                directory.rmdir()
+        if descriptor["kind"] == "schema-5":
+            for parent in (paths.state_dir.parent, paths.log_dir.parent):
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    parent.rmdir()
+        plan["discarded_at"] = utc_now()
+    return plan
 
 
 def _redacted_file_bytes(path, redactor):
@@ -1558,11 +3472,40 @@ def _redacted_file_bytes(path, redactor):
         raw = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return b"[binary content omitted]\n"
-    return (redactor.text(raw) + ("" if raw.endswith("\n") else "\n")).encode("utf-8")
+    if path.suffix == ".json":
+        try:
+            value = json.loads(raw)
+        except ValueError as exc:
+            raise InstallerError("Support bundle JSON is invalid in %s: %s" % (path, exc))
+        return (
+            json.dumps(redactor.value(value), indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+    if path.suffix == ".jsonl":
+        records = []
+        for line_number, line in enumerate(raw.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except ValueError as exc:
+                raise InstallerError(
+                    "Support bundle JSONL is invalid in %s at line %d: %s"
+                    % (path, line_number, exc)
+                )
+            records.append(json.dumps(redactor.value(value), sort_keys=True))
+        return (("\n".join(records) + "\n") if records else "").encode("utf-8")
+
+    # Human logs retain physical record boundaries. Pattern matching is done
+    # over the whole payload so multiline PEM blocks are removed atomically;
+    # all other unsafe control bytes remain escaped.
+    rendered = redactor.multiline_text(raw)
+    if rendered and not rendered.endswith("\n"):
+        rendered += "\n"
+    return rendered.encode("utf-8")
 
 
 def create_support_bundle(paths, output_path=None):
-    with ExclusiveInstallerLock(paths.lock):
+    with paths.exclusive_lock():
         if not paths.ledger.exists():
             raise InstallerError("No installer state is available for a support bundle")
         ledger = PhaseLedger.load(paths.ledger).value
@@ -1589,6 +3532,7 @@ def create_support_bundle(paths, output_path=None):
             (paths.answers, "installer/answers.json"),
             (paths.summary, "installer/summary.json"),
             (paths.inventory, "installer/inventory.json"),
+            (paths.ownership, "installer/ownership.json"),
             (paths.human_log, "logs/install.log"),
             (paths.event_log, "logs/events.jsonl"),
         )
@@ -1651,6 +3595,11 @@ def add_common_arguments(
         parser.add_argument("--playbook", default=DEFAULT_PLAYBOOK)
         parser.add_argument("--ansible-config", default=DEFAULT_ANSIBLE_CONFIG)
         parser.add_argument("--ansible-playbook", default="ansible-playbook")
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="show sanitized command output on the console (always retained in protected logs)",
+        )
     if include_answers:
         parser.add_argument("--answers", help="validated JSON answer file")
         parser.add_argument(
@@ -1674,11 +3623,16 @@ def build_parser():
     parser = argparse.ArgumentParser(prog="install.sh", description=__doc__)
     parser.add_argument("--version", action="version", version=INSTALLER_VERSION)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    install = subparsers.add_parser("install", help="start a fresh standalone CP1 install")
+    subparsers.add_parser("menu", help="open the Vivolution Turnkey Installer menu")
+    install = subparsers.add_parser(
+        "install", help="create a fresh standalone Controller Plane"
+    )
     add_common_arguments(
         install, include_execution=True, include_answers=True, allow_dry_run=True
     )
-    resume = subparsers.add_parser("resume", help="resume an interrupted standalone CP1 install")
+    resume = subparsers.add_parser(
+        "resume", help="resume an interrupted Controller Plane installation"
+    )
     add_common_arguments(
         resume, include_execution=True, include_answers=True, allow_dry_run=True
     )
@@ -1691,6 +3645,32 @@ def build_parser():
     support = subparsers.add_parser("support-bundle", help="create a redacted support archive")
     add_common_arguments(support, allow_dry_run=True)
     support.add_argument("--output", help="new support archive path")
+    host_os = subparsers.add_parser(
+        "check-host-os", help="verify supported host OS metadata without installing"
+    )
+    add_common_arguments(host_os)
+    diagnostics = subparsers.add_parser(
+        "diagnostics", help="run read-only host and network readiness diagnostics"
+    )
+    add_common_arguments(diagnostics)
+    diagnostics.add_argument("--node-fqdn")
+    diagnostics.add_argument("--shared-fqdn")
+    diagnostics.add_argument("--public-ip")
+    discard = subparsers.add_parser(
+        "discard-incomplete",
+        help="discard only installer state proven to predate host mutation",
+    )
+    add_common_arguments(discard)
+    discard.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the bounded discard plan without deleting anything",
+    )
+    discard.add_argument(
+        "--confirm",
+        metavar=DISCARD_CONFIRMATION_TOKEN,
+        help="noninteractive exact confirmation token",
+    )
     return parser
 
 
@@ -1718,21 +3698,45 @@ def _engine_from_args(args, paths):
         answer_file=getattr(args, "answers", None),
         accept_configuration=getattr(args, "accept_configuration", False),
         dry_run=getattr(args, "dry_run", False),
+        verbose=getattr(args, "verbose", False),
     )
 
 
 def main(argv=None):
     if sys.version_info[:2] != (3, 12):
-        print("Vivolution CP Installer requires Python 3.12 exactly.", file=sys.stderr)
+        print("Vivolution Turnkey Installer requires Python 3.12 exactly.", file=sys.stderr)
         return 2
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments:
-        arguments = ["install"]
+        arguments = ["menu"]
     parser = build_parser()
     args = parser.parse_args(arguments)
     try:
-        dry_run = getattr(args, "dry_run", False)
-        paths = InstallerPaths(args.root, args.state_dir, args.log_dir, dry_run=dry_run)
+        # discard-incomplete --dry-run is a deletion-plan flag, not isolated
+        # installation state selection.
+        dry_run = (
+            getattr(args, "dry_run", False)
+            if args.command != "discard-incomplete"
+            else False
+        )
+        paths = InstallerPaths(
+            getattr(args, "root", "/"),
+            getattr(args, "state_dir", None),
+            getattr(args, "log_dir", None),
+            dry_run=dry_run,
+        )
+        if args.command == "menu":
+            action = select_installer_action()
+            if action == "create-controller":
+                return main(["install"])
+            if action == "diagnostics":
+                return main(["diagnostics"])
+            if action == "manage":
+                managed = select_manage_action(paths)
+                if managed == "preview-legacy-cleanup":
+                    return main(["discard-incomplete", "--dry-run"])
+                return main([managed])
+            raise InstallerError("Selected role is not implemented in this release")
         if args.command in ("install", "resume", "reconcile"):
             engine = _engine_from_args(args, paths)
             summary = engine.run(
@@ -1744,6 +3748,27 @@ def main(argv=None):
         elif args.command == "support-bundle":
             output = create_support_bundle(paths, output_path=args.output)
             print("Support bundle: %s" % output)
+        elif args.command == "check-host-os":
+            identity = validate_host_os(paths)
+            print(
+                "Host OS verified: %s %s"
+                % (identity["os_id"], identity["os_version"])
+            )
+        elif args.command == "diagnostics":
+            report = diagnostics_report(
+                paths,
+                node_fqdn=args.node_fqdn,
+                shared_fqdn=args.shared_fqdn,
+                public_ipv4=args.public_ip,
+            )
+            print(json.dumps(report, indent=2, sort_keys=True))
+        elif args.command == "discard-incomplete":
+            plan = discard_incomplete(
+                paths,
+                dry_run=args.dry_run,
+                confirmation_token=args.confirm,
+            )
+            print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
     except InstallerError as exc:
         print("ERROR: %s" % exc, file=sys.stderr)

@@ -20,3 +20,16 @@
     XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
     DBUS_SESSION_BUS_ADDRESS: "unix:path={{ carrier_gateway_rootless_runtime_dir }}/bus"
   listen: Restart carrier gateway
+
+- name: Reload root manager for isolated carrier egress
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: carrier_gateway_provider_enabled | bool
+  listen: Restart isolated carrier egress
+
+- name: Restart isolated carrier egress service
+  ansible.builtin.systemd_service:
+    name: vivolution-carrier-egress.service
+    state: restarted
+  when: carrier_gateway_provider_enabled | bool
+  listen: Restart isolated carrier egress

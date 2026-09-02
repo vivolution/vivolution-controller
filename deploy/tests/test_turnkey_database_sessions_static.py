@@ -31,12 +31,16 @@ class TurnkeyDatabaseSessionStaticTests(unittest.TestCase):
         self.assertIn('def env_session_engine(name="DJANGO_SESSION_ENGINE", default="file")', settings)
         self.assertIn('"db": "django.contrib.sessions.backends.db"', settings)
 
-    def test_runtime_acl_grants_only_required_session_table_crud(self):
+    def test_runtime_acl_grants_only_required_ephemeral_table_deletes(self):
         sql = read(
             "deploy/roles/postgres_local/templates/runtime-privileges.sql.j2"
         )
 
         self.assertIn("ELSIF existing_relation.relname = 'django_session' THEN", sql)
+        self.assertIn(
+            "ELSIF existing_relation.relname = 'core_enrollmentchallenge' THEN",
+            sql,
+        )
         self.assertIn(
             "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO %I", sql
         )
@@ -44,13 +48,13 @@ class TurnkeyDatabaseSessionStaticTests(unittest.TestCase):
         for privilege in ("'SELECT'", "'INSERT'", "'UPDATE'", "'DELETE'"):
             self.assertIn(privilege, sql)
         self.assertIn(
-            "CP_RUNTIME_PRIVILEGES_OK=shared-db-sessions-auth-readonly-core-dml",
+            "CP_RUNTIME_PRIVILEGES_OK=shared-db-sessions-challenge-retention-auth-readonly-core-dml",
             sql,
         )
 
     def test_reconcile_and_read_only_checks_require_the_same_contract_marker(self):
         expected = (
-            "CP_RUNTIME_PRIVILEGES_OK=shared-db-sessions-auth-readonly-core-dml"
+            "CP_RUNTIME_PRIVILEGES_OK=shared-db-sessions-challenge-retention-auth-readonly-core-dml"
         )
         reconcile = read(
             "deploy/roles/postgres_local/tasks/runtime_privileges.yml"

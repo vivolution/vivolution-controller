@@ -5,6 +5,174 @@
   gather_facts: false
   serial: 1
   tasks:
+    - name: Validate the activated one-SAN public carrier credential
+      ansible.builtin.command:
+        argv:
+          - /usr/local/libexec/vivolution-carrier-certificate/validate-carrier-certificate
+          - --certificate
+          - /etc/vivolution/carrier-gateway/pki/carrier.fullchain.pem
+          - --private-key
+          - /etc/vivolution/carrier-gateway/pki/carrier.key
+          - --expected-san
+          - carrier.vivolution.ae
+          - --trust-bundle
+          - /etc/ssl/certs/ca-certificates.crt
+          - --minimum-valid-seconds
+          - '1209600'
+      register: carrier_certificate_qualification
+      changed_when: false
+      no_log: true
+
+    - name: Require exact public carrier certificate evidence
+      ansible.builtin.assert:
+        that:
+          - >-
+            (carrier_certificate_qualification.stdout | from_json).status ==
+            'CARRIER_PUBLIC_CERTIFICATE_VALID'
+          - >-
+            (carrier_certificate_qualification.stdout | from_json).dnsSans ==
+            ['carrier.vivolution.ae']
+          - >-
+            (carrier_certificate_qualification.stdout | from_json).leafKeyBits | int == 2048
+          - >-
+            (carrier_certificate_qualification.stdout | from_json).chainCertificateCount | int >= 2
+        fail_msg: Public carrier certificate qualification failed.
+
+    - name: Require protected carrier ACME account state
+      ansible.builtin.command:
+        argv:
+          - /usr/local/libexec/vivolution-carrier-certificate/validate-carrier-acme-state
+          - --root
+          - /var/lib/vivolution-carrier-certificate/acme
+          - --certificate-name
+          - carrier.vivolution.ae
+          - --require-account
+          - --require-certificate
+      changed_when: false
+      no_log: true
+
+    - name: Re-prove the fresh controller-signed exclusive-RBAC receipt
+      ansible.builtin.command:
+        argv:
+          - /usr/local/libexec/vivolution-carrier-certificate/verify-carrier-acme-rbac-receipt
+          - --receipt
+          - /etc/vivolution/carrier-certificate-rbac-receipt.json
+          - --public-key
+          - /etc/vivolution/carrier-certificate-rbac-signer.pem
+          - --expected-subscription-id
+          - "{{ carrier_certificate_azure_subscription_id }}"
+          - --expected-tenant-id
+          - "{{ carrier_certificate_azure_tenant_id }}"
+          - --expected-cp1-principal-id
+          - "{{ carrier_certificate_expected_cp1_principal_id }}"
+          - --expected-resource-group
+          - DNS_Zones
+          - --expected-zone
+          - acme-carrier.vivolution.ae
+          - --expected-signing-key-id
+          - "{{ carrier_certificate_rbac_signing_key_id }}"
+          - --expected-public-key-sha256
+          - "{{ carrier_certificate_rbac_signer_public_key_sha256 }}"
+          - --maximum-lifetime-seconds
+          - '3600'
+          - --minimum-remaining-seconds
+          - '60'
+      register: carrier_certificate_rbac_qualification
+      changed_when: false
+      no_log: true
+
+    - name: Require exact exclusive-RBAC qualification evidence
+      ansible.builtin.assert:
+        that:
+          - >-
+            (carrier_certificate_rbac_qualification.stdout | from_json).status ==
+            'CARRIER_ACME_RBAC_RECEIPT_VALID'
+          - >-
+            not ((carrier_certificate_rbac_qualification.stdout |
+            from_json).humanSubscriptionAdministrationEvaluated | bool)
+        fail_msg: Fresh signed exclusive-RBAC qualification failed.
+
+    - name: Re-prove CP1 managed identity and public DNS zone binding
+      ansible.builtin.command:
+        argv:
+          - /usr/local/libexec/vivolution-carrier-certificate/verify-carrier-acme-authority
+          - --subscription-id
+          - "{{ carrier_certificate_azure_subscription_id }}"
+          - --tenant-id
+          - "{{ carrier_certificate_azure_tenant_id }}"
+          - --expected-principal-id
+          - "{{ carrier_certificate_expected_cp1_principal_id }}"
+          - --resource-group
+          - DNS_Zones
+          - --zone
+          - acme-carrier.vivolution.ae
+          - --certificate-name
+          - carrier.vivolution.ae
+          - --challenge-alias
+          - _acme-challenge.carrier.vivolution.ae
+          - --challenge-target
+          - _acme-challenge.acme-carrier.vivolution.ae
+          - --expected-public-ipv4
+          - "{{ carrier_gateway_controller_public_ipv4 }}"
+          - --resolver
+          - 168.63.129.16
+      register: carrier_certificate_authority_qualification
+      changed_when: false
+
+    - name: Require exact managed-identity authority evidence
+      ansible.builtin.assert:
+        that:
+          - >-
+            (carrier_certificate_authority_qualification.stdout | from_json).status ==
+            'CARRIER_ACME_AUTHORITY_BOUND'
+          - >-
+            (carrier_certificate_authority_qualification.stdout | from_json).certificateFqdn ==
+            'carrier.vivolution.ae'
+          - >-
+            (carrier_certificate_authority_qualification.stdout | from_json).challengeTarget ==
+            '_acme-challenge.acme-carrier.vivolution.ae'
+        fail_msg: Carrier managed-identity/DNS authority binding is not exact.
+
+    - name: Require no remaining carrier challenge TXT record
+      ansible.builtin.command:
+        argv:
+          - /usr/local/libexec/vivolution-carrier-certificate/reconcile-carrier-acme-challenge
+          - --subscription-id
+          - "{{ carrier_certificate_azure_subscription_id }}"
+          - --tenant-id
+          - "{{ carrier_certificate_azure_tenant_id }}"
+          - --expected-principal-id
+          - "{{ carrier_certificate_expected_cp1_principal_id }}"
+          - --resource-group
+          - DNS_Zones
+          - --zone
+          - acme-carrier.vivolution.ae
+          - --mode
+          - verify-absent
+      changed_when: false
+
+    - name: Require renewal timer active and reboot-persistent
+      ansible.builtin.command:
+        argv: [systemctl, "{{ item }}", --quiet, vivolution-carrier-certificate.timer]
+      loop:
+        - is-active
+        - is-enabled
+      changed_when: false
+
+    - name: Inspect carrier certificate activation transaction
+      ansible.builtin.stat:
+        path: /var/lib/vivolution-carrier-certificate/rotation/transaction.json
+        follow: false
+      register: carrier_certificate_transaction
+      changed_when: false
+
+    - name: Require no pending carrier certificate activation
+      ansible.builtin.assert:
+        that:
+          - not (carrier_certificate_transaction.stat.exists | default(false))
+          - not (carrier_certificate_transaction.stat.islnk | default(false))
+        fail_msg: A carrier certificate activation transaction remains pending.
+
     - name: Run the installed fail-closed readiness verifier
       ansible.builtin.command:
         argv:
@@ -19,5 +187,5 @@
             carrier_gateway_qualification.stdout is search(
               '^READY carrier-gateway profile=direct-private-pbx-poc '
               ~ 'listener=10.20.1.4:5061 edges=10.20.2.6,10.20.2.7 '
-              ~ 'twilio=(disabled|armed-no-call-authority)$')
+              ~ 'provider=(disabled|[a-z0-9][a-z0-9-]{1,31}-armed-no-call-authority)$')
         fail_msg: Carrier gateway readiness did not satisfy the bounded POC contract.

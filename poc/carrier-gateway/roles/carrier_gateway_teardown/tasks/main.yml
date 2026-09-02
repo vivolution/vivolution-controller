@@ -1,47 +1,295 @@
 ---
-- name: Require exact destructive cleanup acknowledgements
+- name: Require exact destructive and external teardown acknowledgements
   ansible.builtin.assert:
     that:
       - >-
         (not (carrier_gateway_remove_call_records | bool)) or
         carrier_gateway_remove_call_records_acknowledgement ==
         'DELETE_CARRIER_GATEWAY_CDR_AND_AUTHORIZATION_HISTORY'
+      - carrier_gateway_remove_pki | bool
       - >-
-        (not (carrier_gateway_remove_pki | bool)) or
         carrier_gateway_remove_pki_acknowledgement ==
         'DELETE_CARRIER_GATEWAY_PUBLIC_CERTIFICATE_AND_PRIVATE_KEY'
-    fail_msg: Call records and PKI are preserved without their exact acknowledgements.
+      - >-
+        (not (carrier_gateway_remove_image | bool)) or
+        carrier_gateway_remove_image_acknowledgement ==
+        'DELETE_EXACT_CARRIER_GATEWAY_ROOTLESS_IMAGE'
+      - >-
+        (not (carrier_gateway_remove_runtime_identity | bool)) or
+        (carrier_gateway_remove_runtime_identity_acknowledgement ==
+         'DELETE_DEDICATED_CARRIER_USER_GROUP_HOME_STORE_AND_SUBIDS' and
+         carrier_gateway_remove_image | bool)
+      - >-
+        (carrier_gateway_remove_host_packages | bool and
+         carrier_gateway_host_packages_acknowledgement ==
+         'REMOVE_REVIEWED_CARRIER_GATEWAY_HOST_PACKAGES') or
+        (not (carrier_gateway_remove_host_packages | bool) and
+         carrier_gateway_host_packages_acknowledgement ==
+         'PRESERVE_SHARED_CARRIER_GATEWAY_HOST_PACKAGES')
+      - >-
+        carrier_gateway_host_firewall_disabled_acknowledgement ==
+        'HOST_FIREWALL_CARRIER_RULES_REMOVED'
+      - >-
+        carrier_gateway_external_dns_removed_acknowledgement ==
+        'PUBLIC_CARRIER_DNS_AND_ACME_DELEGATION_REMOVED'
+      - >-
+        carrier_gateway_external_nsg_removed_acknowledgement ==
+        'AZURE_CP1_CARRIER_NSG_OVERLAY_REMOVED'
+    fail_msg: Teardown requires exact local, package, DNS, NSG, firewall, PKI, and optional history acknowledgements.
 
-- name: Stop and disable the carrier gateway
+- name: Verify protected exact DNS and NSG teardown read-back receipts
   ansible.builtin.command:
-    argv: [systemctl, --user, disable, --now, vivolution-carrier-gateway.service]
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import hashlib, json, os, pathlib, re, stat, sys
+        def read(path, maximum):
+            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            try:
+                before = os.fstat(fd)
+                if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
+                    before.st_uid != 0 or before.st_gid != 0 or
+                    stat.S_IMODE(before.st_mode) != 0o400 or before.st_size > maximum):
+                    raise SystemExit(2)
+                data = os.read(fd, maximum + 1)
+                after = os.fstat(fd)
+            finally: os.close(fd)
+            if len(data) != before.st_size or (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns):
+                raise SystemExit(2)
+            return data
+        def protected_json(receipt_path, digest_path):
+            raw = read(receipt_path, 65536)
+            detached = read(digest_path, 128)
+            if detached != ('sha256:' + hashlib.sha256(raw).hexdigest() + '\n').encode(): raise SystemExit(2)
+            value = json.loads(raw)
+            if raw != (json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode(): raise SystemExit(2)
+            return value
+        dns = protected_json(sys.argv[1], sys.argv[2])
+        nsg = protected_json(sys.argv[3], sys.argv[4])
+        if (set(dns) != {'appliedActions','appliedPlanSha256','postconditionPlanSha256','scope','status'} or
+            dns['status'] != 'ROOT_DIRECT_DNS_ACME_TEARDOWN_APPLIED' or
+            not isinstance(dns['appliedActions'], int) or dns['appliedActions'] < 0 or
+            not isinstance(dns['scope'], dict) or
+            re.fullmatch(r'[0-9a-f]{64}', dns['appliedPlanSha256']) is None or
+            re.fullmatch(r'[0-9a-f]{64}', dns['postconditionPlanSha256']) is None): raise SystemExit(2)
+        if (set(nsg) != {'action','deletedRuleNames','overlayState','planSha256','status'} or
+            nsg['action'] != 'teardown' or nsg['overlayState'] != 'ABSENT' or
+            nsg['status'] != 'CP1_CARRIER_NSG_OVERLAY_REMOVED' or
+            not isinstance(nsg['deletedRuleNames'], list) or
+            any(not isinstance(name, str) for name in nsg['deletedRuleNames']) or
+            re.fullmatch(r'[0-9a-f]{64}', nsg['planSha256']) is None): raise SystemExit(2)
+      - "{{ carrier_gateway_external_dns_receipt_path }}"
+      - "{{ carrier_gateway_external_dns_receipt_sha256_path }}"
+      - "{{ carrier_gateway_external_nsg_receipt_path }}"
+      - "{{ carrier_gateway_external_nsg_receipt_sha256_path }}"
+  changed_when: false
+
+- name: Observe carrier certificate unit load state without hiding errors
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - --property=LoadState
+      - --value
+      - "{{ item }}"
+  loop:
+    - vivolution-carrier-certificate.timer
+    - vivolution-carrier-certificate.service
+  register: carrier_certificate_teardown_units
+  changed_when: false
+  failed_when: >-
+    carrier_certificate_teardown_units.rc != 0 or
+    carrier_certificate_teardown_units.stdout | trim not in ['loaded', 'not-found']
+
+- name: Gate certificate work before teardown quiescence
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-carrier-certificate/carrier-certificate-operation-guard
+      - begin
+      - --purpose
+      - teardown
+  register: carrier_certificate_teardown_gate
+  changed_when: >-
+    carrier_certificate_teardown_gate.stdout | trim ==
+    'CARRIER_CERTIFICATE_MAINTENANCE_GATED'
+
+- name: Stop and disable loaded carrier certificate renewal scheduling
+  ansible.builtin.systemd_service:
+    name: vivolution-carrier-certificate.timer
+    enabled: false
+    state: stopped
+  when: carrier_certificate_teardown_units.results[0].stdout | trim == 'loaded'
+
+- name: Stop a loaded in-progress carrier certificate renewal cleanly
+  ansible.builtin.systemd_service:
+    name: vivolution-carrier-certificate.service
+    state: stopped
+  when: carrier_certificate_teardown_units.results[1].stdout | trim == 'loaded'
+
+- name: Prove certificate timer and service are stopped with no main process
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - --property=ActiveState
+      - --property=MainPID
+      - "{{ item }}"
+  loop:
+    - vivolution-carrier-certificate.timer
+    - vivolution-carrier-certificate.service
+  register: carrier_certificate_teardown_stopped_units
+  changed_when: false
+  failed_when: >-
+    carrier_certificate_teardown_stopped_units.rc != 0 or
+    carrier_certificate_teardown_stopped_units.stdout is not search(
+      'ActiveState=(inactive|failed)') or
+    carrier_certificate_teardown_stopped_units.stdout is not search('MainPID=0')
+
+- name: Prove renewal and rotation locks are quiescent behind teardown gate
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-carrier-certificate/carrier-certificate-operation-guard
+      - assert-locks-quiescent
+      - --purpose
+      - teardown
+  register: carrier_certificate_teardown_locks
+  retries: 5
+  delay: 1
+  until: carrier_certificate_teardown_locks is succeeded
+  changed_when: false
+
+- name: Inspect carrier certificate transaction after renewal stop
+  ansible.builtin.stat:
+    path: "{{ carrier_certificate_state_root }}/rotation/transaction.json"
+    follow: false
+  register: carrier_certificate_teardown_transaction
+  changed_when: false
+
+- name: Release teardown gate only to recover interrupted certificate activation
+  when: carrier_certificate_teardown_transaction.stat.exists | default(false)
+  block:
+    - name: Release teardown gate for certificate recovery
+      ansible.builtin.command:
+        argv:
+          - /usr/local/libexec/vivolution-carrier-certificate/carrier-certificate-operation-guard
+          - release-for-recovery
+          - --purpose
+          - teardown
+      changed_when: true
+
+    - name: Restart certificate scheduling for teardown recovery
+      ansible.builtin.systemd_service:
+        name: vivolution-carrier-certificate.timer
+        enabled: true
+        state: started
+      when: carrier_certificate_teardown_units.results[0].stdout | trim == 'loaded'
+
+    - name: Refuse teardown over an unrecovered certificate activation
+      ansible.builtin.fail:
+        msg: >-
+          Carrier certificate activation remains interrupted. Run
+          renew-certificate.yml to recover it before teardown.
+
+- name: Invalidate unconsumed authority before service stop
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-carrier-authority-broker
+      - --authorization-root
+      - "{{ carrier_gateway_state_root }}/authorization"
+      - invalidate
+      - --reason
+      - teardown
+  changed_when: false
+  no_log: true
+
+- name: Inspect carrier service state before strict stop
+  ansible.builtin.command:
+    argv: [systemctl, --user, is-active, vivolution-carrier-gateway.service]
   become: true
   become_user: "{{ carrier_gateway_runtime_user }}"
   environment:
     HOME: "{{ carrier_gateway_rootless_home }}"
     XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
     DBUS_SESSION_BUS_ADDRESS: "unix:path={{ carrier_gateway_rootless_runtime_dir }}/bus"
-  failed_when: false
+  register: carrier_gateway_service_state
   changed_when: false
+  failed_when: carrier_gateway_service_state.rc not in [0, 3, 4]
 
-- name: Remove only the named carrier container
+- name: Stop active carrier gateway without suppressing errors
   ansible.builtin.command:
-    argv: [podman, rm, --force, vivolution-carrier-gateway]
+    argv: [systemctl, --user, stop, vivolution-carrier-gateway.service]
+  when: carrier_gateway_service_state.rc == 0
   become: true
   become_user: "{{ carrier_gateway_runtime_user }}"
   environment:
     HOME: "{{ carrier_gateway_rootless_home }}"
     XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
-  register: carrier_gateway_removed_container
-  changed_when: carrier_gateway_removed_container.rc == 0
-  failed_when: false
+    DBUS_SESSION_BUS_ADDRESS: "unix:path={{ carrier_gateway_rootless_runtime_dir }}/bus"
+  changed_when: true
 
-- name: Remove the carrier Quadlet
+- name: Disable carrier gateway without suppressing removal errors
+  ansible.builtin.command:
+    argv: [systemctl, --user, disable, vivolution-carrier-gateway.service]
+  become: true
+  become_user: "{{ carrier_gateway_runtime_user }}"
+  environment:
+    HOME: "{{ carrier_gateway_rootless_home }}"
+    XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path={{ carrier_gateway_rootless_runtime_dir }}/bus"
+  register: carrier_gateway_disable_result
+  changed_when: carrier_gateway_disable_result.rc == 0
+  failed_when: carrier_gateway_disable_result.rc not in [0, 1]
+
+- name: Inspect the exact named carrier container
+  ansible.builtin.command:
+    argv: [podman, container, exists, vivolution-carrier-gateway]
+  become: true
+  become_user: "{{ carrier_gateway_runtime_user }}"
+  environment:
+    HOME: "{{ carrier_gateway_rootless_home }}"
+    XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+  register: carrier_gateway_container_state
+  changed_when: false
+  failed_when: carrier_gateway_container_state.rc not in [0, 1]
+
+- name: Remove the exact named container without suppressing errors
+  ansible.builtin.command:
+    argv: [podman, rm, --force, vivolution-carrier-gateway]
+  when: carrier_gateway_container_state.rc == 0
+  become: true
+  become_user: "{{ carrier_gateway_runtime_user }}"
+  environment:
+    HOME: "{{ carrier_gateway_rootless_home }}"
+    XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+  changed_when: true
+
+- name: Stop and disable the root authority socket and broker
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  loop:
+    - vivolution-carrier-authority-broker.socket
+    - vivolution-carrier-authority-broker.service
+
+- name: Remove Quadlet, broker units, slice, and runtime policy
   ansible.builtin.file:
-    path: "{{ carrier_gateway_rootless_quadlet_root }}/vivolution-carrier-gateway.container"
+    path: "{{ item }}"
     state: absent
+  loop:
+    - "{{ carrier_gateway_rootless_quadlet_root }}/vivolution-carrier-gateway.container"
+    - /etc/systemd/system/vivolution-carrier-authority-broker.socket
+    - /etc/systemd/system/vivolution-carrier-authority-broker.service
+    - /etc/systemd/system/vivolution-carrier-certificate.service
+    - /etc/systemd/system/vivolution-carrier-certificate.timer
+    - /etc/systemd/system/timers.target.wants/vivolution-carrier-certificate.timer
+    - /var/lib/systemd/timers/stamp-vivolution-carrier-certificate.timer
+    - /etc/systemd/system/user-10003.slice.d/10-vivolution-carrier-gateway-policy.conf
+    - /etc/tmpfiles.d/vivolution-carrier-gateway.conf
+    - /run/vivolution-carrier-authority.sock
 
-- name: Reload the rootless user manager after Quadlet removal
+- name: Reload rootless manager after Quadlet removal
   ansible.builtin.command:
     argv: [systemctl, --user, daemon-reload]
   become: true
@@ -50,61 +298,128 @@
     HOME: "{{ carrier_gateway_rootless_home }}"
     XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
     DBUS_SESSION_BUS_ADDRESS: "unix:path={{ carrier_gateway_rootless_runtime_dir }}/bus"
-  failed_when: false
   changed_when: false
 
-- name: Remove any unconsumed billable-call authority after service stop
-  ansible.builtin.file:
-    path: "{{ carrier_gateway_state_root }}/authorization/pending"
-    state: absent
-
-- name: Install the trusted host cleanup verifier temporarily
-  ansible.builtin.copy:
-    src: "{{ role_path }}/../carrier_gateway/files/bin/verify_edge_hosts.py"
-    dest: /usr/local/libexec/vivolution-carrier-verify-edge-hosts
-    owner: root
-    group: root
-    mode: '0550'
-
-- name: Require absent or exact carrier-owned Edge host mappings
+- name: Disable dedicated rootless user manager across reboot
   ansible.builtin.command:
-    argv: [/usr/local/libexec/vivolution-carrier-verify-edge-hosts, pre, /etc/hosts]
+    argv: [loginctl, disable-linger, "{{ carrier_gateway_runtime_user }}"]
   changed_when: false
 
-- name: Remove only the carrier-owned Edge host block
-  ansible.builtin.blockinfile:
-    path: /etc/hosts
-    create: false
-    marker: '# {mark} VIVOLUTION CARRIER GATEWAY PRIVATE EDGE DNS'
-    state: absent
-    owner: root
-    group: root
-    mode: '0644'
-    validate: /usr/local/libexec/vivolution-carrier-verify-edge-hosts absent %s
+- name: Stop dedicated rootless user manager without suppressing errors
+  ansible.builtin.systemd_service:
+    name: "user@{{ carrier_gateway_runtime_uid }}.service"
+    state: stopped
 
-- name: Prove carrier Edge host mappings are absent
+- name: Reload system manager after unit removal
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Prove certificate scheduling and service units are no longer loadable
   ansible.builtin.command:
-    argv: [/usr/local/libexec/vivolution-carrier-verify-edge-hosts, absent, /etc/hosts]
+    argv: [systemctl, show, --property=LoadState, --value, "{{ item }}"]
+  loop:
+    - vivolution-carrier-certificate.timer
+    - vivolution-carrier-certificate.service
+  register: carrier_certificate_teardown_removed_units
+  changed_when: false
+  failed_when: >-
+    carrier_certificate_teardown_removed_units.rc != 0 or
+    carrier_certificate_teardown_removed_units.stdout | trim != 'not-found'
+
+- name: Prove no carrier process remains under the dedicated UID
+  ansible.builtin.command:
+    argv: [pgrep, -u, "{{ carrier_gateway_runtime_uid }}"]
+  register: carrier_gateway_uid_processes
+  changed_when: false
+  failed_when: carrier_gateway_uid_processes.rc not in [0, 1]
+
+- name: Require no dedicated-UID process remains
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_uid_processes.rc == 1
+    fail_msg: Dedicated carrier UID still owns a live process after service stop.
+
+- name: Prove exact carrier container is absent
+  ansible.builtin.command:
+    argv: [podman, container, exists, vivolution-carrier-gateway]
+  become: true
+  become_user: "{{ carrier_gateway_runtime_user }}"
+  environment:
+    HOME: "{{ carrier_gateway_rootless_home }}"
+    XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
+  register: carrier_gateway_container_absence
+  changed_when: false
+  failed_when: carrier_gateway_container_absence.rc not in [0, 1]
+
+- name: Require exact carrier container absence
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_container_absence.rc == 1
+    fail_msg: Named carrier container remains after removal.
+
+- name: Inspect host listeners after service and broker stop
+  ansible.builtin.command:
+    argv: [ss, -H, -lntup]
+  register: carrier_gateway_teardown_listeners
   changed_when: false
 
-- name: Remove carrier executables and non-secret runtime policy
+- name: Require carrier signaling, media, and broker listener absence
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_teardown_listeners.stdout is not search('10\\.20\\.1\\.4:5061')
+      - carrier_gateway_teardown_listeners.stdout is not search('3000[0-9]|301[0-2][0-9]')
+      - carrier_gateway_teardown_listeners.stdout is not search('vivolution-carrier')
+    fail_msg: Carrier process or listener remains after strict stop.
+
+- name: Re-prove certificate quiescence immediately before removing launch authority
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-carrier-certificate/carrier-certificate-operation-guard
+      - assert-quiescent
+      - --purpose
+      - teardown
+  changed_when: false
+
+- name: Remove certificate launch authority while the maintenance gate is held
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent
   loop:
-    - /usr/local/libexec/vivolution-carrier-gateway-readiness
-    - /usr/local/libexec/vivolution-carrier-verify-edge-hosts
-    - /usr/local/libexec/vivolution-carrier-cdr-evidence
-    - /usr/local/sbin/vivolution-carrier-gateway-test
-    - /etc/tmpfiles.d/vivolution-carrier-gateway.conf
+    - "{{ carrier_certificate_libexec_root }}"
+    - /etc/vivolution/carrier-certificate-acme.env
+    - /etc/vivolution/carrier-certificate-rbac-receipt.json
+    - /etc/vivolution/carrier-certificate-rbac-signer.pem
+
+- name: Remove secret-bearing config, PKI, certificate state, and executables
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ carrier_gateway_config_root }}"
+    - "{{ carrier_gateway_state_root }}/authorization"
+    - "{{ carrier_gateway_state_root }}/authorization-legacy-untrusted"
+    - "{{ carrier_gateway_state_root }}/rollback"
     - "{{ carrier_gateway_runtime_root }}"
     - "{{ carrier_gateway_root }}"
-    - "{{ carrier_gateway_config_root }}/asterisk"
-    - "{{ carrier_gateway_config_root }}/agi"
-    - "{{ carrier_gateway_config_root }}/asterisk-image-id"
-    - "{{ carrier_gateway_config_root }}/twilio-enabled"
+    - "{{ carrier_certificate_state_root }}"
+    - "{{ carrier_certificate_cache_root }}"
+    - /usr/local/libexec/vivolution-carrier-authority-broker
+    - /usr/local/libexec/vivolution-carrier-cdr-evidence
+    - /usr/local/libexec/vivolution-carrier-rollback-bundle
+    - /usr/local/libexec/vivolution-carrier-gateway-readiness
+    - /usr/local/libexec/vivolution-carrier-verify-edge-hosts
+    - /usr/local/sbin/vivolution-carrier-gateway-test
 
-- name: Remove immutable carrier image tag when explicitly requested
+- name: Remove CDR logs and protected evidence when acknowledged
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  when: carrier_gateway_remove_call_records | bool
+  loop:
+    - "{{ carrier_gateway_state_root }}/asterisk-log"
+    - "{{ carrier_gateway_results_root }}"
+
+- name: Remove exact rootless image when explicitly acknowledged
   ansible.builtin.command:
     argv: [podman, image, rm, "{{ carrier_gateway_image_tag }}"]
   when: carrier_gateway_remove_image | bool
@@ -113,45 +428,67 @@
   environment:
     HOME: "{{ carrier_gateway_rootless_home }}"
     XDG_RUNTIME_DIR: "{{ carrier_gateway_rootless_runtime_dir }}"
-  register: carrier_gateway_removed_image
-  changed_when: carrier_gateway_removed_image.rc == 0
-  failed_when: false
+  changed_when: true
 
-- name: Disable the dedicated rootless user manager across reboot
-  ansible.builtin.command:
-    argv: [loginctl, disable-linger, "{{ carrier_gateway_runtime_user }}"]
-  changed_when: false
-
-- name: Stop the dedicated rootless user manager
-  ansible.builtin.systemd_service:
-    name: "user@{{ carrier_gateway_runtime_uid }}.service"
-    state: stopped
-  failed_when: false
-
-- name: Remove the dedicated user-slice policy
-  ansible.builtin.file:
-    path: /etc/systemd/system/user-10003.slice.d/10-vivolution-carrier-gateway-policy.conf
-    state: absent
-
-- name: Reload system manager after slice policy removal
-  ansible.builtin.systemd_service:
-    daemon_reload: true
-
-- name: Remove CDR, evidence, and authorization history when acknowledged
+- name: Remove dedicated rootless home and store under exact identity policy
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent
-  when: carrier_gateway_remove_call_records | bool
+  when: carrier_gateway_remove_runtime_identity | bool
   loop:
-    - "{{ carrier_gateway_state_root }}/asterisk-log"
-    - "{{ carrier_gateway_state_root }}/authorization"
-    - "{{ carrier_gateway_results_root }}"
+    - "{{ carrier_gateway_rootless_home }}"
+    - "{{ carrier_gateway_rootless_runtime_dir }}"
 
-- name: Remove carrier PKI when separately acknowledged
-  ansible.builtin.file:
-    path: "{{ carrier_gateway_config_root }}/pki"
+- name: Remove dedicated carrier user under exact identity policy
+  ansible.builtin.user:
+    name: "{{ carrier_gateway_runtime_user }}"
     state: absent
-  when: carrier_gateway_remove_pki | bool
+    remove: true
+  when: carrier_gateway_remove_runtime_identity | bool
+
+- name: Remove any residual dedicated subuid and subgid entries
+  ansible.builtin.lineinfile:
+    path: "{{ item }}"
+    regexp: "^{{ carrier_gateway_runtime_user | regex_escape }}:"
+    state: absent
+  when: carrier_gateway_remove_runtime_identity | bool
+  loop:
+    - /etc/subuid
+    - /etc/subgid
+
+- name: Remove dedicated carrier group under exact identity policy
+  ansible.builtin.group:
+    name: "{{ carrier_gateway_runtime_user }}"
+    state: absent
+  when: carrier_gateway_remove_runtime_identity | bool
+
+- name: Prove dedicated identity, store, and subids are absent
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import pathlib, pwd, grp, sys
+        user, home = sys.argv[1:3]
+        try: pwd.getpwnam(user); raise SystemExit(2)
+        except KeyError: pass
+        try: grp.getgrnam(user); raise SystemExit(2)
+        except KeyError: pass
+        if pathlib.Path(home).exists() or pathlib.Path(home).is_symlink(): raise SystemExit(2)
+        for name in ('/etc/subuid', '/etc/subgid'):
+            if any(line.startswith(user + ':') for line in pathlib.Path(name).read_text().splitlines()):
+                raise SystemExit(2)
+      - "{{ carrier_gateway_runtime_user }}"
+      - "{{ carrier_gateway_rootless_home }}"
+  when: carrier_gateway_remove_runtime_identity | bool
+  changed_when: false
+
+- name: Remove reviewed carrier host packages under exact package policy
+  ansible.builtin.apt:
+    name: "{{ carrier_gateway_host_packages }}"
+    state: absent
+    purge: true
+  when: carrier_gateway_remove_host_packages | bool
 
 - name: Inspect active host firewall after service removal
   ansible.builtin.command:
@@ -159,12 +496,51 @@
   register: carrier_gateway_teardown_nft_input
   changed_when: false
 
-- name: Require carrier firewall authority removal to complete teardown
+- name: Require external firewall teardown was actually applied
   ansible.builtin.assert:
     that:
-      - carrier_gateway_host_firewall_disabled_acknowledgement == 'HOST_FIREWALL_CARRIER_RULES_REMOVED'
       - carrier_gateway_teardown_nft_input.stdout is not search('vivolution-carrier-tls')
       - carrier_gateway_teardown_nft_input.stdout is not search('vivolution-carrier-media')
-    fail_msg: >-
-      Service is safely stopped, but teardown remains incomplete until the CP1
-      host-firewall role is rerun with cp_carrier_gateway_enabled=false.
+    fail_msg: Host firewall still contains carrier authority despite its acknowledgement.
+
+- name: Prove broker, authority, rollback, config, and socket absence including certificate PKI
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /run/vivolution-carrier-authority.sock
+    - /etc/systemd/system/vivolution-carrier-authority-broker.socket
+    - /etc/systemd/system/vivolution-carrier-authority-broker.service
+    - /usr/local/libexec/vivolution-carrier-authority-broker
+    - /etc/systemd/system/vivolution-carrier-certificate.service
+    - /etc/systemd/system/vivolution-carrier-certificate.timer
+    - /etc/systemd/system/timers.target.wants/vivolution-carrier-certificate.timer
+    - /var/lib/systemd/timers/stamp-vivolution-carrier-certificate.timer
+    - /etc/vivolution/carrier-certificate-acme.env
+    - /etc/vivolution/carrier-certificate-rbac-receipt.json
+    - /etc/vivolution/carrier-certificate-rbac-signer.pem
+    - "{{ carrier_certificate_libexec_root }}"
+    - "{{ carrier_certificate_state_root }}"
+    - "{{ carrier_certificate_cache_root }}"
+    - "{{ carrier_gateway_state_root }}/authorization"
+    - "{{ carrier_gateway_state_root }}/rollback"
+    - "{{ carrier_gateway_config_root }}"
+  register: carrier_gateway_sensitive_absence
+
+- name: Require complete sensitive local residue removal
+  ansible.builtin.assert:
+    that:
+      - >-
+        carrier_gateway_sensitive_absence.results |
+        selectattr('stat.exists', 'defined') | selectattr('stat.exists') |
+        list | length == 0
+    fail_msg: Secret-bearing carrier configuration or authority residue remains.
+
+- name: Report exact external dependency attestations
+  ansible.builtin.debug:
+    msg: >-
+      LOCAL_CARRIER_TEARDOWN_COMPLETE external_dns=removed-and-attested
+      azure_cp1_nsg_overlay=removed-and-attested host_firewall=removed-and-proven
+      call_records={{ (carrier_gateway_remove_call_records | bool) | ternary('deleted', 'preserved') }}
+      runtime_identity={{ (carrier_gateway_remove_runtime_identity | bool) | ternary('deleted', 'preserved') }}
+      host_packages={{ (carrier_gateway_remove_host_packages | bool) | ternary('deleted', 'preserved') }}

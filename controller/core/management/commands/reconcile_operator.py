@@ -9,7 +9,7 @@ from django.db import transaction
 
 
 class Command(BaseCommand):
-    help = "Idempotently reconcile one owner-managed CP1 operator account."
+    help = "Idempotently reconcile one owner-managed Controller operator account."
 
     def add_arguments(self, parser):
         parser.add_argument("username")

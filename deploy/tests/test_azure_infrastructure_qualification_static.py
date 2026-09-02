@@ -86,7 +86,13 @@ class AzureInfrastructureQualificationStaticTests(unittest.TestCase):
             "AllowPbxTls",
             "DenyAllInbound",
             "rules | length == 17",
-            "(8 if cp_azure_poc_direct_replacement_runtime_profile ==",
+            "20 if cp_azure_poc_cp1_carrier_overlay_mode_selected ==",
+            "else 23",
+            "g3-edge-19-rule-exact-contracts",
+            "Read each complete generation-3 Direct Routing NSG rule set",
+            "validate-g3-rules",
+            "evidence.ruleCount | int == 19",
+            "GENERATION3_DIRECT_ROUTING_NSG_VALID",
             "disk.publicNetworkAccess == 'Disabled'",
             "disk.networkAccessPolicy == 'DenyAll'",
             "'PowerState/running' in states",
@@ -151,14 +157,46 @@ class AzureInfrastructureQualificationStaticTests(unittest.TestCase):
         ):
             self.assertIn(value, self.text)
 
+        controller_start = self.text.index(
+            "            cp_azure_poc_controller_nsg_rule_superset:\n"
+        )
+        controller_end = self.text.index(
+            "        - name: Define the exact independently selected CP1 carrier rule sets\n",
+            controller_start,
+        )
+        controller = self.text[controller_start:controller_end]
+        self.assertEqual(controller.count("              - name: "), 23)
+        for name in (
+            "AllowCp1AzureDhcpOutbound",
+            "AllowCp1AzureDnsUdpOutbound",
+            "AllowCp1AzureDnsTcpOutbound",
+            "AllowCp1AzureWireServerOutbound",
+            "AllowCp1AzureImdsOutbound",
+            "AllowCp1NtpOutbound",
+            "AllowCp1WebOutbound",
+            "AllowGeneration2FixtureSignalingOutbound",
+            "AllowGeneration2FixtureMediaOutbound",
+            "AllowGeneration3CarrierSignalingOutbound",
+            "AllowGeneration3CarrierMediaOutbound",
+            "AllowTwilioSecureMediaInbound",
+            "AllowTwilioSecureSignalingOutbound",
+            "AllowTwilioSecureMediaOutbound",
+            "DenyAllCp1Outbound",
+        ):
+            self.assertIn("- name: " + name, controller)
+        self.assertIn("'ABSENT' else", self.text)
+        self.assertIn("'TWILIO_DISABLED' else 23", self.text)
+
     def test_base_synthetic_and_g3_direct_profiles_are_independent(self) -> None:
         for value in (
             "cp_azure_poc_edge_runtime_profile == 'SYNTHETIC_PRIVATE'",
             "cp_azure_poc_direct_replacement_runtime_profile in",
             "['NOT_DEPLOYED', 'DIRECT_ROUTING_PRIVATE_PBX_POC']",
             "cp_azure_poc_direct_replacement_runtime_profile ==",
-            "rejectattr('name', 'equalto', 'AllowGeneration3CarrierSignaling')",
-            "rejectattr('name', 'equalto', 'AllowGeneration3CarrierMedia')",
+            "cp_azure_poc_cp1_carrier_overlay_mode_selected",
+            "['TWILIO_DISABLED', 'TWILIO_ENABLED']",
+            "cp_azure_poc_controller_carrier_overlay_rule_names",
+            "cp_azure_poc_controller_twilio_overlay_rule_names",
             "cp_azure_poc_synthetic_teams_source_prefixes == ['10.20.1.4/32']",
             "reconcile_dns_acme_authority.py",
             "reconcile_root_direct_dns_acme_authority.py",

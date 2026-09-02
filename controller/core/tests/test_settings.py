@@ -7,6 +7,7 @@ from cp1 import settings
 from cp1.settings import (
     database_config,
     env_bool,
+    env_controller_origin,
     env_int,
     env_release_id,
     env_session_engine,
@@ -106,6 +107,39 @@ class SettingsHelpersTests(SimpleTestCase):
         with patch.dict("os.environ", {"SETTING_UNDER_TEST": "301"}):
             with self.assertRaises(ImproperlyConfigured):
                 env_int("SETTING_UNDER_TEST", 60, minimum=5, maximum=300)
+
+    def test_controller_origin_is_canonicalized(self):
+        with patch.dict(
+            "os.environ",
+            {"ORIGIN_UNDER_TEST": "https://Controller.Voice.Example.COM.:443/"},
+        ):
+            self.assertEqual(
+                env_controller_origin("ORIGIN_UNDER_TEST"),
+                "https://controller.voice.example.com",
+            )
+
+    def test_controller_origin_rejects_non_origin_and_ip_values(self):
+        invalid_values = (
+            "http://controller.example.com",
+            "https://127.0.0.1",
+            "https://[2001:db8::1]",
+            "https://controller.example.com:8443",
+            "https://controller.example.com:notaport",
+            "https://user@controller.example.com",
+            "https://controller.example.com/path",
+            "https://controller.example.com?query=yes",
+            "https://controller.example.com#fragment",
+            "https://singlelabel",
+            "https://-bad.example.com",
+        )
+        for invalid_value in invalid_values:
+            with self.subTest(invalid_value=invalid_value):
+                with patch.dict(
+                    "os.environ",
+                    {"ORIGIN_UNDER_TEST": invalid_value},
+                ):
+                    with self.assertRaises(ImproperlyConfigured):
+                        env_controller_origin("ORIGIN_UNDER_TEST")
 
     def test_release_identifier_is_bounded_and_safe_for_display(self):
         with patch.dict("os.environ", {"RELEASE_UNDER_TEST": "cp1-2026.08.31+1"}):

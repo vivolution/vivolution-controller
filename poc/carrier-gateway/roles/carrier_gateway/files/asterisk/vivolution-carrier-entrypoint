@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+case "${VIVOLUTION_AUTHORITY_ROLE:-}" in
+    ingress)
+        # The Edge-facing process has no authority socket or carrier secret.
+        ;;
+    egress)
+        # A pending billable-call authority is never allowed to survive a
+        # carrier-egress start or restart. Any ambiguity prevents start.
+        result=$(/usr/local/libexec/vivolution-authority-client --invalidate-start)
+        [ "$result" = INVALIDATED ]
+        ;;
+    *)
+        printf 'exact VIVOLUTION_AUTHORITY_ROLE is required\n' >&2
+        exit 2
+        ;;
+esac
+
+exec /usr/sbin/asterisk "$@"

@@ -1,0 +1,518 @@
+---
+- name: Require the exact bounded carrier certificate authority
+  ansible.builtin.assert:
+    that:
+      - >-
+        (carrier_gateway_install_acknowledgement | default('')) ==
+        'INSTALL_DIRECT_PRIVATE_PBX_POC_CARRIER_GATEWAY'
+      - carrier_gateway_firewall_contract_acknowledged | default(false) | bool
+      - carrier_certificate_server_name == 'carrier.vivolution.ae'
+      - carrier_certificate_acme_zone == 'acme-carrier.vivolution.ae'
+      - >-
+        carrier_certificate_acme_challenge_alias ==
+        '_acme-challenge.carrier.vivolution.ae'
+      - >-
+        carrier_certificate_acme_challenge_target ==
+        '_acme-challenge.acme-carrier.vivolution.ae'
+      - carrier_certificate_dns_resource_group == 'DNS_Zones'
+      - >-
+        carrier_certificate_azure_subscription_id is match(
+          '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - >-
+        carrier_certificate_azure_tenant_id is match(
+          '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - >-
+        carrier_certificate_expected_cp1_principal_id is match(
+          '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - >-
+        carrier_certificate_expected_public_ipv4 is match(
+          '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - >-
+        carrier_certificate_acme_email is match(
+          '^[A-Za-z0-9.!#$%&''*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$')
+      - carrier_certificate_acme_email is not search('\.invalid$')
+      - carrier_certificate_azure_dns_resolver_ipv4 == '168.63.129.16'
+      - carrier_certificate_lego_version == '5.4.0'
+      - >-
+        carrier_certificate_lego_linux_amd64_archive_sha256 ==
+        'd3adf89392d606ce84d485c1cc20832edd42ace6ff9ced9dd3670d9d8b8aca38'
+      - carrier_certificate_key_type == 'rsa2048'
+      - carrier_certificate_renew_days | int == 30
+      - carrier_certificate_minimum_valid_seconds | int == 1209600
+      - carrier_certificate_state_root == '/var/lib/vivolution-carrier-certificate'
+      - carrier_certificate_acme_root == '/var/lib/vivolution-carrier-certificate/acme'
+      - >-
+        carrier_certificate_rotation_root ==
+        '/var/lib/vivolution-carrier-certificate/rotation'
+      - >-
+        carrier_certificate_pki_root ==
+        '/etc/vivolution/carrier-gateway/pki'
+      - carrier_certificate_runtime_uid | int == 10003
+      - carrier_certificate_runtime_gid | int == 10003
+      - carrier_certificate_egress_runtime_gid | int == 10004
+      - carrier_certificate_egress_unit == 'vivolution-carrier-egress.service'
+      - >-
+        carrier_certificate_path ==
+        '/etc/vivolution/carrier-gateway/pki/carrier.fullchain.pem'
+      - >-
+        carrier_certificate_private_key_path ==
+        '/etc/vivolution/carrier-gateway/pki/carrier.key'
+      - >-
+        carrier_certificate_egress_pki_root ==
+        '/etc/vivolution/carrier-gateway/egress-pki'
+      - >-
+        carrier_certificate_egress_path ==
+        '/etc/vivolution/carrier-gateway/egress-pki/carrier.fullchain.pem'
+      - >-
+        carrier_certificate_egress_private_key_path ==
+        '/etc/vivolution/carrier-gateway/egress-pki/carrier.key'
+      - carrier_certificate_rbac_receipt_controller_path is match('^/')
+      - >-
+        carrier_certificate_rbac_signer_public_key_controller_path is match('^/')
+      - >-
+        carrier_certificate_rbac_signing_key_id is match(
+          '^[a-z0-9][a-z0-9._-]{2,63}$')
+      - >-
+        carrier_certificate_rbac_signer_public_key_sha256 is match(
+          '^[0-9a-f]{64}$')
+      - carrier_certificate_rbac_receipt_maximum_lifetime_seconds | int == 3600
+      - carrier_certificate_rbac_receipt_minimum_remaining_seconds | int == 60
+      - >-
+        carrier_certificate_rbac_receipt_path ==
+        '/etc/vivolution/carrier-certificate-rbac-receipt.json'
+      - >-
+        carrier_certificate_rbac_signer_public_key_path ==
+        '/etc/vivolution/carrier-certificate-rbac-signer.pem'
+      - >-
+        carrier_certificate_operation_guard_path ==
+        '/usr/local/libexec/vivolution-carrier-certificate/carrier-certificate-operation-guard'
+    fail_msg: >-
+      Carrier certificate issuance requires the exact gateway/firewall
+      acknowledgements, one-SAN CP1 identity, public address, TXT-only child
+      zone, pinned Lego, and lifetime bindings.
+
+- name: Require the fixed Debian 13 AMD64 CP1 certificate host
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Debian'
+      - ansible_facts['distribution_major_version'] == '13'
+      - ansible_facts['architecture'] == 'x86_64'
+      - ansible_facts['service_mgr'] == 'systemd'
+    fail_msg: Carrier certificate automation is restricted to Debian 13 AMD64 CP1.
+
+- name: Inspect protected controller-side RBAC receipt inputs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ carrier_certificate_rbac_receipt_controller_path }}"
+    - "{{ carrier_certificate_rbac_signer_public_key_controller_path }}"
+  register: carrier_certificate_controller_rbac_inputs
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  no_log: true
+
+- name: Require exact protected controller-side RBAC receipt inputs
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg | default(false)
+      - not (item.stat.islnk | default(false))
+      - item.stat.nlink | int == 1
+      - item.stat.mode in ['0400', '0600']
+      - item.stat.size | int > 0
+      - item.stat.size | int <= 262144
+    fail_msg: >-
+      The fresh signed RBAC receipt and pinned signer public key must be
+      protected single-link controller files.
+  loop: "{{ carrier_certificate_controller_rbac_inputs.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  no_log: true
+
+- name: Create the carrier state parent before exact identity bootstrap
+  ansible.builtin.file:
+    path: /var/lib/vivolution/carrier-gateway
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Bootstrap the exact rootless carrier group for protected key access
+  ansible.builtin.group:
+    name: "{{ carrier_certificate_runtime_user }}"
+    gid: "{{ carrier_certificate_runtime_gid }}"
+    system: false
+    state: present
+
+- name: Bootstrap the exact locked rootless carrier user
+  ansible.builtin.user:
+    name: "{{ carrier_certificate_runtime_user }}"
+    uid: "{{ carrier_certificate_runtime_uid }}"
+    group: "{{ carrier_certificate_runtime_user }}"
+    home: "{{ carrier_certificate_rootless_home }}"
+    shell: /usr/sbin/nologin
+    system: false
+    create_home: true
+    state: present
+
+- name: Bootstrap the isolated provider-egress certificate group
+  ansible.builtin.group:
+    name: "{{ carrier_certificate_egress_group }}"
+    gid: "{{ carrier_certificate_egress_runtime_gid }}"
+    system: true
+    state: present
+
+- name: Protect the rootless home before starting its user manager
+  ansible.builtin.file:
+    path: "{{ carrier_certificate_rootless_home }}"
+    state: directory
+    owner: "{{ carrier_certificate_runtime_uid }}"
+    group: "{{ carrier_certificate_runtime_gid }}"
+    mode: '0700'
+
+- name: Enable the exact carrier user manager across reboot
+  ansible.builtin.command:
+    argv: [loginctl, enable-linger, "{{ carrier_certificate_runtime_user }}"]
+  changed_when: false
+
+- name: Start the exact carrier user manager for activation recovery
+  ansible.builtin.systemd_service:
+    name: "user@{{ carrier_certificate_runtime_uid }}.service"
+    state: started
+
+- name: Require the exact bootstrapped rootless carrier identity
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import grp, pwd, sys
+        user = pwd.getpwnam(sys.argv[1])
+        group = grp.getgrnam(sys.argv[1])
+        ok = (
+            user.pw_uid == int(sys.argv[2]) and
+            user.pw_gid == int(sys.argv[3]) and
+            group.gr_gid == int(sys.argv[3])
+        )
+        raise SystemExit(0 if ok else 2)
+      - "{{ carrier_certificate_runtime_user }}"
+      - "{{ carrier_certificate_runtime_uid }}"
+      - "{{ carrier_certificate_runtime_gid }}"
+  changed_when: false
+
+- name: Install bounded carrier certificate dependencies
+  ansible.builtin.apt:
+    name:
+      - bind9-dnsutils
+      - ca-certificates
+      - python3-cryptography
+      - tar
+      - util-linux
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 120
+
+- name: Create protected carrier certificate directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/vivolution, group: root, mode: '0755' }
+    - { path: /etc/vivolution/carrier-gateway, group: '10003', mode: '0750' }
+    - { path: "{{ carrier_certificate_cache_root }}", group: root, mode: '0750' }
+    - { path: "{{ carrier_certificate_cache_root }}/lego", group: root, mode: '0750' }
+    - { path: "{{ carrier_certificate_cache_root }}/lego/{{ carrier_certificate_lego_version }}", group: root, mode: '0750' }
+    - { path: "{{ carrier_certificate_state_root }}", group: root, mode: '0700' }
+    - { path: "{{ carrier_certificate_acme_root }}", group: root, mode: '0700' }
+    - { path: "{{ carrier_certificate_rotation_root }}", group: root, mode: '0700' }
+    - { path: "{{ carrier_certificate_rotation_root }}/incoming", group: root, mode: '0700' }
+    - { path: "{{ carrier_certificate_rotation_root }}/backup", group: root, mode: '0700' }
+    - { path: "{{ carrier_certificate_rotation_root }}/evidence", group: root, mode: '0700' }
+    - { path: "{{ carrier_certificate_libexec_root }}", group: root, mode: '0755' }
+    - { path: "{{ carrier_certificate_pki_root }}", group: '10003', mode: '0750' }
+    - { path: "{{ carrier_certificate_egress_pki_root }}", group: '10004', mode: '0750' }
+
+- name: Install the fresh signed RBAC receipt and pinned signer key
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: '0400'
+  loop:
+    - src: "{{ carrier_certificate_rbac_receipt_controller_path }}"
+      dest: "{{ carrier_certificate_rbac_receipt_path }}"
+    - src: "{{ carrier_certificate_rbac_signer_public_key_controller_path }}"
+      dest: "{{ carrier_certificate_rbac_signer_public_key_path }}"
+  no_log: true
+
+- name: Download the checksum-pinned Lego AMD64 release archive
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/go-acme/lego/releases/download/v{{ carrier_certificate_lego_version }}/lego_v{{ carrier_certificate_lego_version }}_linux_amd64.tar.gz
+    dest: "{{ carrier_certificate_cache_root }}/lego/lego_v{{ carrier_certificate_lego_version }}_linux_amd64.tar.gz"
+    owner: root
+    group: root
+    mode: '0644'
+    checksum: "sha256:{{ carrier_certificate_lego_linux_amd64_archive_sha256 }}"
+    force: false
+
+- name: Extract only the reviewed Lego executable
+  ansible.builtin.unarchive:
+    src: "{{ carrier_certificate_cache_root }}/lego/lego_v{{ carrier_certificate_lego_version }}_linux_amd64.tar.gz"
+    dest: "{{ carrier_certificate_cache_root }}/lego/{{ carrier_certificate_lego_version }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0750'
+    include:
+      - lego
+    creates: "{{ carrier_certificate_cache_root }}/lego/{{ carrier_certificate_lego_version }}/lego"
+
+- name: Install the dedicated pinned Lego executable
+  ansible.builtin.copy:
+    src: "{{ carrier_certificate_cache_root }}/lego/{{ carrier_certificate_lego_version }}/lego"
+    dest: "{{ carrier_certificate_libexec_root }}/lego"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Require the exact Lego runtime version
+  ansible.builtin.command:
+    argv: ["{{ carrier_certificate_libexec_root }}/lego", --version]
+  register: carrier_certificate_lego_runtime_version
+  changed_when: false
+  failed_when: >-
+    carrier_certificate_lego_runtime_version.rc != 0 or
+    ('lego version ' ~ carrier_certificate_lego_version) not in
+    carrier_certificate_lego_runtime_version.stdout
+
+- name: Install protected non-secret managed-identity ACME inputs
+  ansible.builtin.template:
+    src: acme-azure.env.j2
+    dest: /etc/vivolution/carrier-certificate-acme.env
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Install fixed carrier certificate verification helpers
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ carrier_certificate_libexec_root }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: '0555'
+  loop:
+    - { src: validate_carrier_certificate.py, dest: validate-carrier-certificate }
+    - { src: validate_carrier_acme_state.py, dest: validate-carrier-acme-state }
+    - { src: verify_carrier_acme_authority.py, dest: verify-carrier-acme-authority }
+    - { src: verify_carrier_acme_rbac_receipt.py, dest: verify-carrier-acme-rbac-receipt }
+    - { src: reconcile_carrier_acme_challenge.py, dest: reconcile-carrier-acme-challenge }
+    - { src: carrier_certificate_operation_guard.py, dest: carrier-certificate-operation-guard }
+
+- name: Install fixed carrier renewal and activation code
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ carrier_certificate_libexec_root }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: renew-carrier-certificate.sh.j2, dest: renew-carrier-certificate, mode: '0550' }
+    - { src: rotate-carrier-certificate.py.j2, dest: rotate-carrier-certificate.py, mode: '0444' }
+    - { src: rotate-carrier-certificate.sh.j2, dest: rotate-carrier-certificate, mode: '0550' }
+
+- name: Install the hardened carrier certificate renewal service
+  ansible.builtin.template:
+    src: vivolution-carrier-certificate.service.j2
+    dest: /etc/systemd/system/vivolution-carrier-certificate.service
+    owner: root
+    group: root
+    mode: '0644'
+  register: carrier_certificate_service_unit
+
+- name: Validate the fresh controller-signed exclusive-RBAC receipt
+  ansible.builtin.command:
+    argv:
+      - "{{ carrier_certificate_libexec_root }}/verify-carrier-acme-rbac-receipt"
+      - --receipt
+      - "{{ carrier_certificate_rbac_receipt_path }}"
+      - --public-key
+      - "{{ carrier_certificate_rbac_signer_public_key_path }}"
+      - --expected-subscription-id
+      - "{{ carrier_certificate_azure_subscription_id }}"
+      - --expected-tenant-id
+      - "{{ carrier_certificate_azure_tenant_id }}"
+      - --expected-cp1-principal-id
+      - "{{ carrier_certificate_expected_cp1_principal_id }}"
+      - --expected-resource-group
+      - "{{ carrier_certificate_dns_resource_group }}"
+      - --expected-zone
+      - "{{ carrier_certificate_acme_zone }}"
+      - --expected-signing-key-id
+      - "{{ carrier_certificate_rbac_signing_key_id }}"
+      - --expected-public-key-sha256
+      - "{{ carrier_certificate_rbac_signer_public_key_sha256 }}"
+      - --maximum-lifetime-seconds
+      - "{{ carrier_certificate_rbac_receipt_maximum_lifetime_seconds }}"
+      - --minimum-remaining-seconds
+      - "{{ carrier_certificate_rbac_receipt_minimum_remaining_seconds }}"
+  register: carrier_certificate_rbac_receipt_validation
+  changed_when: false
+  no_log: true
+
+- name: Require exact fresh exclusive-RBAC receipt evidence
+  ansible.builtin.assert:
+    that:
+      - >-
+        (carrier_certificate_rbac_receipt_validation.stdout | from_json).status ==
+        'CARRIER_ACME_RBAC_RECEIPT_VALID'
+      - >-
+        not ((carrier_certificate_rbac_receipt_validation.stdout |
+        from_json).humanSubscriptionAdministrationEvaluated | bool)
+    fail_msg: Carrier renewal lacks fresh signed proof of exclusive Azure RBAC.
+
+- name: Verify the rendered carrier certificate renewal unit
+  ansible.builtin.command:
+    argv:
+      - systemd-analyze
+      - verify
+      - /etc/systemd/system/vivolution-carrier-certificate.service
+  changed_when: false
+
+- name: Install the persistent carrier certificate renewal timer
+  ansible.builtin.template:
+    src: vivolution-carrier-certificate.timer.j2
+    dest: /etc/systemd/system/vivolution-carrier-certificate.timer
+    owner: root
+    group: root
+    mode: '0644'
+  register: carrier_certificate_timer_unit
+
+- name: Reload systemd after carrier certificate unit changes
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: carrier_certificate_service_unit.changed or carrier_certificate_timer_unit.changed
+
+- name: Obtain or renew the one-SAN carrier certificate
+  ansible.builtin.systemd_service:
+    name: vivolution-carrier-certificate.service
+    state: started
+  register: carrier_certificate_issuance
+  retries: 1
+  delay: 180
+  until: carrier_certificate_issuance is succeeded
+
+- name: Inspect both activated carrier credential copies without following links
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+  loop:
+    - { path: "{{ carrier_certificate_path }}", gid: 10003 }
+    - { path: "{{ carrier_certificate_private_key_path }}", gid: 10003 }
+    - { path: "{{ carrier_certificate_egress_path }}", gid: 10004 }
+    - { path: "{{ carrier_certificate_egress_private_key_path }}", gid: 10004 }
+  register: carrier_certificate_live_paths
+  changed_when: false
+
+- name: Require atomic root to rootless-group credential installation
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg | default(false)
+      - not (item.stat.islnk | default(false))
+      - item.stat.nlink | int == 1
+      - item.stat.uid | int == 0
+      - item.stat.gid | int == item.item.gid | int
+      - item.stat.mode == '0440'
+    fail_msg: Carrier credential activation did not produce exact per-runtime root:group 0440 files.
+  loop: "{{ carrier_certificate_live_paths.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  no_log: true
+
+- name: Require byte-identical common-leg and provider-egress credentials
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/cmp
+      - --silent
+      - "{{ item.common }}"
+      - "{{ item.egress }}"
+  loop:
+    - { common: "{{ carrier_certificate_path }}", egress: "{{ carrier_certificate_egress_path }}" }
+    - { common: "{{ carrier_certificate_private_key_path }}", egress: "{{ carrier_certificate_egress_private_key_path }}" }
+  changed_when: false
+  no_log: true
+
+- name: Validate the activated one-SAN public carrier credential
+  ansible.builtin.command:
+    argv:
+      - "{{ carrier_certificate_libexec_root }}/validate-carrier-certificate"
+      - --certificate
+      - "{{ carrier_certificate_path }}"
+      - --private-key
+      - "{{ carrier_certificate_private_key_path }}"
+      - --expected-san
+      - "{{ carrier_certificate_server_name }}"
+      - --trust-bundle
+      - "{{ carrier_certificate_public_ca_bundle_path }}"
+      - --minimum-valid-seconds
+      - "{{ carrier_certificate_minimum_valid_seconds }}"
+  register: carrier_certificate_validation
+  changed_when: false
+  no_log: true
+
+- name: Require exact carrier certificate validation evidence
+  ansible.builtin.assert:
+    that:
+      - (carrier_certificate_validation.stdout | from_json).status == 'CARRIER_PUBLIC_CERTIFICATE_VALID'
+      - (carrier_certificate_validation.stdout | from_json).dnsSans == ['carrier.vivolution.ae']
+      - (carrier_certificate_validation.stdout | from_json).chainCertificateCount | int >= 2
+      - (carrier_certificate_validation.stdout | from_json).leafKeyAlgorithm == 'RSA'
+      - (carrier_certificate_validation.stdout | from_json).leafKeyBits | int == 2048
+      - (carrier_certificate_validation.stdout | from_json).serverAuthenticationEku | bool
+    fail_msg: Activated carrier credential differs from its exact public contract.
+
+- name: Require protected post-issuance ACME account and certificate state
+  ansible.builtin.command:
+    argv:
+      - "{{ carrier_certificate_libexec_root }}/validate-carrier-acme-state"
+      - --root
+      - "{{ carrier_certificate_acme_root }}"
+      - --certificate-name
+      - "{{ carrier_certificate_server_name }}"
+      - --require-account
+      - --require-certificate
+  changed_when: false
+  no_log: true
+
+- name: Require the isolated challenge TXT set absent after activation
+  ansible.builtin.command:
+    argv:
+      - "{{ carrier_certificate_libexec_root }}/reconcile-carrier-acme-challenge"
+      - --subscription-id
+      - "{{ carrier_certificate_azure_subscription_id }}"
+      - --tenant-id
+      - "{{ carrier_certificate_azure_tenant_id }}"
+      - --expected-principal-id
+      - "{{ carrier_certificate_expected_cp1_principal_id }}"
+      - --resource-group
+      - "{{ carrier_certificate_dns_resource_group }}"
+      - --zone
+      - "{{ carrier_certificate_acme_zone }}"
+      - --mode
+      - verify-absent
+  changed_when: false
+
+- name: Enable and start persistent carrier certificate renewal scheduling
+  ansible.builtin.systemd_service:
+    name: vivolution-carrier-certificate.timer
+    enabled: true
+    state: started

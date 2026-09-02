@@ -1,0 +1,8 @@
+---
+- name: Renew the isolated public carrier certificate
+  hosts: carrier_gateway_controller
+  become: true
+  gather_facts: true
+  serial: 1
+  roles:
+    - role: carrier_certificate

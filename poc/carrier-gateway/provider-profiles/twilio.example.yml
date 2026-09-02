@@ -1,0 +1,46 @@
+---
+# Twilio Elastic SIP Trunking example for the generic southbound provider
+# contract. Copy this data into protected inventory and replace every
+# REPLACE_* value. Never store the completed profile or credentials in Git.
+carrier_gateway_provider_enabled: true
+carrier_gateway_provider_profile: twilio
+carrier_gateway_provider_enable_acknowledgement: ENABLE_ONE_SHOT_SIP_PROVIDER_OUTBOUND_POC
+carrier_gateway_provider_signaling_fqdn: REPLACE.pstn.twilio.com
+carrier_gateway_provider_signaling_transport: tls
+carrier_gateway_provider_signaling_port: 5061
+carrier_gateway_provider_signaling_ipv4_cidrs: &twilio_signaling_authority
+  - 54.172.60.0/30
+  - 54.244.51.0/30
+  - 54.171.127.192/30
+  - 35.156.191.128/30
+  - 54.65.63.192/30
+  - 54.169.127.128/30
+  - 54.252.254.64/30
+  - 177.71.206.192/30
+carrier_gateway_provider_destination_ipv4_cidrs: &provider_dns_addresses
+  - REPLACE_WITH_CURRENT_TERMINATION_A_RECORD/32
+carrier_gateway_provider_media_ipv4_cidrs: &twilio_media_authority
+  - 168.86.128.0/18
+carrier_gateway_provider_remote_media_port_range: 10000-60000
+carrier_gateway_provider_destination_prefixes:
+  - '+971'
+carrier_gateway_provider_geo_allowlist:
+  - AE
+carrier_gateway_provider_permitted_caller_id: REPLACE_WITH_VERIFIED_E164_CALLER_ID
+carrier_gateway_provider_auth_mode: digest
+carrier_gateway_provider_secrets:
+  username: REPLACE_WITH_TWILIO_TRUNK_USERNAME
+  password: REPLACE_WITH_TWILIO_TRUNK_PASSWORD
+carrier_gateway_provider_media_encryption: sdes
+carrier_gateway_provider_max_call_seconds: 120
+carrier_gateway_provider_maximum_calls_per_authorization: 1
+carrier_gateway_provider_cost_per_minute_ceiling_usd: 1.00
+carrier_gateway_provider_maximum_spend_per_call_usd: 2.00
+
+# The controller host-firewall consumes the same reviewed profile authority.
+cp_carrier_gateway_provider_enabled: true
+cp_carrier_gateway_provider_signaling_ipv4_cidrs: *twilio_signaling_authority
+cp_carrier_gateway_provider_destination_ipv4_cidrs: *provider_dns_addresses
+cp_carrier_gateway_provider_signaling_port: 5061
+cp_carrier_gateway_provider_media_ipv4_cidrs: *twilio_media_authority
+cp_carrier_gateway_provider_remote_media_port_range: 10000-60000

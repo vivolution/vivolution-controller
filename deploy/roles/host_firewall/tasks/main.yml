@@ -14,23 +14,201 @@
 - name: Validate bounded carrier-gateway firewall contract
   ansible.builtin.assert:
     that:
+      - cp_voice_fixture_enabled | bool
       - cp_carrier_gateway_source_ipv4_cidrs == ['10.20.2.6/32', '10.20.2.7/32']
       - cp_carrier_gateway_tcp_port | int == 5061
       - cp_carrier_gateway_edge_media_source_port_range == '20000-20255'
-      - cp_carrier_gateway_udp_destination_port_range == '30000-30127'
+      - cp_carrier_gateway_ingress_rtp_port_range == '30000-30063'
+      - cp_carrier_gateway_egress_rtp_port_range == '30064-30127'
+      - cp_carrier_gateway_runtime_uid | int == 10003
+      - cp_carrier_gateway_egress_uid | int == 10004
+      - cp_carrier_gateway_controller_ipv4 == '10.20.1.4'
+      - cp_carrier_gateway_edge_signaling_destination_port | int == 15061
+      - cp_carrier_gateway_edge_media_destination_port_range == '20000-20255'
     fail_msg: >-
-      Carrier gateway ingress is fixed to generation-3 Edge IPs, TCP 5061,
-      Edge media sources 20000-20255, and CP1 destinations 30000-30127.
+      Carrier activation requires the active generation-2 synthetic fixture
+      profile and is fixed to generation-3 Edge IPs, TCP 5061, Edge media
+      sources 20000-20255, CP1 ingress 30000-30063, and isolated provider
+      egress 30064-30127.
   when: cp_carrier_gateway_enabled | bool
 
-- name: Install controller nftables policy
+- name: Reject provider authority while the carrier firewall is disabled
+  ansible.builtin.assert:
+    that:
+      - not (cp_carrier_gateway_provider_enabled | bool)
+      - cp_carrier_gateway_provider_signaling_ipv4_cidrs == []
+      - cp_carrier_gateway_provider_destination_ipv4_cidrs == []
+      - cp_carrier_gateway_provider_signaling_port | int == 0
+      - cp_carrier_gateway_provider_media_ipv4_cidrs == []
+      - cp_carrier_gateway_provider_remote_media_port_range == ''
+    fail_msg: >-
+      A SIP provider cannot remain enabled or retain public network authority
+      while the carrier host-firewall contract is disabled.
+  when: not (cp_carrier_gateway_enabled | bool)
+
+- name: Reject retained network authority while the provider is disabled
+  ansible.builtin.assert:
+    that:
+      - cp_carrier_gateway_provider_signaling_ipv4_cidrs == []
+      - cp_carrier_gateway_provider_destination_ipv4_cidrs == []
+      - cp_carrier_gateway_provider_signaling_port | int == 0
+      - cp_carrier_gateway_provider_media_ipv4_cidrs == []
+      - cp_carrier_gateway_provider_remote_media_port_range == ''
+    fail_msg: The provider is disabled, so every public authority must be empty.
+  when:
+    - cp_carrier_gateway_enabled | bool
+    - not (cp_carrier_gateway_provider_enabled | bool)
+
+- name: Require exact reviewed provider network authority
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import ipaddress, json, sys
+        destinations = [
+            ipaddress.ip_network(value, strict=True)
+            for value in json.loads(sys.argv[1])
+        ]
+        authorities = [
+            ipaddress.ip_network(value, strict=True)
+            for value in json.loads(sys.argv[2])
+        ]
+        media = [
+            ipaddress.ip_network(value, strict=True)
+            for value in json.loads(sys.argv[3])
+        ]
+        signaling_port = int(sys.argv[4])
+        media_start, media_end = (
+            int(value) for value in sys.argv[5].split('-', 1)
+        )
+        exact = (
+            0 < len(destinations) <= 64
+            and len(set(destinations)) == len(destinations)
+            and 0 < len(authorities) <= 64
+            and len(set(authorities)) == len(authorities)
+            and 0 < len(media) <= 64
+            and len(set(media)) == len(media)
+            and all(
+                value.version == 4
+                and value.prefixlen == 32
+                and value.is_global
+                for value in destinations
+            )
+            and all(value.version == 4 and value.is_global for value in authorities + media)
+        )
+        within_provider = all(
+            any(value.subnet_of(authority) for authority in authorities)
+            for value in destinations
+        )
+        ports = 1 <= signaling_port <= 65535 and 1 <= media_start <= media_end <= 65535
+        raise SystemExit(0 if exact and within_provider and ports else 2)
+      - "{{ cp_carrier_gateway_provider_destination_ipv4_cidrs | to_json }}"
+      - "{{ cp_carrier_gateway_provider_signaling_ipv4_cidrs | to_json }}"
+      - "{{ cp_carrier_gateway_provider_media_ipv4_cidrs | to_json }}"
+      - "{{ cp_carrier_gateway_provider_signaling_port | int }}"
+      - "{{ cp_carrier_gateway_provider_remote_media_port_range }}"
+  changed_when: false
+  when:
+    - cp_carrier_gateway_enabled | bool
+    - cp_carrier_gateway_provider_enabled | bool
+
+- name: Install isolated nftables evaluation support
+  ansible.builtin.apt:
+    name: util-linux
+    state: present
+    update_cache: false
+    lock_timeout: 120
+
+- name: Create protected host-firewall state and staging directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /var/lib/vivolution/host-firewall, mode: '0700' }
+    - { path: /run/vivolution-host-firewall, mode: '0700' }
+
+- name: Install exact nftables semantic guard
+  ansible.builtin.copy:
+    src: nftables_semantic_guard.py
+    dest: /usr/local/libexec/vivolution-nftables-semantic-guard
+    owner: root
+    group: root
+    mode: '0550'
+
+- name: Render the complete desired controller nftables policy
   ansible.builtin.template:
     src: nftables.conf.j2
+    dest: /run/vivolution-host-firewall/nftables.desired.conf
+    owner: root
+    group: root
+    mode: '0600'
+    validate: /usr/sbin/nft --check --file %s
+
+- name: Render the exact generation-2 synthetic fixture baseline
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /run/vivolution-host-firewall/nftables.generation2.conf
+    owner: root
+    group: root
+    mode: '0600'
+    validate: /usr/sbin/nft --check --file %s
+  vars:
+    cp_carrier_gateway_enabled: false
+    cp_carrier_gateway_provider_enabled: false
+    cp_carrier_gateway_provider_signaling_ipv4_cidrs: []
+    cp_carrier_gateway_provider_destination_ipv4_cidrs: []
+    cp_carrier_gateway_provider_signaling_port: 0
+    cp_carrier_gateway_provider_media_ipv4_cidrs: []
+    cp_carrier_gateway_provider_remote_media_port_range: ''
+  when: cp_carrier_gateway_enabled | bool
+
+- name: Inspect the protected active firewall profile
+  ansible.builtin.stat:
+    path: /var/lib/vivolution/host-firewall/active-profile.json
+    follow: false
+  register: cp_host_firewall_active_profile
+  changed_when: false
+
+- name: Prove the recorded generation-2 profile before carrier activation
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-nftables-semantic-guard
+      - verify-profile
+      - --config
+      - /etc/nftables.conf
+      - --profile
+      - /var/lib/vivolution/host-firewall/active-profile.json
+      - --fixture-enabled
+      - 'true'
+  changed_when: false
+  when:
+    - cp_carrier_gateway_enabled | bool
+    - cp_host_firewall_active_profile.stat.exists | default(false)
+
+- name: Prove the unrecorded generation-2 baseline before first carrier activation
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-nftables-semantic-guard
+      - compare-live
+      - --config
+      - /run/vivolution-host-firewall/nftables.generation2.conf
+  changed_when: false
+  when:
+    - cp_carrier_gateway_enabled | bool
+    - not (cp_host_firewall_active_profile.stat.exists | default(false))
+
+- name: Install the prevalidated controller nftables policy
+  ansible.builtin.copy:
+    src: /run/vivolution-host-firewall/nftables.desired.conf
     dest: /etc/nftables.conf
+    remote_src: true
     owner: root
     group: root
     mode: '0644'
-    validate: nft -c -f %s
   notify: Reload nftables
 
 - name: Enable nftables
@@ -38,3 +216,68 @@
     name: nftables.service
     enabled: true
     state: started
+
+- name: Apply pending controller firewall changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Prove the complete rendered policy equals the live ruleset
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-nftables-semantic-guard
+      - compare-live
+      - --config
+      - /run/vivolution-host-firewall/nftables.desired.conf
+  register: cp_host_firewall_exact_postcondition
+  changed_when: false
+
+- name: Calculate the desired semantic policy digest
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-nftables-semantic-guard
+      - digest
+      - --config
+      - /run/vivolution-host-firewall/nftables.desired.conf
+  register: cp_host_firewall_desired_digest
+  changed_when: false
+
+- name: Publish the protected active firewall profile
+  ansible.builtin.copy:
+    dest: /var/lib/vivolution/host-firewall/active-profile.json
+    owner: root
+    group: root
+    mode: '0600'
+    content: >-
+      {{
+        {
+          'apiVersion': 'firewall.vivolution.ae/active-profile/v2',
+          'carrierGatewayEnabled': cp_carrier_gateway_enabled | bool,
+          'semanticSha256': cp_host_firewall_desired_digest.stdout |
+            regex_replace('^NFTABLES_SEMANTIC_SHA256=', '') | trim,
+          'providerDestinationIpv4Cidrs':
+            (cp_carrier_gateway_provider_destination_ipv4_cidrs | sort)
+            if (cp_carrier_gateway_provider_enabled | bool) else [],
+          'providerEnabled': cp_carrier_gateway_provider_enabled | bool,
+          'voiceFixtureEnabled': cp_voice_fixture_enabled | bool
+        } | to_nice_json
+      }}
+
+- name: Reprove the digest-bound active firewall profile
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-nftables-semantic-guard
+      - verify-profile
+      - --config
+      - /etc/nftables.conf
+      - --profile
+      - /var/lib/vivolution/host-firewall/active-profile.json
+      - --fixture-enabled
+      - "{{ cp_voice_fixture_enabled | bool | ternary('true', 'false') }}"
+      - --carrier-enabled
+      - "{{ cp_carrier_gateway_enabled | bool | ternary('true', 'false') }}"
+      - --provider-enabled
+      - "{{ cp_carrier_gateway_provider_enabled | bool | ternary('true', 'false') }}"
+      - --provider-destinations-json
+      - >-
+        {{ (cp_carrier_gateway_provider_destination_ipv4_cidrs | sort) |
+           to_json if (cp_carrier_gateway_provider_enabled | bool) else '[]' }}
+  changed_when: false

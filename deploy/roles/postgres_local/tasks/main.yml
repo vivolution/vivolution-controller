@@ -12,7 +12,7 @@
 - name: Configure PostgreSQL listener and memory limits
   ansible.builtin.blockinfile:
     path: /etc/postgresql/17/main/postgresql.conf
-    marker: '# {mark} VIVOLUTION CP1 MANAGED BLOCK'
+    marker: '# {mark} VIVOLUTION CONTROLLER MANAGED BLOCK'
     block: |
       listen_addresses = '127.0.0.1'
       password_encryption = 'scram-sha-256'

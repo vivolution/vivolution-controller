@@ -23,6 +23,7 @@ EXPECTED_SECRET_NAMES = (
     "cp_db_owner_password",
     "cp_db_runtime_password",
     "cp_rls_context_key",
+    "cp_edge_enrollment_token_pepper",
     "cp_django_secret_key",
     "cp_controller_admin_password",
 )

@@ -12,10 +12,16 @@ runtime_user={{ carrier_gateway_runtime_user | quote }}
 runtime_dir={{ carrier_gateway_rootless_runtime_dir | quote }}
 runtime_home={{ carrier_gateway_rootless_home | quote }}
 controller={{ carrier_gateway_controller_ipv4 | quote }}
+public_controller={{ carrier_gateway_controller_public_ipv4 | quote }}
 certificate={{ carrier_gateway_certificate_path | quote }}
 private_key={{ carrier_gateway_private_key_path | quote }}
+egress_certificate={{ carrier_gateway_egress_certificate_path | quote }}
+egress_private_key={{ carrier_gateway_egress_private_key_path | quote }}
 public_ca={{ carrier_gateway_public_ca_bundle_path | quote }}
 image_file={{ (carrier_gateway_config_root + '/asterisk-image-id') | quote }}
+pjsip_conf={{ (carrier_gateway_config_root + '/asterisk/pjsip.conf') | quote }}
+pjsip_egress_conf={{ (carrier_gateway_config_root + '/egress/asterisk/pjsip.conf') | quote }}
+provider_secret={{ (carrier_gateway_config_root + '/secrets/provider-auth.conf') | quote }}
 
 rootless() {
     runuser -u "$runtime_user" -- env \
@@ -38,7 +44,7 @@ mapfile -t normalized_socket_allow < <(
 )
 [[ $(printf '%s\n' "${normalized_socket_allow[@]}" | wc -l) -eq 2 ]]
 [[ ${normalized_socket_allow[0]} == 'tcp:5061' ]]
-[[ ${normalized_socket_allow[1]} == 'udp:30000-30127' ]]
+[[ ${normalized_socket_allow[1]} == 'udp:30000-30063' ]]
 
 ip_deny=$(systemctl show user-10003.slice --property=IPAddressDeny --value)
 [[ $ip_deny == any || $ip_deny == *0.0.0.0/0* ]]
@@ -49,17 +55,43 @@ mapfile -t expected_ip_allow < <(printf '%s\n' \
     '{{ carrier_gateway_controller_ipv4 }}/32' \
     '{{ carrier_gateway_sbc1_ipv4 }}/32' \
     '{{ carrier_gateway_sbc2_ipv4 }}/32' \
-{% if carrier_gateway_twilio_enabled | bool %}
-{% for prefix in carrier_gateway_twilio_destination_ipv4_cidrs %}
-    '{{ prefix }}' \
-{% endfor %}
-{% endif %}
     | LC_ALL=C sort)
 [[ $(printf '%s\n' "${actual_ip_allow[@]}" | wc -l) -eq \
    $(printf '%s\n' "${expected_ip_allow[@]}" | wc -l) ]]
 for index in "${!expected_ip_allow[@]}"; do
     [[ ${actual_ip_allow[$index]} == "${expected_ip_allow[$index]}" ]]
 done
+
+section() {
+    local name=$1
+    awk -v heading="[$name]" '
+        $0 == heading { found=1; next }
+        found && /^\[/ { exit }
+        found { print }
+    ' "$pjsip_conf"
+}
+
+egress_section() {
+    local name=$1
+    awk -v heading="[$name]" '
+        $0 == heading { found=1; next }
+        found && /^\[/ { exit }
+        found { print }
+    ' "$pjsip_egress_conf"
+}
+
+grep -Fxq 'max_forwards=70' "$pjsip_conf"
+transport_config=$(section carrier-live-mutual-tls)
+grep -Fxq 'method=tlsv1_2' <<<"$transport_config"
+grep -Fxq 'local_net=10.20.0.0/16' <<<"$transport_config"
+
+/usr/local/libexec/vivolution-nftables-semantic-guard verify-profile \
+    --config /etc/nftables.conf \
+    --profile /var/lib/vivolution/host-firewall/active-profile.json \
+    --fixture-enabled true \
+    --carrier-enabled true \
+    --provider-enabled {{ carrier_gateway_provider_enabled | bool | ternary('true', 'false') | quote }} \
+    --provider-destinations-json {{ (carrier_gateway_provider_destination_ipv4_cidrs | sort | to_json) | quote }}
 
 ss -H -lnt4 | awk '{print $4}' | grep -Fxq "${controller}:5061"
 if ss -H -lnt4 | awk '{print $4}' | grep -Eq '(^|:)15061$'; then
@@ -100,34 +132,126 @@ rootless podman exec vivolution-carrier-gateway \
 rootless podman exec vivolution-carrier-gateway \
     /usr/sbin/asterisk -rx 'dialplan show {{ carrier_gateway_echo_test_e164 }}@from-edge' \
     | grep -Fq 'Echo'
+if grep -Eq '^type[[:space:]]*=[[:space:]]*registration$' "$pjsip_conf"; then
+    printf 'carrier gateway must not contain a PJSIP registration object\n' >&2
+    exit 4
+fi
+registration_state=$(rootless podman exec vivolution-carrier-gateway \
+    /usr/sbin/asterisk -rx 'pjsip show registrations')
+grep -Eq 'No objects found|Objects found:[[:space:]]*0' <<<"$registration_state"
 
-{% if carrier_gateway_twilio_enabled | bool %}
-mapfile -t actual_twilio_hosts < <(
-    rootless podman exec vivolution-carrier-gateway getent ahostsv4 \
-        {{ carrier_gateway_twilio_termination_fqdn | quote }} |
+{% if carrier_gateway_provider_enabled | bool %}
+if grep -Eq '(provider-auth|auth_type=userpass|password=|\[provider(-aor|-egress-tls)?\])' "$pjsip_conf"; then
+    printf 'Edge-facing UID configuration contains carrier authority\n' >&2
+    exit 4
+fi
+if runuser -u "$runtime_user" -- test -r "$provider_secret"; then
+    printf 'Edge-facing UID can read the isolated carrier credential\n' >&2
+    exit 4
+fi
+if runuser -u "$runtime_user" -- test -r "$egress_private_key"; then
+    printf 'Edge-facing UID can read the isolated provider TLS key\n' >&2
+    exit 4
+fi
+systemctl is-active --quiet vivolution-carrier-egress.service
+systemctl is-enabled --quiet vivolution-carrier-egress.service
+egress_inspect=$(podman inspect vivolution-carrier-egress)
+jq -e --arg image "$image_id" '
+    length == 1 and
+    .[0].Image == $image and
+    .[0].Config.User == "10004:10004" and
+    .[0].HostConfig.ReadonlyRootfs == true and
+    (.[0].EffectiveCaps // []) == []
+' <<<"$egress_inspect" >/dev/null
+podman exec vivolution-carrier-egress \
+    /usr/sbin/asterisk -rx 'core show version' | grep -Fq {{ carrier_gateway_asterisk_version | quote }}
+podman exec vivolution-carrier-egress \
+    /usr/sbin/asterisk -rx 'module show like res_srtp.so' | grep -Eq '^res_srtp\.so[[:space:]]'
+podman exec vivolution-carrier-egress \
+    /usr/sbin/asterisk -rx 'dialplan show from-gateway' | grep -Fq 'vivolution-provider-authorize.agi'
+podman exec vivolution-carrier-egress test -r /run/carrier-pki/carrier.fullchain.pem
+podman exec vivolution-carrier-egress test -r /run/carrier-pki/carrier.key
+[[ $(stat -c '%u:%g:%a:%h' "$egress_certificate") == '0:10004:440:1' ]]
+[[ $(stat -c '%u:%g:%a:%h' "$egress_private_key") == '0:10004:440:1' ]]
+egress_transport_live=$(podman exec vivolution-carrier-egress \
+    /usr/sbin/asterisk -rx 'pjsip show transport provider-egress-tls')
+grep -Eq 'Transport:.*provider-egress-tls.*tls' <<<"$egress_transport_live"
+ss -H -lun4 | awk '{print $4}' | grep -Fxq '{{ carrier_gateway_egress_loopback_ipv4 }}:{{ carrier_gateway_egress_signaling_port }}'
+
+egress_transport=$(egress_section provider-egress-tls)
+grep -Fxq 'external_signaling_address=40.123.208.212' <<<"$egress_transport"
+grep -Fxq 'external_signaling_port={{ carrier_gateway_provider_signaling_port }}' <<<"$egress_transport"
+grep -Fxq 'external_media_address=40.123.208.212' <<<"$egress_transport"
+provider_config=$(egress_section provider)
+grep -Fxq 'transport=provider-egress-tls' <<<"$provider_config"
+grep -Fxq 'media_encryption={{ carrier_gateway_provider_media_encryption }}' <<<"$provider_config"
+grep -Fxq 'media_encryption_optimistic=no' <<<"$provider_config"
+grep -Fxq 'callerid={{ carrier_gateway_provider_permitted_caller_id }}' <<<"$provider_config"
+grep -Fxq 'from_user={{ carrier_gateway_provider_permitted_caller_id }}' <<<"$provider_config"
+grep -Fxq 'contact_user={{ carrier_gateway_provider_permitted_caller_id }}' <<<"$provider_config"
+grep -Fxq 'user_eq_phone=yes' <<<"$provider_config"
+grep -Fxq 'send_pai=yes' <<<"$provider_config"
+grep -Fxq 'trust_id_outbound=yes' <<<"$provider_config"
+{% if carrier_gateway_provider_auth_mode == 'digest' %}
+grep -Fxq 'outbound_auth=provider-auth' <<<"$provider_config"
+grep -Fxq 'auth_type=userpass' "$provider_secret"
+{% else %}
+! grep -Fq 'outbound_auth=' <<<"$provider_config"
+[[ ! -e $provider_secret ]]
+{% endif %}
+
+metadata_public_ipv4=$(/usr/bin/python3 - <<'PY'
+import urllib.request
+
+request = urllib.request.Request(
+    "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/"
+    "ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text",
+    headers={"Metadata": "true"},
+)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(request, timeout=5) as response:
+    value = response.read(64).decode("ascii").strip()
+print(value)
+PY
+)
+[[ $metadata_public_ipv4 == "$public_controller" ]]
+
+mapfile -t actual_provider_hosts < <(
+    podman exec vivolution-carrier-egress getent ahostsv4 \
+        {{ carrier_gateway_provider_signaling_fqdn | quote }} |
         awk '{print $1}' | LC_ALL=C sort -u
 )
-mapfile -t expected_twilio_hosts < <(printf '%s\n' \
-{% for prefix in carrier_gateway_twilio_destination_ipv4_cidrs %}
+mapfile -t expected_provider_hosts < <(printf '%s\n' \
+{% for prefix in carrier_gateway_provider_destination_ipv4_cidrs %}
     '{{ prefix | regex_replace('/32$', '') }}' \
 {% endfor %}
     | LC_ALL=C sort -u)
-[[ $(printf '%s\n' "${actual_twilio_hosts[@]}" | wc -l) -eq \
-   $(printf '%s\n' "${expected_twilio_hosts[@]}" | wc -l) ]]
-for index in "${!expected_twilio_hosts[@]}"; do
-    [[ ${actual_twilio_hosts[$index]} == "${expected_twilio_hosts[$index]}" ]]
+[[ $(printf '%s\n' "${actual_provider_hosts[@]}" | wc -l) -eq \
+   $(printf '%s\n' "${expected_provider_hosts[@]}" | wc -l) ]]
+for index in "${!expected_provider_hosts[@]}"; do
+    [[ ${actual_provider_hosts[$index]} == "${expected_provider_hosts[$index]}" ]]
 done
 if [[ -e {{ (carrier_gateway_state_root + '/authorization/pending') | quote }} ]]; then
     printf 'readiness refuses a pre-existing billable-call authority\n' >&2
     exit 4
 fi
-twilio_state=armed-no-call-authority
+provider_state={{ (carrier_gateway_provider_profile + '-armed-no-call-authority') | quote }}
 {% else %}
-if grep -Eq '\[twilio(-auth|-aor)?\]' {{ (carrier_gateway_config_root + '/asterisk/pjsip.conf') | quote }}; then
-    printf 'Twilio objects exist while the feature is disabled\n' >&2
+if grep -Eq '\[provider(-auth|-aor|-egress-tls)?\]|\[carrier-egress\]' "$pjsip_conf"; then
+    printf 'Provider objects exist while the provider leg is disabled\n' >&2
     exit 4
 fi
-twilio_state=disabled
+[[ -f $pjsip_egress_conf && ! -e $provider_secret ]]
+if grep -Eq '\[provider(-auth|-aor|-egress-tls)?\]' "$pjsip_egress_conf"; then
+    printf 'isolated egress retained provider authority while disabled\n' >&2
+    exit 4
+fi
+[[ $(systemctl show --property=LoadState --value vivolution-carrier-egress.service) == not-found ]]
+if grep -Eq '^external_(signaling_address|signaling_port|media_address)=' <<<"$transport_config"; then
+    printf 'public NAT advertisement exists while the provider leg is disabled\n' >&2
+    exit 4
+fi
+provider_state=disabled
 {% endif %}
 
-printf 'READY carrier-gateway profile=direct-private-pbx-poc listener=10.20.1.4:5061 edges=10.20.2.6,10.20.2.7 twilio=%s\n' "$twilio_state"
+printf 'READY carrier-gateway profile=direct-private-pbx-poc listener=10.20.1.4:5061 edges=10.20.2.6,10.20.2.7 provider=%s\n' "$provider_state"

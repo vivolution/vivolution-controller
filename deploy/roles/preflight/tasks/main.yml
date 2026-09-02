@@ -188,6 +188,9 @@
       - cp_db_runtime_password | length >= 32
       - cp_rls_context_key is defined
       - cp_rls_context_key | length == 64
+      - cp_edge_enrollment_token_pepper is defined
+      - cp_edge_enrollment_token_pepper | length == 64
+      - cp_edge_enrollment_token_pepper != cp_rls_context_key
       - cp_django_secret_key is defined
       - cp_django_secret_key | length >= 48
       - cp_controller_admin_password is defined
@@ -210,6 +213,7 @@
       - cp_db_owner_password is match('^[A-Za-z0-9_-]{32,128}$')
       - cp_db_runtime_password is match('^[A-Za-z0-9_-]{32,128}$')
       - cp_rls_context_key is match('^[a-f0-9]{64}$')
+      - cp_edge_enrollment_token_pepper is match('^[a-f0-9]{64}$')
     fail_msg: >-
       Database names and roles must be restricted lowercase PostgreSQL
       identifiers, the two roles must be distinct, and database passwords must
@@ -217,6 +221,16 @@
       underscore, or hyphen). The RLS context key must be exactly 64 lowercase
       hexadecimal characters.
   no_log: true
+
+- name: Validate the canonical controller shared origin
+  ansible.builtin.assert:
+    that:
+      - cp_controller_origin is defined
+      - cp_controller_origin is match('^https://(?=.{1,261}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+      - cp_controller_trust_forwarded_proto | bool
+    fail_msg: >-
+      The controller node API requires one canonical public HTTPS origin on
+      port 443 and trusted proxy-protocol handling behind the managed ingress.
 
 - name: Validate immutable controller release identifier
   ansible.builtin.assert:

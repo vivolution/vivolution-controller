@@ -1,9 +1,17 @@
 {
     admin off
+    cert_issuer acme {
+        dir https://acme-v02.api.letsencrypt.org/directory
+        email {{ cp_acme_email | to_json }}
+    }
 }
 
 https://{{ cp_shared_fqdn }}:443, https://{{ cp_node_fqdn }}:443 {
     encode zstd gzip
+    @edge_api path /api/edge/*
+    request_body @edge_api {
+        max_size 16384B
+    }
     reverse_proxy 127.0.0.1:{{ cp_controller_web_port }}
 
     header {

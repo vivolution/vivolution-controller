@@ -28,7 +28,7 @@
       ansible.builtin.assert:
         that:
           - >-
-            'CP_RUNTIME_PRIVILEGES_OK=shared-db-sessions-auth-readonly-core-dml' in
+            'CP_RUNTIME_PRIVILEGES_OK=shared-db-sessions-challenge-retention-auth-readonly-core-dml' in
             (cp_db_runtime_privilege_check_result.stdout | default(''))
           - >-
             'VIVOLUTION_DB_CHANGED:' not in

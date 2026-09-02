@@ -1,0 +1,178 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Vivolution Hosted SBC — Modular Turnkey Architecture</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f8fafc;
+    --fg: #172033;
+    --muted: #5b6475;
+    --line: #64748b;
+    --neutral: #e2e8f0;
+    --input: #bfdbfe;
+    --process: #c7d2fe;
+    --storage: #99f6e4;
+    --external: #fde68a;
+    --risk: #fecaca;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f172a;
+      --fg: #e5e7eb;
+      --muted: #a3adbd;
+      --line: #94a3b8;
+      --neutral: #334155;
+      --input: #1d4ed8;
+      --process: #4338ca;
+      --storage: #0f766e;
+      --external: #92400e;
+      --risk: #991b1b;
+    }
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+      "Segoe UI", sans-serif;
+  }
+  main { max-width: 1240px; margin: 28px auto; padding: 0 20px; }
+  svg { width: 100%; height: auto; display: block; }
+  .title { font-size: 25px; font-weight: 700; fill: var(--fg); }
+  .subtitle { font-size: 15px; fill: var(--muted); }
+  .section { font-size: 17px; font-weight: 700; fill: var(--fg); }
+  .label { font-size: 14px; font-weight: 700; fill: var(--fg); }
+  .small { font-size: 12px; fill: var(--muted); }
+  .tiny { font-size: 11px; fill: var(--muted); }
+  .node { stroke: var(--line); stroke-width: 1.3; rx: 12; }
+  .neutral { fill: var(--neutral); }
+  .input { fill: var(--input); }
+  .process { fill: var(--process); }
+  .storage { fill: var(--storage); }
+  .external { fill: var(--external); }
+  .risk { fill: var(--risk); }
+  .edge { stroke: var(--line); stroke-width: 1.8; fill: none; }
+  .feedback { stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 7 5; fill: none; }
+  .zone { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 7 5; opacity: 0.9; rx: 18; }
+  .future { stroke-dasharray: 6 5; }
+</style>
+<main>
+  <svg viewBox="0 0 1600 1240" role="img" aria-labelledby="diagram-title diagram-desc">
+    <title id="diagram-title">Vivolution Hosted SBC modular turnkey architecture</title>
+    <desc id="diagram-desc">A provider-neutral control plane manages SBC Edge nodes. Every Edge uses the same Microsoft Teams Direct Routing northbound leg and a generic customer SIP trunk southbound interface. Twilio, UAE carriers, PBXs and other providers are profiles rather than platform dependencies.</desc>
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--line)" />
+      </marker>
+    </defs>
+
+    <text class="title" x="800" y="42" text-anchor="middle">Vivolution Hosted SBC — Modular Turnkey Architecture</text>
+    <text class="subtitle" x="800" y="72" text-anchor="middle">Common Microsoft Teams northbound · provider-neutral customer SIP trunk southbound</text>
+
+    <!-- Connectors are drawn before nodes. -->
+    <path class="edge" marker-end="url(#arrow)" d="M 360 225 H 455" />
+    <path class="edge" marker-end="url(#arrow)" d="M 745 225 H 840" />
+    <path class="edge" marker-end="url(#arrow)" d="M 1130 225 H 1225" />
+    <path class="feedback" marker-end="url(#arrow)" d="M 1365 305 V 355 H 610 V 305" />
+    <path class="edge" marker-end="url(#arrow)" d="M 985 305 V 470 H 800 V 555" />
+    <path class="edge" marker-end="url(#arrow)" d="M 1245 305 V 440 H 925 V 555" />
+    <path class="edge" marker-end="url(#arrow)" d="M 305 720 H 405" />
+    <path class="edge" marker-end="url(#arrow)" d="M 655 720 H 705" />
+    <path class="edge" marker-end="url(#arrow)" d="M 955 720 H 1005" />
+    <path class="edge" marker-end="url(#arrow)" d="M 1255 720 H 1305" />
+    <path class="edge" marker-end="url(#arrow)" d="M 800 645 V 665" />
+    <path class="edge" marker-end="url(#arrow)" d="M 830 795 V 860" />
+    <path class="feedback" marker-end="url(#arrow)" d="M 705 915 H 330 V 305" />
+    <path class="feedback" marker-end="url(#arrow)" d="M 955 915 H 1365 V 305" />
+
+    <!-- Control-plane role. -->
+    <rect class="zone" x="70" y="105" width="1460" height="320" />
+    <text class="section" x="100" y="140">Controller role · authoritative management plane</text>
+    <text class="small" x="1500" y="140" text-anchor="end">Outside the real-time call path</text>
+
+    <rect class="node input" x="110" y="175" width="250" height="130" />
+    <text class="label" x="235" y="213" text-anchor="middle">Portal &amp; API</text>
+    <text class="small" x="235" y="241" text-anchor="middle">Operators · customer read-only</text>
+    <text class="small" x="235" y="264" text-anchor="middle">RBAC · approvals · documentation</text>
+
+    <rect class="node process" x="455" y="175" width="290" height="130" />
+    <text class="label" x="600" y="213" text-anchor="middle">Controller Core</text>
+    <text class="small" x="600" y="241" text-anchor="middle">Tenants · inventory · desired state</text>
+    <text class="small" x="600" y="264" text-anchor="middle">Policy · placement · provider profiles</text>
+
+    <rect class="node process" x="840" y="175" width="290" height="130" />
+    <text class="label" x="985" y="213" text-anchor="middle">Scheduler &amp; Task Engine</text>
+    <text class="small" x="985" y="241" text-anchor="middle">Durable jobs · reconciliation</text>
+    <text class="small" x="985" y="264" text-anchor="middle">Retry · resume · rollback · maintenance</text>
+
+    <rect class="node storage" x="1225" y="175" width="280" height="130" />
+    <text class="label" x="1365" y="213" text-anchor="middle">Platform Database</text>
+    <text class="small" x="1365" y="241" text-anchor="middle">System of record · CDR index</text>
+    <text class="small" x="1365" y="264" text-anchor="middle">Audit journal · release lineage</text>
+
+    <!-- Managed Edge role. -->
+    <rect class="zone" x="70" y="465" width="1460" height="525" />
+    <text class="section" x="100" y="500">SBC Edge role · managed voice data plane</text>
+    <text class="small" x="1500" y="500" text-anchor="end">Signed configuration · local last-known-good operation</text>
+
+    <rect class="node process" x="675" y="555" width="250" height="90" />
+    <text class="label" x="800" y="590" text-anchor="middle">Edge Agent</text>
+    <text class="small" x="800" y="615" text-anchor="middle">Outbound mTLS · reconcile · attest</text>
+
+    <rect class="node external" x="100" y="665" width="205" height="110" />
+    <text class="label" x="202" y="704" text-anchor="middle">Microsoft Teams</text>
+    <text class="small" x="202" y="730" text-anchor="middle">Direct Routing service</text>
+    <text class="small" x="202" y="752" text-anchor="middle">External dependency</text>
+
+    <rect class="node input" x="405" y="665" width="250" height="110" />
+    <text class="label" x="530" y="704" text-anchor="middle">Common Teams Leg</text>
+    <text class="small" x="530" y="730" text-anchor="middle">TLS/SRTP · OPTIONS · FQDN</text>
+    <text class="small" x="530" y="752" text-anchor="middle">Teams normalization &amp; policy</text>
+
+    <rect class="node process" x="705" y="665" width="250" height="130" />
+    <text class="label" x="830" y="704" text-anchor="middle">SBC Routing &amp; Media</text>
+    <text class="small" x="830" y="730" text-anchor="middle">Tenant isolation · number rules</text>
+    <text class="small" x="830" y="752" text-anchor="middle">Codec policy · RTPengine · limits</text>
+    <text class="small" x="830" y="774" text-anchor="middle">Open Edge or certified Edge</text>
+
+    <rect class="node process" x="1005" y="665" width="250" height="110" />
+    <text class="label" x="1130" y="704" text-anchor="middle">Generic SIP Trunk Leg</text>
+    <text class="small" x="1130" y="730" text-anchor="middle">TLS/TCP/UDP · SRTP/RTP · auth/IP</text>
+    <text class="small" x="1130" y="752" text-anchor="middle">Per-customer provider profile</text>
+
+    <rect class="node external" x="1305" y="625" width="200" height="190" />
+    <text class="label" x="1405" y="661" text-anchor="middle">Customer Trunks</text>
+    <text class="small" x="1405" y="691" text-anchor="middle">Twilio profile</text>
+    <text class="small" x="1405" y="716" text-anchor="middle">du / e&amp; profile</text>
+    <text class="small" x="1405" y="741" text-anchor="middle">Customer PBX</text>
+    <text class="small" x="1405" y="766" text-anchor="middle">Other SIP carrier</text>
+    <text class="tiny" x="1405" y="793" text-anchor="middle">No provider is hard-coded</text>
+
+    <rect class="node storage" x="705" y="860" width="250" height="110" />
+    <text class="label" x="830" y="898" text-anchor="middle">Telemetry &amp; CDR</text>
+    <text class="small" x="830" y="924" text-anchor="middle">Health · calls · quality · alarms</text>
+    <text class="small" x="830" y="946" text-anchor="middle">Tenant-scoped audit evidence</text>
+
+    <!-- Installer role mapping. -->
+    <text class="section" x="80" y="1040">One installer · role-selected modules</text>
+
+    <rect class="node neutral" x="80" y="1070" width="430" height="125" />
+    <text class="label" x="295" y="1105" text-anchor="middle">Create / Join Controller</text>
+    <text class="small" x="295" y="1133" text-anchor="middle">Portal · API · Core · Scheduler · Database</text>
+    <text class="small" x="295" y="1157" text-anchor="middle">CP1 standalone → CP2 fenced → CP3 quorum</text>
+    <text class="tiny" x="295" y="1180" text-anchor="middle">CP2/CP3 remain gated until independently qualified</text>
+
+    <rect class="node neutral" x="585" y="1070" width="430" height="125" />
+    <text class="label" x="800" y="1105" text-anchor="middle">Install / Join SBC Edge</text>
+    <text class="small" x="800" y="1133" text-anchor="middle">Edge Agent · Teams Leg · Routing · SIP Leg</text>
+    <text class="small" x="800" y="1157" text-anchor="middle">Select trunk profile; secrets stay node-scoped</text>
+    <text class="tiny" x="800" y="1180" text-anchor="middle">Twilio is one profile, never a platform dependency</text>
+
+    <rect class="node risk future" x="1090" y="1070" width="430" height="125" />
+    <text class="label" x="1305" y="1105" text-anchor="middle">Witness / Operations (future)</text>
+    <text class="small" x="1305" y="1133" text-anchor="middle">Quorum witness · repair · upgrade · backup</text>
+    <text class="small" x="1305" y="1157" text-anchor="middle">Restore · rollback · remove · decommission</text>
+    <text class="tiny" x="1305" y="1180" text-anchor="middle">Released only after failure-mode acceptance</text>
+  </svg>
+</main>

@@ -336,7 +336,9 @@ owner-only ten-minute plan is the only create authority, and its companion
 reconcile/teardown CLIs accept only the exact complete or crash-recovery
 partial state. The infrastructure qualifier keeps the g2 Edge NSGs at their
 17-rule synthetic contract while independently requiring the six-rule CP1
-synthetic base plus the two exact g3 carrier overlay rules.
+synthetic base plus the guarded CP1 carrier overlay: 14 exact child rules in
+Twilio-disabled mode or 17 in enabled mode. Both modes preserve generation-2
+fixture egress and finish with an explicit priority-4096 CP1 outbound deny.
 This profile creates no DNS record, ACME authority, or Microsoft gateway.
 
 Install and activate use the normal playbooks and exact protected extra-vars;

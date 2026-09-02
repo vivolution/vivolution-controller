@@ -26,6 +26,33 @@
       - caddyfile
   changed_when: false
 
+- name: Adapt the Caddy policy for exact ACME issuer verification
+  ansible.builtin.command:
+    argv:
+      - caddy
+      - adapt
+      - --config
+      - /etc/caddy/Caddyfile
+      - --adapter
+      - caddyfile
+  register: cp_caddy_adapted
+  changed_when: false
+
+- name: Require only the Let's Encrypt production ACME issuer
+  ansible.builtin.assert:
+    that:
+      - cp_caddy_tls_policies | length == 1
+      - cp_caddy_tls_policies[0].issuers | length == 1
+      - cp_caddy_tls_policies[0].issuers[0].module == 'acme'
+      - >-
+        cp_caddy_tls_policies[0].issuers[0].ca ==
+        'https://acme-v02.api.letsencrypt.org/directory'
+      - cp_caddy_tls_policies[0].issuers[0].email == cp_acme_email
+    fail_msg: Caddy is not pinned exclusively to the Let's Encrypt production ACME issuer.
+  vars:
+    cp_caddy_tls_policies: >-
+      {{ (cp_caddy_adapted.stdout | from_json).apps.tls.automation.policies }}
+
 - name: Enable dual-FQDN Caddy ingress
   ansible.builtin.systemd_service:
     name: caddy.service

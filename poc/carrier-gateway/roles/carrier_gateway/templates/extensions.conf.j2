@@ -25,20 +25,15 @@ exten => {{ emergency }},1,Hangup(21)
 exten => +971{{ emergency }},1,Hangup(21)
 {% endfor %}
 
-{% if carrier_gateway_twilio_enabled | bool %}
-; A prefix match alone never authorizes spend. The AGI must atomically consume
-; one unexpired, exact-destination authorization before Dial is reachable.
-{% for prefix in carrier_gateway_twilio_destination_prefixes %}
-exten => _{{ prefix }}X!,1,NoOp(Vivolution one-shot Twilio outbound candidate)
- same => n,Set(CDR(accountcode)=vivo-carrier-twilio-out)
- same => n,AGI(vivolution-twilio-authorize.agi,${EXTEN})
- same => n,GotoIf($["${VIVO_CALL_AUTHORIZED}"="1"]?authorized:blocked)
- same => n(authorized),Set(CDR(userfield)=${VIVO_CALL_REQUEST_ID})
- same => n,Set(CALLERID(num)={{ carrier_gateway_twilio_permitted_caller_id }})
- same => n,Set(TIMEOUT(absolute)=${VIVO_CALL_MAX_SECONDS})
- same => n,Dial(PJSIP/${EXTEN}@twilio,${VIVO_CALL_MAX_SECONDS})
+{% if carrier_gateway_provider_enabled | bool %}
+; UID 10003 owns the Common Teams Leg but has no provider credential or public
+; network authority. It can only hand a candidate to the isolated Generic SIP
+; Trunk Leg, which consumes exact one-call authority before provider dialing.
+{% for prefix in carrier_gateway_provider_destination_prefixes %}
+exten => _{{ prefix }}X!,1,NoOp(Vivolution one-shot SIP-provider outbound candidate)
+ same => n,Set(CDR(accountcode)=vivo-carrier-egress-handoff)
+ same => n,Dial(PJSIP/${EXTEN}@carrier-egress,{{ carrier_gateway_provider_max_call_seconds }})
  same => n,Hangup()
- same => n(blocked),Hangup(21)
 {% endfor %}
 {% endif %}
 
@@ -48,7 +43,7 @@ exten => _+X!,1,Hangup(21)
 [carrier-local-test]
 ; Outbound qualification is deliberately non-PSTN. 9301/9302 prove exact
 ; Edge selection; 9300 uses ordered SBC1 then SBC2 failover. Microsoft may
-; reject the deliberately invalid E.164 value, but Twilio is never selected.
+; reject the deliberately invalid E.164 value, but no provider is selected.
 exten => 9301,1,Set(CDR(accountcode)=vivo-carrier-test-out)
  same => n,Set(CDR(userfield)=sbc1)
  same => n,Dial(PJSIP/{{ carrier_gateway_tone_test_e164 }}@sbc1,10)

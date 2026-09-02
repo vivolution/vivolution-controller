@@ -1,5 +1,5 @@
 ---
-- name: Create one short-lived Twilio outbound-call authorization
+- name: Create one short-lived SIP-provider outbound-call authorization
   hosts: carrier_gateway_controller
   become: true
   gather_facts: true

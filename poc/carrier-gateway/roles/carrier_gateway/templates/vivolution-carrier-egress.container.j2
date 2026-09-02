@@ -1,0 +1,50 @@
+[Unit]
+Description=Vivolution isolated one-call carrier egress
+After=network-online.target nftables.service vivolution-carrier-authority-broker.socket
+Requires=vivolution-carrier-authority-broker.socket
+Wants=network-online.target
+
+[Container]
+Image={{ carrier_gateway_root_image_id }}
+Pull=never
+ContainerName=vivolution-carrier-egress
+Network=host
+{% for prefix in carrier_gateway_provider_destination_ipv4_cidrs %}
+AddHost={{ carrier_gateway_provider_signaling_fqdn }}:{{ prefix | regex_replace('/32$', '') }}
+{% endfor %}
+User={{ carrier_gateway_egress_uid }}:{{ carrier_gateway_egress_gid }}
+Volume={{ carrier_gateway_config_root }}/egress/asterisk:/etc/asterisk:ro
+Volume={{ carrier_gateway_config_root }}/agi/vivolution-provider-authorize.agi:/usr/local/libexec/vivolution-provider-authorize.agi:ro
+{% if carrier_gateway_provider_auth_mode == 'digest' %}
+Volume={{ carrier_gateway_config_root }}/secrets/provider-auth.conf:/run/carrier-secrets/provider-auth.conf:ro
+{% endif %}
+Volume={{ carrier_gateway_egress_pki_root }}:/run/carrier-pki:ro
+Volume={{ carrier_gateway_public_ca_bundle_path }}:/run/public-ca/ca-certificates.crt:ro
+Volume={{ carrier_gateway_state_root }}/egress-log:/var/log/asterisk:rw
+Volume=/run/vivolution-carrier-authority.sock:/run/vivolution-carrier-authority.sock:ro
+Volume={{ carrier_gateway_runtime_root }}/egress-lib:/var/lib/asterisk:rw
+Volume={{ carrier_gateway_runtime_root }}/egress-run:/var/run/asterisk:rw
+Volume={{ carrier_gateway_runtime_root }}/egress-spool:/var/spool/asterisk:rw
+ReadOnly=true
+Tmpfs=/tmp:rw,size=16m,mode=1777
+DropCapability=all
+NoNewPrivileges=true
+Environment=VIVOLUTION_AUTHORITY_ROLE=egress
+Exec=-f -C /etc/asterisk/asterisk.conf
+
+[Service]
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=90
+TimeoutStopSec=20
+MemoryMax=384M
+CPUQuota=50%
+TasksMax=192
+KillMode=control-group
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET
+PrivateTmp=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

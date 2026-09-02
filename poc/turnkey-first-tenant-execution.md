@@ -1,6 +1,8 @@
 # Turnkey first-tenant execution profile
 
-Status: authorized and in progress as of 2026-08-30.
+Status: authorized and in progress as of 2026-08-31. Generation-2 synthetic
+qualification is complete; generation-3 Direct Routing/Twilio acceptance is
+not yet complete.
 
 This profile narrows the broader product blueprint to the first deployable proof
 of concept Jay authorized: one self-contained CP1 and two Open Edge nodes in UAE
@@ -20,8 +22,13 @@ or permission to route PSTN/emergency traffic.
 - Region: UAE North.
 - CP1: Debian 13 Gen2 AMD64, `Standard_D2as_v5` for build/qualification, 64 GiB
   Standard SSD, local PostgreSQL/PgBouncer/Caddy/Podman/Django.
-- SBC1/SBC2: Debian 13 Gen2 AMD64, `Standard_B2als_v2`, 32 GiB Standard SSD,
-  OpenSIPS 3.6.8 and userspace RTPengine 26.0.1.22.
+- The live generation-2 SBC1/SBC2 nodes are Debian 13 AMD64,
+  `Standard_B2als_v2`, 32 GiB Standard SSD, OpenSIPS 3.6.8, and userspace
+  RTPengine 26.0.1.22. They are the signed synthetic last-known-good pair.
+- Direct Routing uses guarded generation-3 replacement nodes on private
+  addresses `10.20.2.6` and `10.20.2.7`. The generation-2 pair remains intact
+  until generation-3 passes public DNS/certificate, live media, failover,
+  rollback, and teardown qualification.
 - Each node has a static Standard public IPv4 address. Edge nodes share an
   aligned availability set; this is host-fault separation, not zone/regional HA.
 - Key-only SSH is restricted to observed administrator `/32` addresses. No
@@ -65,18 +72,23 @@ Only an explicit post-health commit may promote pending state.
 ## DNS and certificate target
 
 - Controller: `controller.voice.vivolution.ae` after replacement cutover.
-- Base nodes: `sbc1.voice.vivolution.ae` and
-  `sbc2.voice.vivolution.ae`.
-- Hosted customer-derived names, when a separate customer Microsoft 365 tenant
-  is available: `vivolution.sbc1.voice.vivolution.ae` and
-  `vivolution.sbc2.voice.vivolution.ae`.
+- First-tenant Direct Routing nodes: `sbc1.vivolution.ae` and
+  `sbc2.vivolution.ae`.
+- CP1 carrier gateway: `carrier.vivolution.ae`.
+- The existing `sbc1.voice.vivolution.ae` and
+  `sbc2.voice.vivolution.ae` names remain generation-2 synthetic rollback names
+  and are not the selected Microsoft 365 trunks.
+- Hosted customer-derived names are deferred until a separate customer tenant
+  is available; they are not part of the first-tenant acceptance claim.
 - Each node certificate must contain its base FQDN and the matching wildcard
   derived-name SAN, have Server Authentication EKU, use a publicly trusted
   chain, and be obtained through DNS-01 without exposing HTTP on the Edge.
-- Each SBC uses a separate delegated `acme-sbcN.voice.vivolution.ae` child
+- Each SBC uses a separate delegated `acme-sbcN.vivolution.ae` child
   zone. Its managed identity can mutate only that durable ACME zone; Lego may
   delete/recreate challenge TXT records without gaining parent-zone access or
   losing its renewal role. The two zones add roughly USD 1/month combined.
+- CP1 uses a separately delegated `acme-carrier.vivolution.ae` child zone for
+  `carrier.vivolution.ae`, with the same least-privilege and cleanup boundary.
 - Teardown uses the fail-closed `infra/azure-poc/teardown_dns_acme.py` workflow
   before core resource-group deletion. Read-only planning is the default;
   apply requires the freshly validated plan digest and exact confirmation. It
@@ -98,18 +110,24 @@ USD 0.0451/hour for B2als-v2, USD 0.005/hour for each Standard static IPv4,
 USD 5.76/month for a 64 GiB Standard SSD, and USD 2.88/month for a 32 GiB
 Standard SSD. Rates and Cost Management data can change or lag.
 
-At 730 hours, the three-node infrastructure is approximately USD 165.70/month
-before egress, DNS, backup, or unrelated subscription usage. It therefore must
-not remain fully powered under a USD 100 credit. The execution sequence is:
+At 730 hours, the replacement three-node infrastructure is approximately USD
+165.70/month before egress, DNS, backup, or unrelated subscription usage. The
+preserved legacy controller brings the current four-running-VM baseline to
+approximately USD 257.86/month, or USD 8.48/day. Generation-3 SBCs temporarily
+increase that burn further, so the parallel qualification window is bounded by
+an external deadman and must not exceed 72 hours. The execution sequence is:
 
-1. Create all immutable network/disk/IP resources after ARM validation.
-2. Immediately deallocate SBC2 until the HA window.
-3. Qualify SBC1 packages, firewall, reboot, and fail-closed state first.
-4. Build replacement CP1, restore the encrypted backup, and deallocate old CP1
-   compute when the replacement reaches the recovery gate.
-5. Power SBC2 only for mirrored deployment, node failover, and final soak.
-6. After testing, deallocate both SBCs; delete the old CP1 group after accepted
-   cutover. Keep a daily read-only spend/power-state guard at USD 75/90 levels.
+1. Preserve the signed generation-2 pair and legacy controller as rollback.
+2. Create generation-3 only after a fresh read-only plan, immutable deadline,
+   external deadman, reviewed receipt, and exact confirmation pass.
+3. Qualify generation-3 host packages, firewall, public SDP, certificates,
+   reboot, fail-closed behavior, rollback, and teardown before M365 mutation.
+4. Complete the bounded Teams-to-Twilio gate and HA window, then cut controller
+   DNS only after replacement CP1 acceptance.
+5. Deallocate the legacy controller and generation-2 pair promptly; delete the
+   old group only after Jay accepts cutover and rollback evidence.
+6. Keep the daily read-only spend/power-state guard at USD 75/90 levels. The
+   USD 100 Azure budget covers only the replacement group, not the legacy group.
 
 Cost Management showed about USD 49.74 month-to-date across the full
 subscription when this profile was written, including historical deleted labs
@@ -126,32 +144,35 @@ power-state backstop.
 
 The platform, private synthetic calls, restore, rollback, and node-failure tests
 can proceed without these. Live Teams onboarding cannot be truthfully completed
-until all applicable items exist:
+until all applicable items are verified in the live sessions:
 
-- confirmation whether Vivolution has one Microsoft 365 tenant or separate
-  provider and customer tenants in the same Microsoft cloud;
-- Global Administrator cooperation for every participating tenant;
-- at least two test identities with Teams and Teams Phone entitlements;
-- verified non-`onmicrosoft.com` domain activation for the selected Direct
-  Routing topology;
-- acceptance that OpenSIPS/RTPengine is a Vivolution-engineered POC and is not a
-  Microsoft-certified or Microsoft-supported production SBC;
-- an existing PBX endpoint only if Jay elects not to use the isolated CP1
-  Asterisk/SIPp fixture. No license or service purchase is implicit.
+- one Vivolution Microsoft 365 tenant, tenant ID
+  `151cd01a-1e81-40a9-b898-d8646e1a8760`, administered by
+  `jay@vivolution.ae`;
+- the reported E5/Teams Phone entitlement and at least one usable test identity
+  confirmed through fresh Microsoft 365 preflight;
+- verified `vivolution.ae` domain activation and root Direct Routing FQDNs;
+- Jay's accepted boundary that OpenSIPS/RTPengine is not a Microsoft-certified
+  or Microsoft-supported production SBC;
+- Twilio login, a secure termination URI, a Twilio-owned or verified caller ID,
+  and an allowed outbound test destination. Trial-account restrictions must be
+  honored. No DID, license, trial, or service purchase is implicit;
+- immediate approval of the exact destination, call count, and maximum spend
+  before placing a billable PSTN call.
 
-A read-only Microsoft Graph check on 2026-08-30 confirmed the signed-in Entra
-tenant, but neither `vivolution.ae` nor `voice.vivolution.ae` is currently in
-that tenant's verified-domain set. Therefore the CP1 catalog keeps the M365
-record `PENDING`, with no asserted primary domain. Adding and verifying the
-Direct Routing domain is an explicit live-M365 gate, not something inferred
-from Azure subscription ownership. The same read-only check returned no
-subscribed Microsoft 365 SKUs, so there are currently no tenant licenses to
-assign for the two live Teams/Teams Phone test identities. The POC will not buy
-or start a trial subscription without Jay's explicit approval.
+The pre-shutdown browser authorization did not survive. Prior Graph observations
+and Jay's later tenant/license information conflict, so neither is used as live
+acceptance evidence. A fresh normal Chrome sign-in will repeat tenant, domain,
+license, user, and voice-policy preflight immediately before the guarded M365
+change. The POC will not buy or start a trial subscription without Jay's
+explicit approval.
 
-GitHub is optional for delivery. The local repository, signed evidence, and
-rebuild automation remain authoritative until Jay explicitly authorizes and
-provides access to a private GitHub destination.
+Private GitHub source delivery is authorized at
+`https://github.com/vivolution/vivolution-controller`. The full controller and
+Hosted SBC implementation remains private; the separate public
+`vivolution-install` repository contains only the audited bootstrap and release
+artifacts. Signed evidence and reproducible rebuild automation remain the
+acceptance authority rather than branch presence alone.
 
 ## Turnkey acceptance gate
 
@@ -166,8 +187,9 @@ Delivery is complete only when all applicable gates have evidence:
    failed pending state leaves active last-known-good intact.
 5. Private synthetic TLS/SIP/RTP calls pass in both directions with complete CDR
    reconciliation, expected negative cases, and no PSTN reachability.
-6. Public DNS, certificate chain, OPTIONS, Teams-to-PBX and PBX-to-Teams calls
-   pass when Microsoft 365 prerequisites are supplied.
+6. Public DNS, automated certificate issuance/renewal, public Contact/SDP,
+   OPTIONS, Teams-to-CP1, and CP1-to-Twilio TLS/SRTP pass. Twilio media is
+   restricted to its documented authorities and no inbound-DID claim is made.
 7. The bounded private acceptance runner proves one baseline call through SBC1,
    begins the 120-second clock, stops the complete SBC1 data plane, observes its
    signaling listener closed from CP1, and completes a fresh same-route call
@@ -179,7 +201,12 @@ Delivery is complete only when all applicable gates have evidence:
    selects the private alternate itself, so this is not Microsoft
    OPTIONS/gateway-selection evidence; active calls are not claimed to migrate.
    CP1/database outage leaves the committed data plane on last-known-good state.
-8. Signed evidence, exact versions/digests, actual cost, console access,
+8. The one-call authorization broker is root-owned, peer-credential-bound,
+   crash-safe, and exactly reconciled to tamper-resistant CDR evidence.
+   Rollback restores the complete signed runtime and policy state; teardown
+   proves services stopped and removes residual secrets, images, users, and
+   carrier-specific DNS/network policy.
+9. Signed evidence, exact versions/digests, actual cost, console access,
    operations/backup/recovery/certificate/tenant onboarding runbooks, known
    limitations, and deallocation/teardown steps are handed over.
 

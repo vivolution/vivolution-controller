@@ -19,7 +19,9 @@
     - name: Require the exact replacement and rollback preservation contract
       ansible.builtin.assert:
         that:
-          - edge_runtime_profile == 'DIRECT_ROUTING'
+          - >-
+            edge_runtime_profile in
+            ['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']
           - edge_generation is number
           - edge_generation | int >= 2
           - edge_direct_predecessor_generation is number
@@ -42,8 +44,18 @@
           - edge_direct_replacement_transition_acknowledgement == 'TRANSITION_TO_DIRECT_ROUTING_REPLACEMENT_FLEET'
           - edge_direct_rollback_contract == 'PRESERVE_SYNTHETIC_PREDECESSOR_UNTIL_SEPARATE_CUTOVER'
           - edge_direct_predecessor_fixture_probe_acknowledgement == 'PROBE_PRESERVED_SYNTHETIC_PREDECESSOR_BEFORE_AND_AFTER'
-          - edge_direct_install_acknowledgement == 'INSTALL_DIRECT_ROUTING_REPLACEMENT_GENERATION'
-          - edge_direct_activation_acknowledgement == 'ACTIVATE_DIRECT_ROUTING_REPLACEMENT_GENERATION'
+          - >-
+            edge_runtime_profile != 'DIRECT_ROUTING' or
+            (edge_direct_install_acknowledgement ==
+             'INSTALL_DIRECT_ROUTING_REPLACEMENT_GENERATION' and
+             edge_direct_activation_acknowledgement ==
+             'ACTIVATE_DIRECT_ROUTING_REPLACEMENT_GENERATION')
+          - >-
+            edge_runtime_profile != 'DIRECT_ROUTING_PRIVATE_PBX_POC' or
+            (edge_direct_private_pbx_poc_install_acknowledgement ==
+             'INSTALL_DIRECT_ROUTING_PRIVATE_PBX_POC_REPLACEMENT_GENERATION' and
+             edge_direct_private_pbx_poc_activation_acknowledgement ==
+             'ACTIVATE_DIRECT_ROUTING_PRIVATE_PBX_POC_REPLACEMENT_GENERATION')
           - groups.get('controllers', []) | length == 1
         fail_msg: >-
           Direct Routing transition must target a distinct replacement host and
@@ -198,7 +210,9 @@
     - name: Refuse reuse of a synthetic or different-generation node
       ansible.builtin.assert:
         that:
-          - (edge_direct_replacement_authority_raw.content | b64decode | from_json).profile == 'DIRECT_ROUTING'
+          - >-
+            (edge_direct_replacement_authority_raw.content | b64decode |
+             from_json).profile == edge_runtime_profile
           - (edge_direct_replacement_authority_raw.content | b64decode | from_json).generation | int == edge_generation | int
           - (edge_direct_replacement_authority_raw.content | b64decode | from_json).nodeId == inventory_hostname
         fail_msg: >-
@@ -329,7 +343,9 @@
           - (edge_direct_replacement_runtime_status.stdout | from_json).active.kind == 'CANDIDATE'
           - (edge_direct_replacement_runtime_status.stdout | from_json).active.sequence | int == edge_activation_sequence | int
           - (edge_direct_replacement_runtime_status.stdout | from_json).active.manifestDigest == edge_activation_manifest_digest
-          - (edge_direct_replacement_runtime_authority.content | b64decode | from_json).profile == 'DIRECT_ROUTING'
+          - >-
+            (edge_direct_replacement_runtime_authority.content | b64decode |
+             from_json).profile == edge_runtime_profile
           - (edge_direct_replacement_runtime_authority.content | b64decode | from_json).generation | int == edge_generation | int
           - (edge_direct_replacement_runtime_health.stdout | from_json).apiVersion == 'edge.vivolution.ae/runtime/v0.1'
           - (edge_direct_replacement_runtime_health.stdout | from_json).kind == 'EdgeRuntimeHealth'
@@ -354,6 +370,7 @@
                'predecessorRuntimeHealthBeforeAndAfter': true,
                'predecessorSequence': edge_direct_predecessor_activation_sequence | int,
                'predecessorSyntheticCallsBeforeAndAfter': true,
+               'profile': edge_runtime_profile,
                'replacementGeneration': edge_generation | int,
                'replacementHost': ansible_host,
                'replacementLiveInteroperability': 'NOT_ASSERTED',

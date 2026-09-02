@@ -145,17 +145,45 @@ class EdgeNode(UUIDTimestampedModel):
 
     class Status(models.TextChoices):
         EXPECTED = "EXPECTED", "Expected"
+        PENDING_APPROVAL = "PENDING_APPROVAL", "Pending approval"
+        APPROVED = "APPROVED", "Approved"
         ONLINE = "ONLINE", "Online"
         DEGRADED = "DEGRADED", "Degraded"
         OFFLINE = "OFFLINE", "Offline"
+        REVOKED = "REVOKED", "Revoked"
         RETIRED = "RETIRED", "Retired"
+
+    class Health(models.TextChoices):
+        HEALTHY = "HEALTHY", "Healthy"
+        DEGRADED = "DEGRADED", "Degraded"
 
     cluster = models.ForeignKey(EdgeCluster, on_delete=models.PROTECT, related_name="nodes")
     name = models.SlugField(max_length=80)
     node_index = models.PositiveSmallIntegerField(help_text="Expected HA slot: 1 or 2")
+    generation = models.PositiveIntegerField(default=1)
     architecture = models.CharField(max_length=10, choices=Architecture.choices)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.EXPECTED)
     last_seen_at = models.DateTimeField(null=True, blank=True)
+    last_heartbeat_sequence = models.PositiveBigIntegerField(default=0, editable=False)
+    last_boot_id = models.UUIDField(null=True, blank=True, editable=False)
+    observed_inventory_digest = models.CharField(
+        max_length=71,
+        blank=True,
+        validators=[SHA256_DIGEST_VALIDATOR],
+        editable=False,
+    )
+    observed_release_digest = models.CharField(
+        max_length=71,
+        blank=True,
+        validators=[SHA256_DIGEST_VALIDATOR],
+        editable=False,
+    )
+    observed_health = models.CharField(
+        max_length=16,
+        choices=Health.choices,
+        blank=True,
+        editable=False,
+    )
 
     class Meta:
         ordering = ["cluster__name", "node_index"]
@@ -168,10 +196,211 @@ class EdgeNode(UUIDTimestampedModel):
                 condition=models.Q(node_index__gte=1, node_index__lte=2),
                 name="ck_edge_node_slot_range",
             ),
+            models.CheckConstraint(
+                condition=models.Q(generation__gte=1),
+                name="ck_edge_node_generation_positive",
+            ),
         ]
 
     def __str__(self):
         return f"{self.cluster}/{self.name}"
+
+
+class EnrollmentGrant(UUIDTimestampedModel):
+    """Hash-only, display-once authority to attempt one exact node claim."""
+
+    node = models.ForeignKey(
+        EdgeNode,
+        on_delete=models.PROTECT,
+        related_name="enrollment_grants",
+    )
+    token_digest = models.CharField(max_length=64, unique=True, editable=False)
+    expected_release_digest = models.CharField(
+        max_length=71,
+        validators=[SHA256_DIGEST_VALIDATOR],
+    )
+    expires_at = models.DateTimeField()
+    issued_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="issued_enrollment_grants",
+    )
+    claimed_at = models.DateTimeField(null=True, blank=True, editable=False)
+    revoked_at = models.DateTimeField(null=True, blank=True, editable=False)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["node", "expires_at"], name="grant_node_expiry_idx"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(expected_release_digest=""),
+                name="ck_grant_release_digest_present",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(expires_at__gt=models.F("created_at")),
+                name="ck_grant_expiry_after_create",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Enrollment grant {self.id} for {self.node}"
+
+
+class EnrollmentClaim(UUIDTimestampedModel):
+    """The node key and inventory bound by a successfully proved claim."""
+
+    grant = models.OneToOneField(
+        EnrollmentGrant,
+        on_delete=models.PROTECT,
+        related_name="claim",
+    )
+    node = models.ForeignKey(
+        EdgeNode,
+        on_delete=models.PROTECT,
+        related_name="enrollment_claims",
+    )
+    generation = models.PositiveIntegerField()
+    public_key = models.CharField(max_length=43, editable=False)
+    public_key_fingerprint = models.CharField(max_length=71, unique=True, editable=False)
+    request_body_digest = models.CharField(max_length=64, editable=False)
+    request_signature = models.CharField(max_length=86, editable=False)
+    client_nonce_digest = models.CharField(max_length=64, editable=False)
+    inventory_digest = models.CharField(max_length=71, validators=[SHA256_DIGEST_VALIDATOR])
+    release_digest = models.CharField(max_length=71, validators=[SHA256_DIGEST_VALIDATOR])
+    approved_at = models.DateTimeField(null=True, blank=True, editable=False)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="approved_enrollment_claims",
+        null=True,
+        blank=True,
+        editable=False,
+    )
+    revoked_at = models.DateTimeField(null=True, blank=True, editable=False)
+    revoked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="revoked_enrollment_claims",
+        null=True,
+        blank=True,
+        editable=False,
+    )
+    revocation_reason = models.CharField(max_length=240, blank=True, editable=False)
+    last_status_at = models.DateTimeField(null=True, blank=True, editable=False)
+
+    class Meta:
+        ordering = ["node__cluster__name", "node__node_index", "-generation"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["node", "generation"],
+                name="uq_claim_node_generation",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(generation__gte=1),
+                name="ck_claim_generation_positive",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(inventory_digest=""),
+                name="ck_claim_inventory_digest_present",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(release_digest=""),
+                name="ck_claim_release_digest_present",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(approved_at__isnull=True, approved_by__isnull=True)
+                    | models.Q(approved_at__isnull=False, approved_by__isnull=False)
+                ),
+                name="ck_claim_approval_pair",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(revoked_at__isnull=True, revoked_by__isnull=True)
+                    | models.Q(revoked_at__isnull=False, revoked_by__isnull=False)
+                ),
+                name="ck_claim_revocation_pair",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Claim {self.id} for {self.node}"
+
+
+class EnrollmentChallenge(UUIDTimestampedModel):
+    class Purpose(models.TextChoices):
+        CLAIM = "CLAIM", "Initial claim"
+        STATUS = "STATUS", "Claim status"
+        HEARTBEAT = "HEARTBEAT", "Heartbeat"
+
+    node = models.ForeignKey(
+        EdgeNode,
+        on_delete=models.PROTECT,
+        related_name="enrollment_challenges",
+    )
+    grant = models.ForeignKey(
+        EnrollmentGrant,
+        on_delete=models.PROTECT,
+        related_name="challenges",
+        null=True,
+        blank=True,
+    )
+    claim = models.ForeignKey(
+        EnrollmentClaim,
+        on_delete=models.PROTECT,
+        related_name="challenges",
+        null=True,
+        blank=True,
+    )
+    purpose = models.CharField(max_length=16, choices=Purpose.choices)
+    nonce_digest = models.CharField(max_length=64, editable=False)
+    client_nonce_digest = models.CharField(max_length=64, blank=True, editable=False)
+    key_fingerprint = models.CharField(max_length=71, editable=False)
+    audience = models.URLField(max_length=2048, editable=False)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True, editable=False)
+    request_body_digest = models.CharField(max_length=64, blank=True, editable=False)
+    request_signature = models.CharField(max_length=86, blank=True, editable=False)
+    request_id = models.UUIDField(null=True, blank=True, unique=True, editable=False)
+    result_claim_id = models.UUIDField(null=True, blank=True, editable=False)
+    result_status = models.CharField(max_length=20, blank=True, editable=False)
+    result_approved_at = models.DateTimeField(null=True, blank=True, editable=False)
+    result_revoked_at = models.DateTimeField(null=True, blank=True, editable=False)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["node", "purpose", "expires_at"],
+                name="challenge_node_exp_idx",
+            ),
+            models.Index(
+                fields=["node", "expires_at"],
+                name="challenge_node_ret_idx",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(purpose="CLAIM", grant__isnull=False, claim__isnull=True)
+                    | models.Q(
+                        purpose__in=("STATUS", "HEARTBEAT"),
+                        grant__isnull=True,
+                        claim__isnull=False,
+                    )
+                ),
+                name="ck_challenge_scope_shape",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(expires_at__gt=models.F("created_at")),
+                name="ck_challenge_expiry_after_create",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.purpose} challenge {self.id} for {self.node}"
 
 
 class ConfigurationVersion(UUIDTimestampedModel):

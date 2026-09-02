@@ -1,0 +1,42 @@
+[general]
+static=yes
+writeprotect=yes
+clearglobalvars=no
+
+[from-gateway]
+{% for emergency in ['112', '911', '999', '998', '997', '996', '995', '994', '993', '992', '991'] %}
+exten => {{ emergency }},1,Hangup(21)
+exten => +971{{ emergency }},1,Hangup(21)
+{% endfor %}
+
+{% if carrier_gateway_provider_enabled | bool %}
+; This is the Generic SIP Trunk Leg. Its distinct UID owns neither the Common
+; Teams Leg listener nor the root ledger. Every candidate must consume one
+; exact, unexpired authority before the provider-bearing Dial is reached.
+{% for prefix in carrier_gateway_provider_destination_prefixes %}
+exten => _{{ prefix }}X!,1,NoOp(Vivolution isolated one-shot provider egress)
+ same => n,Set(CDR(accountcode)=vivo-carrier-provider-out)
+ same => n,AGI(vivolution-provider-authorize.agi,${EXTEN})
+ same => n,GotoIf($["${VIVO_CALL_AUTHORIZED}"="1"]?authorized:blocked)
+ same => n(authorized),Set(CDR(userfield)=${VIVO_CALL_REQUEST_ID})
+ same => n,Set(CALLERID(num)={{ carrier_gateway_provider_permitted_caller_id }})
+ same => n,Set(CALLERID(ani)={{ carrier_gateway_provider_permitted_caller_id }})
+ same => n,Set(CALLERID(num-valid)=1)
+ same => n,Set(CALLERID(pres)=allowed_passed_screen)
+ same => n,Set(TIMEOUT(absolute)=${VIVO_CALL_MAX_SECONDS})
+ same => n,Dial(PJSIP/${EXTEN}@provider,${VIVO_CALL_MAX_SECONDS})
+ same => n,Hangup()
+ same => n(blocked),Hangup(21)
+{% endfor %}
+{% endif %}
+
+exten => _X!,1,Hangup(21)
+exten => _+X!,1,Hangup(21)
+
+[reject-all]
+exten => _X!,1,Hangup(21)
+exten => _+X!,1,Hangup(21)
+
+[default]
+exten => _X!,1,Hangup(21)
+exten => _+X!,1,Hangup(21)

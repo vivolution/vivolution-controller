@@ -14,6 +14,7 @@
   ansible.builtin.assert:
     that:
       - carrier_gateway_controller_ipv4 == '10.20.1.4'
+      - carrier_gateway_controller_public_ipv4 == '40.123.208.212'
       - carrier_gateway_controller_interface == 'eth0'
       - carrier_gateway_sbc1_ipv4 == '10.20.2.6'
       - carrier_gateway_sbc2_ipv4 == '10.20.2.7'
@@ -24,6 +25,21 @@
       - carrier_gateway_tls_port | int == 5061
       - carrier_gateway_rtp_start | int == 30000
       - carrier_gateway_rtp_end | int == 30127
+      - carrier_gateway_ingress_rtp_start | int == 30000
+      - carrier_gateway_ingress_rtp_end | int == 30063
+      - carrier_gateway_egress_rtp_start | int == 30064
+      - carrier_gateway_egress_rtp_end | int == 30127
+      - carrier_gateway_egress_loopback_ipv4 == '127.0.0.2'
+      - carrier_gateway_egress_signaling_port | int == 15062
+      - carrier_gateway_egress_uid | int == 10004
+      - carrier_gateway_egress_gid | int == 10004
+      - carrier_gateway_egress_pki_root == '/etc/vivolution/carrier-gateway/egress-pki'
+      - >-
+        carrier_gateway_egress_certificate_path ==
+        '/etc/vivolution/carrier-gateway/egress-pki/carrier.fullchain.pem'
+      - >-
+        carrier_gateway_egress_private_key_path ==
+        '/etc/vivolution/carrier-gateway/egress-pki/carrier.key'
       - carrier_gateway_edge_rtp_start | int == 20000
       - carrier_gateway_edge_rtp_end | int == 20255
       - carrier_gateway_tone_test_e164 == '+9710000002001'
@@ -41,6 +57,7 @@
         'localhost/vivolution/carrier-gateway-asterisk:22.10.1-srtp1-autobind1'
       - carrier_gateway_tls_port | int not in [22, 80, 443, 5432, 6432, 8000, 15061, 16061, 25061]
       - carrier_gateway_rtp_start | int > carrier_gateway_edge_rtp_end | int
+      - carrier_gateway_ingress_rtp_end | int + 1 == carrier_gateway_egress_rtp_start | int
     fail_msg: A carrier-gateway identity, port, version, or digest drifted.
 
 - name: Require the fixed Debian 13 AMD64 CP1 host
@@ -53,100 +70,177 @@
       - carrier_gateway_controller_ipv4 in ansible_facts['all_ipv4_addresses']
     fail_msg: The carrier gateway is restricted to the fixed Debian 13 AMD64 CP1.
 
-- name: Reject every Twilio input while Twilio is disabled
+- name: Reject every SIP-provider input while the provider leg is disabled
   ansible.builtin.assert:
     that:
-      - carrier_gateway_twilio_enable_acknowledgement == ''
-      - carrier_gateway_twilio_termination_fqdn == ''
-      - carrier_gateway_twilio_destination_ipv4_cidrs == []
-      - carrier_gateway_twilio_destination_prefixes == []
-      - carrier_gateway_twilio_geo_allowlist == []
-      - carrier_gateway_twilio_permitted_caller_id == ''
-      - carrier_gateway_twilio_secrets == {}
-    fail_msg: Twilio is disabled, so every Twilio authority and secret must be absent.
-  when: not (carrier_gateway_twilio_enabled | bool)
+      - carrier_gateway_provider_profile == ''
+      - carrier_gateway_provider_enable_acknowledgement == ''
+      - carrier_gateway_provider_signaling_fqdn == ''
+      - carrier_gateway_provider_signaling_transport == ''
+      - carrier_gateway_provider_signaling_port | int == 0
+      - carrier_gateway_provider_signaling_ipv4_cidrs == []
+      - carrier_gateway_provider_destination_ipv4_cidrs == []
+      - carrier_gateway_provider_media_ipv4_cidrs == []
+      - carrier_gateway_provider_remote_media_port_range == ''
+      - carrier_gateway_provider_destination_prefixes == []
+      - carrier_gateway_provider_geo_allowlist == []
+      - carrier_gateway_provider_permitted_caller_id == ''
+      - carrier_gateway_provider_auth_mode == ''
+      - carrier_gateway_provider_secrets == {}
+      - carrier_gateway_provider_media_encryption == ''
+    fail_msg: >-
+      The provider leg is disabled, so every provider identity, route,
+      credential, and network authority must be absent.
+  when: not (carrier_gateway_provider_enabled | bool)
   no_log: true
 
-- name: Validate the explicit Twilio POC authority
+- name: Validate the generic outbound SIP-provider contract
   ansible.builtin.assert:
     that:
       - >-
-        carrier_gateway_twilio_enable_acknowledgement ==
-        'ENABLE_ONE_SHOT_TWILIO_OUTBOUND_POC'
+        carrier_gateway_provider_enable_acknowledgement ==
+        'ENABLE_ONE_SHOT_SIP_PROVIDER_OUTBOUND_POC'
+      - carrier_gateway_provider_profile is match('^[a-z0-9][a-z0-9-]{1,31}$')
       - >-
-        carrier_gateway_twilio_termination_fqdn is match(
-          '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.pstn\\.twilio\\.com$')
-      - carrier_gateway_twilio_destination_ipv4_cidrs | length > 0
-      - carrier_gateway_twilio_destination_ipv4_cidrs | length <= 16
+        carrier_gateway_provider_signaling_fqdn is match(
+          '^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+'
+          ~ '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+      - carrier_gateway_provider_signaling_transport == 'tls'
+      - carrier_gateway_provider_signaling_port | int >= 1
+      - carrier_gateway_provider_signaling_port | int <= 65535
+      - carrier_gateway_provider_signaling_ipv4_cidrs | length > 0
+      - carrier_gateway_provider_signaling_ipv4_cidrs | length <= 64
+      - carrier_gateway_provider_destination_ipv4_cidrs | length > 0
+      - carrier_gateway_provider_destination_ipv4_cidrs | length <= 64
       - >-
-        carrier_gateway_twilio_destination_ipv4_cidrs |
+        carrier_gateway_provider_destination_ipv4_cidrs |
         select('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/32$') |
-        list | length == carrier_gateway_twilio_destination_ipv4_cidrs | length
-      - carrier_gateway_twilio_destination_prefixes | length > 0
-      - carrier_gateway_twilio_destination_prefixes | length <= 8
+        list | length == carrier_gateway_provider_destination_ipv4_cidrs | length
+      - carrier_gateway_provider_media_ipv4_cidrs | length > 0
+      - carrier_gateway_provider_media_ipv4_cidrs | length <= 64
       - >-
-        carrier_gateway_twilio_destination_prefixes |
+        carrier_gateway_provider_remote_media_port_range is match(
+          '^[0-9]{1,5}-[0-9]{1,5}$')
+      - carrier_gateway_provider_destination_prefixes | length > 0
+      - carrier_gateway_provider_destination_prefixes | length <= 16
+      - >-
+        carrier_gateway_provider_destination_prefixes |
         select('match', '^\\+[1-9][0-9]{0,10}$') |
-        list | length == carrier_gateway_twilio_destination_prefixes | length
-      - carrier_gateway_twilio_geo_allowlist == ['AE']
+        list | length == carrier_gateway_provider_destination_prefixes | length
+      - carrier_gateway_provider_geo_allowlist == ['AE']
       - >-
-        carrier_gateway_twilio_destination_prefixes |
+        carrier_gateway_provider_destination_prefixes |
         reject('match', '^\\+971') | list | length == 0
-      - carrier_gateway_twilio_permitted_caller_id is match('^\\+[1-9][0-9]{7,14}$')
-      - carrier_gateway_twilio_secrets is mapping
-      - carrier_gateway_twilio_secrets.keys() | sort == ['password', 'username']
-      - >-
-        carrier_gateway_twilio_secrets.username is match(
-          '^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$')
-      - >-
-        carrier_gateway_twilio_secrets.password is match(
-          '^[A-Za-z0-9_-]{32,128}$')
-      - carrier_gateway_twilio_max_call_seconds | int >= 1
-      - carrier_gateway_twilio_max_call_seconds | int <= 120
-      - carrier_gateway_twilio_maximum_calls_per_authorization | int == 1
-      - carrier_gateway_twilio_cost_per_minute_ceiling_usd | float > 0
-      - carrier_gateway_twilio_cost_per_minute_ceiling_usd | float <= 1.00
-      - carrier_gateway_twilio_maximum_spend_per_call_usd | float > 0
-      - carrier_gateway_twilio_maximum_spend_per_call_usd | float <= 2.00
-    fail_msg: The optional Twilio authority is incomplete or broader than the POC bound.
-  when: carrier_gateway_twilio_enabled | bool
+      - carrier_gateway_provider_permitted_caller_id is match('^\\+[1-9][0-9]{7,14}$')
+      - carrier_gateway_provider_auth_mode == 'digest'
+      - carrier_gateway_provider_secrets is mapping
+      - carrier_gateway_provider_secrets.keys() | sort == ['password', 'username']
+      - carrier_gateway_provider_secrets.username is match('^[!-~]{1,128}$')
+      - carrier_gateway_provider_secrets.password is match('^[!-~]{16,256}$')
+      - carrier_gateway_provider_media_encryption == 'sdes'
+      - carrier_gateway_provider_max_call_seconds | int >= 1
+      - carrier_gateway_provider_max_call_seconds | int <= 120
+      - carrier_gateway_provider_maximum_calls_per_authorization | int == 1
+      - carrier_gateway_provider_cost_per_minute_ceiling_usd | float > 0
+      - carrier_gateway_provider_cost_per_minute_ceiling_usd | float <= 1.00
+      - carrier_gateway_provider_maximum_spend_per_call_usd | float > 0
+      - carrier_gateway_provider_maximum_spend_per_call_usd | float <= 2.00
+    fail_msg: >-
+      The optional SIP-provider profile is incomplete or broader than the
+      secure outbound-only POC contract.
+  when: carrier_gateway_provider_enabled | bool
   no_log: true
 
-- name: Validate Twilio destination IPv4 values semantically
+- name: Validate provider signaling and media authorities semantically
   ansible.builtin.command:
     argv:
       - /usr/bin/python3
       - -c
       - |
         import ipaddress, json, sys
-        values = json.loads(sys.argv[1])
-        nets = [ipaddress.ip_network(value, strict=True) for value in values]
-        ok = all(net.version == 4 and net.prefixlen == 32 and net.is_global for net in nets)
-        raise SystemExit(0 if ok and len(set(nets)) == len(nets) else 2)
-      - "{{ carrier_gateway_twilio_destination_ipv4_cidrs | to_json }}"
-  when: carrier_gateway_twilio_enabled | bool
+        destinations = [
+            ipaddress.ip_network(value, strict=True)
+            for value in json.loads(sys.argv[1])
+        ]
+        authorities = [
+            ipaddress.ip_network(value, strict=True)
+            for value in json.loads(sys.argv[2])
+        ]
+        media = [
+            ipaddress.ip_network(value, strict=True)
+            for value in json.loads(sys.argv[3])
+        ]
+        start, end = (int(value) for value in sys.argv[4].split('-', 1))
+        exact_destinations = all(
+            net.version == 4 and net.prefixlen == 32 and net.is_global
+            for net in destinations
+        )
+        global_authorities = all(
+            net.version == 4 and net.is_global for net in authorities + media
+        )
+        within_authority = all(
+            any(net.subnet_of(authority) for authority in authorities)
+            for net in destinations
+        )
+        raise SystemExit(
+            0 if (
+                exact_destinations and global_authorities and within_authority and
+                len(set(destinations)) == len(destinations) and
+                len(set(authorities)) == len(authorities) and
+                len(set(media)) == len(media) and 1 <= start <= end <= 65535
+            ) else 2
+        )
+      - "{{ carrier_gateway_provider_destination_ipv4_cidrs | to_json }}"
+      - "{{ carrier_gateway_provider_signaling_ipv4_cidrs | to_json }}"
+      - "{{ carrier_gateway_provider_media_ipv4_cidrs | to_json }}"
+      - "{{ carrier_gateway_provider_remote_media_port_range }}"
+  when: carrier_gateway_provider_enabled | bool
   changed_when: false
 
-- name: Resolve the Twilio termination target through the host authority
+- name: Resolve the provider signaling target through the host authority
   ansible.builtin.command:
     argv:
       - getent
       - ahostsv4
-      - "{{ carrier_gateway_twilio_termination_fqdn }}"
-  when: carrier_gateway_twilio_enabled | bool
-  register: carrier_gateway_twilio_resolution
+      - "{{ carrier_gateway_provider_signaling_fqdn }}"
+  when: carrier_gateway_provider_enabled | bool
+  register: carrier_gateway_provider_resolution
   changed_when: false
 
-- name: Require exact Twilio DNS and cgroup destination agreement
+- name: Require exact provider DNS and cgroup destination agreement
   ansible.builtin.assert:
     that:
       - >-
-        carrier_gateway_twilio_resolution.stdout_lines |
+        carrier_gateway_provider_resolution.stdout_lines |
         map('split') | map('first') | unique | sort ==
-        carrier_gateway_twilio_destination_ipv4_cidrs |
+        carrier_gateway_provider_destination_ipv4_cidrs |
         map('regex_replace', '/32$', '') | unique | sort
-    fail_msg: Twilio DNS does not exactly match its reviewed cgroup IPv4 authority.
-  when: carrier_gateway_twilio_enabled | bool
+    fail_msg: Provider DNS does not exactly match its reviewed cgroup IPv4 authority.
+  when: carrier_gateway_provider_enabled | bool
+
+- name: Observe the Azure public IPv4 NAT identity for the provider leg
+  ansible.builtin.uri:
+    url: >-
+      http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text
+    headers:
+      Metadata: 'true'
+    return_content: true
+    timeout: 5
+  register: carrier_gateway_provider_azure_public_ipv4
+  changed_when: false
+  when: carrier_gateway_provider_enabled | bool
+
+- name: Require the exact public IPv4 advertised to the provider
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_provider_azure_public_ipv4.status | int == 200
+      - >-
+        carrier_gateway_provider_azure_public_ipv4.content | trim ==
+        carrier_gateway_controller_public_ipv4
+    fail_msg: >-
+      CP1's live Azure public IPv4 does not equal the reviewed provider
+      signaling and media advertisement.
+  when: carrier_gateway_provider_enabled | bool
 
 - name: Require unified cgroup v2
   ansible.builtin.stat:
@@ -216,6 +310,13 @@
     system: false
     state: present
 
+- name: Create the isolated carrier-egress group
+  ansible.builtin.group:
+    name: "{{ carrier_gateway_egress_group }}"
+    gid: "{{ carrier_gateway_egress_gid }}"
+    system: true
+    state: present
+
 - name: Create the dedicated rootless carrier user
   ansible.builtin.user:
     name: "{{ carrier_gateway_runtime_user }}"
@@ -242,6 +343,79 @@
                 raise SystemExit(2)
       - "{{ carrier_gateway_runtime_user }}"
   changed_when: false
+
+- name: Stop the dedicated carrier user manager before authority migration
+  ansible.builtin.systemd_service:
+    name: "user@{{ carrier_gateway_runtime_uid }}.service"
+    state: stopped
+
+- name: Inspect a legacy runtime-owned authorization tree
+  ansible.builtin.stat:
+    path: "{{ carrier_gateway_state_root }}/authorization"
+    follow: false
+  register: carrier_gateway_legacy_authorization_root
+  changed_when: false
+
+- name: Inspect the one-time legacy authorization quarantine
+  ansible.builtin.stat:
+    path: "{{ carrier_gateway_state_root }}/authorization-legacy-untrusted"
+    follow: false
+  register: carrier_gateway_legacy_authorization_quarantine
+  changed_when: false
+
+- name: Refuse an ambiguous legacy authority migration
+  ansible.builtin.assert:
+    that:
+      - >-
+        not ((carrier_gateway_legacy_authorization_root.stat.exists | default(false)) and
+             (carrier_gateway_legacy_authorization_root.stat.uid | default(0) | int != 0) and
+             (carrier_gateway_legacy_authorization_quarantine.stat.exists | default(false)))
+    fail_msg: Both live and quarantined legacy call-authority trees exist.
+
+- name: Quarantine the retired UID-10003 authorization tree without overwrite
+  ansible.builtin.command:
+    argv:
+      - mv
+      - --no-target-directory
+      - "{{ carrier_gateway_state_root }}/authorization"
+      - "{{ carrier_gateway_state_root }}/authorization-legacy-untrusted"
+  when:
+    - carrier_gateway_legacy_authorization_root.stat.exists | default(false)
+    - carrier_gateway_legacy_authorization_root.stat.uid | int != 0
+  no_log: true
+
+- name: Create the root-only one-call authority ledger
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop:
+    - "{{ carrier_gateway_state_root }}/authorization"
+    - "{{ carrier_gateway_state_root }}/authorization/claims"
+    - "{{ carrier_gateway_state_root }}/authorization/invalidated"
+    - "{{ carrier_gateway_state_root }}/authorization/ids"
+
+- name: Install the root-owned one-call authority broker before policy changes
+  ansible.builtin.copy:
+    src: bin/carrier_authority_broker.py
+    dest: /usr/local/libexec/vivolution-carrier-authority-broker
+    owner: root
+    group: root
+    mode: '0550'
+
+- name: Reconcile and burn any interrupted authority before policy changes
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-carrier-authority-broker
+      - --authorization-root
+      - "{{ carrier_gateway_state_root }}/authorization"
+      - reconcile
+      - --reason
+      - pre-policy-change
+  changed_when: false
+  no_log: true
 
 - name: Create the dedicated carrier user-slice policy directory
   ansible.builtin.file:
@@ -297,7 +471,11 @@
     - { path: "{{ carrier_gateway_config_root }}", owner: root, group: '10003', mode: '0750' }
     - { path: "{{ carrier_gateway_config_root }}/asterisk", owner: root, group: '10003', mode: '0750' }
     - { path: "{{ carrier_gateway_config_root }}/agi", owner: root, group: '10003', mode: '0750' }
+    - { path: "{{ carrier_gateway_config_root }}/egress", owner: root, group: '10004', mode: '0750' }
+    - { path: "{{ carrier_gateway_config_root }}/egress/asterisk", owner: root, group: '10004', mode: '0750' }
+    - { path: "{{ carrier_gateway_config_root }}/secrets", owner: root, group: '10004', mode: '0750' }
     - { path: "{{ carrier_gateway_pki_root }}", owner: root, group: '10003', mode: '0750' }
+    - { path: "{{ carrier_gateway_egress_pki_root }}", owner: root, group: '10004', mode: '0750' }
     - { path: "{{ carrier_gateway_state_root }}", owner: root, group: '10003', mode: '0750' }
     - { path: "{{ carrier_gateway_rootless_home }}", owner: '10003', group: '10003', mode: '0700' }
     - { path: "{{ carrier_gateway_rootless_home }}/.config", owner: '10003', group: '10003', mode: '0700' }
@@ -305,9 +483,12 @@
     - { path: "{{ carrier_gateway_rootless_quadlet_root }}", owner: '10003', group: '10003', mode: '0700' }
     - { path: "{{ carrier_gateway_state_root }}/asterisk-log", owner: '10003', group: '10003', mode: '0750' }
     - { path: "{{ carrier_gateway_state_root }}/asterisk-log/cdr-custom", owner: '10003', group: '10003', mode: '0750' }
-    - { path: "{{ carrier_gateway_state_root }}/authorization", owner: '10003', group: '10003', mode: '0700' }
-    - { path: "{{ carrier_gateway_state_root }}/authorization/used", owner: '10003', group: '10003', mode: '0700' }
-    - { path: "{{ carrier_gateway_state_root }}/authorization/rejected", owner: '10003', group: '10003', mode: '0700' }
+    - { path: "{{ carrier_gateway_state_root }}/egress-log", owner: '10004', group: '10004', mode: '0750' }
+    - { path: "{{ carrier_gateway_state_root }}/egress-log/cdr-custom", owner: '10004', group: '10004', mode: '0750' }
+    - { path: "{{ carrier_gateway_state_root }}/authorization", owner: root, group: root, mode: '0700' }
+    - { path: "{{ carrier_gateway_state_root }}/authorization/claims", owner: root, group: root, mode: '0700' }
+    - { path: "{{ carrier_gateway_state_root }}/authorization/invalidated", owner: root, group: root, mode: '0700' }
+    - { path: "{{ carrier_gateway_state_root }}/authorization/ids", owner: root, group: root, mode: '0700' }
     - { path: "{{ carrier_gateway_results_root }}", owner: root, group: root, mode: '0750' }
     - { path: "{{ carrier_gateway_state_root }}/rollback", owner: root, group: root, mode: '0700' }
 
@@ -345,6 +526,41 @@
       - carrier_gateway_pki_status.results[1].stat.gid | int == 10003
       - carrier_gateway_pki_status.results[1].stat.mode == '0440'
     fail_msg: Carrier certificate and key must be root:10003 0440 for the non-root container.
+  no_log: true
+
+- name: Inspect the isolated provider-egress TLS copy without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ carrier_gateway_egress_certificate_path }}"
+    - "{{ carrier_gateway_egress_private_key_path }}"
+  register: carrier_gateway_egress_pki_status
+  changed_when: false
+
+- name: Require a private single-link provider-egress TLS copy
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg | default(false)
+      - not (item.stat.islnk | default(false))
+      - item.stat.nlink | int == 1
+      - item.stat.uid | int == 0
+      - item.stat.gid | int == 10004
+      - item.stat.mode == '0440'
+    fail_msg: Provider egress TLS material is absent or not exact root:10004 0440.
+  loop: "{{ carrier_gateway_egress_pki_status.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  no_log: true
+
+- name: Require byte-identical common and isolated provider-egress TLS copies
+  ansible.builtin.command:
+    argv: [/usr/bin/cmp, --silent, "{{ item.common }}", "{{ item.egress }}"]
+  loop:
+    - { common: "{{ carrier_gateway_certificate_path }}", egress: "{{ carrier_gateway_egress_certificate_path }}" }
+    - { common: "{{ carrier_gateway_private_key_path }}", egress: "{{ carrier_gateway_egress_private_key_path }}" }
+  changed_when: false
   no_log: true
 
 - name: Verify exact live certificate identity, lifetime, and public trust
@@ -409,6 +625,75 @@
     group: root
     mode: '0550'
 
+- name: Install protected carrier integrity and rollback tools
+  ansible.builtin.copy:
+    src: "bin/{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: '0550'
+  loop:
+    - { src: carrier_authority_broker.py, dest: /usr/local/libexec/vivolution-carrier-authority-broker }
+    - { src: carrier_cdr_evidence.py, dest: /usr/local/libexec/vivolution-carrier-cdr-evidence }
+    - { src: carrier_rollback_bundle.py, dest: /usr/local/libexec/vivolution-carrier-rollback-bundle }
+
+- name: Install provider CDR evidence adapters
+  ansible.builtin.copy:
+    src: bin/carrier_cdr_provider_adapters/
+    dest: /usr/local/libexec/carrier_cdr_provider_adapters/
+    owner: root
+    group: root
+    mode: '0550'
+    directory_mode: '0550'
+
+- name: Install root authority broker system units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - vivolution-carrier-authority-broker.service
+    - vivolution-carrier-authority-broker.socket
+
+- name: Enable and start the root authority socket
+  ansible.builtin.systemd_service:
+    name: vivolution-carrier-authority-broker.socket
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Restart the root broker on the installed executable and policy
+  ansible.builtin.systemd_service:
+    name: vivolution-carrier-authority-broker.service
+    state: restarted
+
+- name: Read the active broker PID and installed executable version
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  loop:
+    - [systemctl, show, --property=MainPID, --value, vivolution-carrier-authority-broker.service]
+    - [/usr/local/libexec/vivolution-carrier-authority-broker, version]
+  register: carrier_gateway_broker_runtime_identity
+  changed_when: false
+
+- name: Prove the active broker PID executes the installed v4 broker
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import pathlib, sys
+        pid, version = sys.argv[1:3]
+        if not pid.isdigit() or int(pid) <= 1 or version != 'v4': raise SystemExit(2)
+        argv = pathlib.Path('/proc') / pid / 'cmdline'
+        if b'/usr/local/libexec/vivolution-carrier-authority-broker\0' not in argv.read_bytes():
+            raise SystemExit(2)
+      - "{{ carrier_gateway_broker_runtime_identity.results[0].stdout | trim }}"
+      - "{{ carrier_gateway_broker_runtime_identity.results[1].stdout | trim }}"
+  changed_when: false
+
 - name: Require no conflicting root Edge host authority
   ansible.builtin.command:
     argv: [/usr/local/libexec/vivolution-carrier-verify-edge-hosts, pre, /etc/hosts]
@@ -441,69 +726,150 @@
     mode: preserve
     directory_mode: '0755'
 
-- name: Inspect current carrier configuration for a protected rollback snapshot
+- name: Inspect current protected configuration for a rollback snapshot
   ansible.builtin.stat:
-    path: "{{ carrier_gateway_config_root }}/asterisk/pjsip.conf"
+    path: "{{ carrier_gateway_config_root }}/authority-broker-version"
     follow: false
   register: carrier_gateway_current_configuration
   changed_when: false
 
+- name: Read current protected broker architecture version
+  ansible.builtin.slurp:
+    src: "{{ carrier_gateway_config_root }}/authority-broker-version"
+  when: carrier_gateway_current_configuration.stat.exists | default(false)
+  register: carrier_gateway_current_configuration_version_raw
+  no_log: true
+
+- name: Classify current broker architecture for safe rollback lineage
+  ansible.builtin.set_fact:
+    carrier_gateway_current_configuration_version: >-
+      {{ (carrier_gateway_current_configuration_version_raw.content |
+          default('') | b64decode | trim) }}
+  no_log: true
+
+- name: Refuse an unknown carrier rollback architecture marker
+  ansible.builtin.assert:
+    that:
+      - carrier_gateway_current_configuration_version in ['', 'v3', 'v4']
+    fail_msg: Existing carrier configuration has an unknown rollback architecture.
+
+- name: Inspect legacy pre-isolation rollback package pair
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ carrier_gateway_state_root }}/rollback/previous-config.tar"
+    - "{{ carrier_gateway_state_root }}/rollback/previous-config.tar.sha256"
+  register: carrier_gateway_legacy_rollback_pair
+  changed_when: false
+
+- name: Require exact pair state before retiring pre-isolation rollback authority
+  ansible.builtin.assert:
+    that:
+      - >-
+        carrier_gateway_current_configuration_version != 'v3' or
+        ((carrier_gateway_legacy_rollback_pair.results[0].stat.exists | default(false)) ==
+         (carrier_gateway_legacy_rollback_pair.results[1].stat.exists | default(false)))
+    fail_msg: Pre-isolation rollback package is partial and cannot be retired safely.
+
+- name: Quarantine pre-isolation rollback packages without deletion or overwrite
+  ansible.builtin.command:
+    argv: [mv, --no-target-directory, "{{ item.source }}", "{{ item.dest }}"]
+  loop:
+    - { source: "{{ carrier_gateway_state_root }}/rollback/previous-config.tar", dest: "{{ carrier_gateway_state_root }}/rollback/retired-v3-previous-config.tar" }
+    - { source: "{{ carrier_gateway_state_root }}/rollback/previous-config.tar.sha256", dest: "{{ carrier_gateway_state_root }}/rollback/retired-v3-previous-config.tar.sha256" }
+  when:
+    - carrier_gateway_current_configuration_version == 'v3'
+    - carrier_gateway_legacy_rollback_pair.results[0].stat.exists | default(false)
+  no_log: true
+
 - name: Inspect interrupted configuration transaction state
   ansible.builtin.stat:
-    path: "{{ carrier_gateway_state_root }}/rollback/pending-config.tar"
+    path: "{{ item }}"
     follow: false
+  loop:
+    - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar"
+    - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.sha256"
   register: carrier_gateway_pending_configuration
   changed_when: false
 
 - name: Refuse to overwrite an interrupted rollback authority
   ansible.builtin.assert:
     that:
-      - not (carrier_gateway_pending_configuration.stat.exists | default(false))
+      - >-
+        carrier_gateway_pending_configuration.results |
+        selectattr('stat.exists', 'defined') |
+        selectattr('stat.exists') | list | length == 0
     fail_msg: >-
       A protected pending carrier rollback snapshot exists. Run rollback.yml
       before attempting another installation.
 
-- name: Remove only an abandoned next rollback snapshot
+- name: Remove only an abandoned next rollback snapshot pair
   ansible.builtin.file:
-    path: "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next"
+    path: "{{ item }}"
     state: absent
-  when: carrier_gateway_current_configuration.stat.exists | default(false)
+  loop:
+    - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next"
+    - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next.sha256"
+  when: carrier_gateway_current_configuration_version == 'v4'
 
-- name: Create a protected exact previous-configuration snapshot
+- name: Reconcile and burn authority before the configuration snapshot
   ansible.builtin.command:
     argv:
-      - tar
-      - --create
-      - --file
-      - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next"
-      - --directory
-      - "{{ carrier_gateway_config_root }}"
-      - asterisk
-      - agi
-      - asterisk-image-id
-      - twilio-enabled
-  when: carrier_gateway_current_configuration.stat.exists | default(false)
+      - /usr/local/libexec/vivolution-carrier-authority-broker
+      - --authorization-root
+      - "{{ carrier_gateway_state_root }}/authorization"
+      - reconcile
+      - --reason
+      - pre-config-change
+  changed_when: false
   no_log: true
 
-- name: Protect the next rollback snapshot
+- name: Create an exact digest-bound previous-configuration snapshot
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-carrier-rollback-bundle
+      - create
+      - --output
+      - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next"
+      - --digest-output
+      - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next.sha256"
+  when: carrier_gateway_current_configuration_version == 'v4'
+  no_log: true
+
+- name: Protect the next rollback snapshot and detached digest
   ansible.builtin.file:
-    path: "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next"
+    path: "{{ item }}"
     state: file
     owner: root
     group: root
     mode: '0400'
-  when: carrier_gateway_current_configuration.stat.exists | default(false)
+  loop:
+    - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next"
+    - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next.sha256"
+  when: carrier_gateway_current_configuration_version == 'v4'
   no_log: true
 
-- name: Atomically publish the previous-configuration snapshot
+- name: Validate the exact rollback snapshot before publication
   ansible.builtin.command:
     argv:
-      - mv
-      - --force
-      - --no-target-directory
+      - /usr/local/libexec/vivolution-carrier-rollback-bundle
+      - validate
+      - --archive
       - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next"
-      - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar"
-  when: carrier_gateway_current_configuration.stat.exists | default(false)
+      - --digest
+      - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next.sha256"
+  when: carrier_gateway_current_configuration_version == 'v4'
+  changed_when: false
+  no_log: true
+
+- name: Publish the previous-configuration snapshot pair
+  ansible.builtin.command:
+    argv: [mv, --no-target-directory, "{{ item.source }}", "{{ item.dest }}"]
+  loop:
+    - { source: "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next.sha256", dest: "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.sha256" }
+    - { source: "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.next", dest: "{{ carrier_gateway_state_root }}/rollback/pending-config.tar" }
+  when: carrier_gateway_current_configuration_version == 'v4'
   no_log: true
 
 - name: Install immutable carrier Asterisk configuration
@@ -527,14 +893,59 @@
   notify: Restart carrier gateway
   no_log: true
 
-- name: Install the one-shot Twilio AGI gate
+- name: Install immutable isolated carrier-egress configuration
   ansible.builtin.template:
-    src: vivolution-twilio-authorize.agi.j2
-    dest: "{{ carrier_gateway_config_root }}/agi/vivolution-twilio-authorize.agi"
+    src: "{{ item.src }}.j2"
+    dest: "{{ carrier_gateway_config_root }}/egress/asterisk/{{ item.dest }}"
     owner: root
-    group: '10003'
+    group: '10004'
+    mode: '0440'
+  loop:
+    - { src: asterisk-egress.conf, dest: asterisk.conf }
+    - { src: cdr.conf, dest: cdr.conf }
+    - { src: cdr_custom.conf, dest: cdr_custom.conf }
+    - { src: extensions-egress.conf, dest: extensions.conf }
+    - { src: http.conf, dest: http.conf }
+    - { src: logger.conf, dest: logger.conf }
+    - { src: manager.conf, dest: manager.conf }
+    - { src: modules.conf, dest: modules.conf }
+    - { src: pjsip-egress.conf, dest: pjsip.conf }
+    - { src: rtp-egress.conf, dest: rtp.conf }
+  notify: Restart isolated carrier egress
+  no_log: true
+
+- name: Install the generic one-shot SIP-provider AGI gate
+  ansible.builtin.template:
+    src: vivolution-provider-authorize.agi.j2
+    dest: "{{ carrier_gateway_config_root }}/agi/vivolution-provider-authorize.agi"
+    owner: root
+    group: '10004'
     mode: '0550'
-  notify: Restart carrier gateway
+  notify: Restart isolated carrier egress
+
+- name: Install the isolated root-owned provider credential include
+  ansible.builtin.template:
+    src: provider-auth.conf.j2
+    dest: "{{ carrier_gateway_config_root }}/secrets/provider-auth.conf"
+    owner: root
+    group: '10004'
+    mode: '0440'
+  when:
+    - carrier_gateway_provider_enabled | bool
+    - carrier_gateway_provider_auth_mode == 'digest'
+  notify: Restart isolated carrier egress
+  no_log: true
+
+- name: Remove provider credential when digest authentication is inactive
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ carrier_gateway_config_root }}/secrets/provider-auth.conf"
+  when: >-
+    not (carrier_gateway_provider_enabled | bool) or
+    carrier_gateway_provider_auth_mode != 'digest'
+  no_log: true
 
 - name: Install CDR evidence normalizer
   ansible.builtin.copy:
@@ -544,22 +955,25 @@
     group: root
     mode: '0550'
 
-- name: Require active exact carrier host-firewall authority
+- name: Require the exact rendered carrier firewall before exposing the service
   ansible.builtin.command:
-    argv: [nft, list, chain, inet, vivolution_filter, input]
-  register: carrier_gateway_nft_input
+    argv:
+      - /usr/local/libexec/vivolution-nftables-semantic-guard
+      - verify-profile
+      - --config
+      - /etc/nftables.conf
+      - --profile
+      - /var/lib/vivolution/host-firewall/active-profile.json
+      - --fixture-enabled
+      - 'true'
+      - --carrier-enabled
+      - 'true'
+      - --provider-enabled
+      - "{{ carrier_gateway_provider_enabled | bool | ternary('true', 'false') }}"
+      - --provider-destinations-json
+      - "{{ carrier_gateway_provider_destination_ipv4_cidrs | sort | to_json }}"
+  register: carrier_gateway_exact_firewall
   changed_when: false
-
-- name: Require exact nftables rules before exposing the service
-  ansible.builtin.assert:
-    that:
-      - carrier_gateway_nft_input.stdout is search('vivolution-carrier-tls')
-      - carrier_gateway_nft_input.stdout is search('vivolution-carrier-media')
-      - carrier_gateway_nft_input.stdout is search('10\\.20\\.2\\.6')
-      - carrier_gateway_nft_input.stdout is search('10\\.20\\.2\\.7')
-      - carrier_gateway_nft_input.stdout is search('tcp dport 5061')
-      - carrier_gateway_nft_input.stdout is search('udp sport 20000-20255 udp dport 30000-30127')
-    fail_msg: The CP1 nftables carrier ingress contract is not active and exact.
 
 - name: Inspect the pinned base image
   ansible.builtin.command:
@@ -595,7 +1009,6 @@
   register: carrier_gateway_build_image_status
   changed_when: false
   failed_when: false
-  when: carrier_gateway_image_status.rc != 0
 
 - name: Build the pinned Asterisk SRTP image once per immutable revision tag
   ansible.builtin.command:
@@ -618,7 +1031,6 @@
       - "{{ carrier_gateway_image_tag }}"
       - "{{ carrier_gateway_root }}/build/asterisk"
   when:
-    - carrier_gateway_image_status.rc != 0
     - carrier_gateway_build_image_status.rc != 0
 
 - name: Remove only a stale bounded image-transfer archive
@@ -687,6 +1099,26 @@
     carrier_gateway_image_id: >-
       sha256:{{ carrier_gateway_image_id_result.stdout | trim | regex_replace('^sha256:', '') }}
 
+- name: Resolve the root-managed egress image to an immutable content ID
+  ansible.builtin.command:
+    argv: [podman, image, inspect, --format, '{{ "{{.Id}}" }}', "{{ carrier_gateway_image_tag }}"]
+  register: carrier_gateway_root_image_id_result
+  changed_when: false
+
+- name: Require identical rootless-ingress and root-managed-egress image content
+  ansible.builtin.assert:
+    that:
+      - (carrier_gateway_root_image_id_result.stdout | trim) is match('^(sha256:)?[0-9a-f]{64}$')
+      - >-
+        carrier_gateway_root_image_id_result.stdout | trim | regex_replace('^sha256:', '') ==
+        carrier_gateway_image_id | regex_replace('^sha256:', '')
+    fail_msg: Carrier ingress and isolated egress image stores do not contain identical bytes.
+
+- name: Canonicalize the isolated egress image ID
+  ansible.builtin.set_fact:
+    carrier_gateway_root_image_id: >-
+      sha256:{{ carrier_gateway_root_image_id_result.stdout | trim | regex_replace('^sha256:', '') }}
+
 - name: Verify the immutable image version and SRTP runtime linkage
   ansible.builtin.command:
     argv: "{{ item }}"
@@ -710,7 +1142,7 @@
          carrier_gateway_image_verification.results[1].stderr) is search('libsrtp2?\\.so')
     fail_msg: The immutable image lacks its exact Asterisk or SRTP runtime.
 
-- name: Record the immutable carrier image ID and Twilio feature state
+- name: Record the immutable image ID and generic provider state
   ansible.builtin.copy:
     content: "{{ item.content }}\n"
     dest: "{{ carrier_gateway_config_root }}/{{ item.name }}"
@@ -719,7 +1151,9 @@
     mode: '0444'
   loop:
     - { name: asterisk-image-id, content: "{{ carrier_gateway_image_id }}" }
-    - { name: twilio-enabled, content: "{{ carrier_gateway_twilio_enabled | bool | ternary('true', 'false') }}" }
+    - { name: provider-enabled, content: "{{ carrier_gateway_provider_enabled | bool | ternary('true', 'false') }}" }
+    - { name: provider-profile, content: "{{ carrier_gateway_provider_profile if (carrier_gateway_provider_enabled | bool) else 'disabled' }}" }
+    - { name: authority-broker-version, content: 'v4' }
 
 - name: Install reboot-safe runtime directory policy
   ansible.builtin.template:
@@ -743,6 +1177,43 @@
     mode: '0644'
   notify: Restart carrier gateway
 
+- name: Inspect a previously installed isolated carrier-egress Quadlet
+  ansible.builtin.stat:
+    path: /etc/containers/systemd/vivolution-carrier-egress.container
+    follow: false
+  register: carrier_gateway_existing_egress_quadlet
+  changed_when: false
+
+- name: Stop a previously installed isolated egress while the provider is disabled
+  ansible.builtin.systemd_service:
+    name: vivolution-carrier-egress.service
+    enabled: false
+    state: stopped
+  when:
+    - not (carrier_gateway_provider_enabled | bool)
+    - carrier_gateway_existing_egress_quadlet.stat.exists | default(false)
+
+- name: Install the root-managed isolated carrier-egress Quadlet
+  ansible.builtin.template:
+    src: vivolution-carrier-egress.container.j2
+    dest: /etc/containers/systemd/vivolution-carrier-egress.container
+    owner: root
+    group: root
+    mode: '0640'
+  when: carrier_gateway_provider_enabled | bool
+  notify: Restart isolated carrier egress
+  no_log: true
+
+- name: Remove the isolated egress Quadlet while the provider is disabled
+  ansible.builtin.file:
+    path: /etc/containers/systemd/vivolution-carrier-egress.container
+    state: absent
+  when: not (carrier_gateway_provider_enabled | bool)
+
+- name: Reload root system manager after isolated egress policy
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
 - name: Install readiness and non-billable signaling runners
   ansible.builtin.template:
     src: "{{ item.src }}"
@@ -756,6 +1227,25 @@
 
 - name: Apply carrier-gateway service changes before readiness
   ansible.builtin.meta: flush_handlers
+
+- name: Reconcile and burn authority immediately before service start
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/vivolution-carrier-authority-broker
+      - --authorization-root
+      - "{{ carrier_gateway_state_root }}/authorization"
+      - reconcile
+      - --reason
+      - pre-service-start
+  changed_when: false
+  no_log: true
+
+- name: Require isolated carrier egress active and reboot-persistent
+  ansible.builtin.systemd_service:
+    name: vivolution-carrier-egress.service
+    enabled: true
+    state: started
+  when: carrier_gateway_provider_enabled | bool
 
 - name: Require rootless carrier gateway active and reboot-persistent
   ansible.builtin.command:
@@ -781,16 +1271,14 @@
         carrier_gateway_readiness.stdout is search(
           '^READY carrier-gateway profile=direct-private-pbx-poc '
           ~ 'listener=10.20.1.4:5061 edges=10.20.2.6,10.20.2.7 '
-          ~ 'twilio=(disabled|armed-no-call-authority)$')
+          ~ 'provider=(disabled|[a-z0-9][a-z0-9-]{1,31}-armed-no-call-authority)$')
     fail_msg: The carrier gateway did not reach its bounded readiness contract.
 
 - name: Publish the last-known-good rollback snapshot after exact readiness
   ansible.builtin.command:
-    argv:
-      - mv
-      - --force
-      - --no-target-directory
-      - "{{ carrier_gateway_state_root }}/rollback/pending-config.tar"
-      - "{{ carrier_gateway_state_root }}/rollback/previous-config.tar"
-  when: carrier_gateway_current_configuration.stat.exists | default(false)
+    argv: [mv, --force, --no-target-directory, "{{ item.source }}", "{{ item.dest }}"]
+  loop:
+    - { source: "{{ carrier_gateway_state_root }}/rollback/pending-config.tar.sha256", dest: "{{ carrier_gateway_state_root }}/rollback/previous-config.tar.sha256" }
+    - { source: "{{ carrier_gateway_state_root }}/rollback/pending-config.tar", dest: "{{ carrier_gateway_state_root }}/rollback/previous-config.tar" }
+  when: carrier_gateway_current_configuration_version == 'v4'
   no_log: true

@@ -92,6 +92,9 @@ class PostgreSQLRLSCatalogTests(TransactionTestCase):
             ("core_m365tenant", "tenant_metadata_read", "r"),
             ("core_edgecluster", "operator_context_only", "*"),
             ("core_edgenode", "operator_context_only", "*"),
+            ("core_enrollmentgrant", "operator_context_only", "*"),
+            ("core_enrollmentclaim", "operator_context_only", "*"),
+            ("core_enrollmentchallenge", "operator_context_only", "*"),
         }
         signed_tenant = "cp_security.rls_context_allows(tenant_context_id)"
         signed_operator = "cp_security.rls_context_allows(NULL::uuid)"
@@ -127,6 +130,9 @@ class PostgreSQLRLSCatalogTests(TransactionTestCase):
             "core_m365tenant",
             "core_edgecluster",
             "core_edgenode",
+            "core_enrollmentgrant",
+            "core_enrollmentclaim",
+            "core_enrollmentchallenge",
         ):
             expected_expressions[(table, "operator_context_only", "*")] = (
                 signed_operator,
@@ -218,6 +224,9 @@ class PostgreSQLSignedContextBehaviorTests(TransactionTestCase):
         "core_m365tenant",
         "core_edgecluster",
         "core_edgenode",
+        "core_enrollmentgrant",
+        "core_enrollmentclaim",
+        "core_enrollmentchallenge",
     )
 
     def setUp(self):

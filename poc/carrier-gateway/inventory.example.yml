@@ -10,5 +10,23 @@ all:
   vars:
     carrier_gateway_install_acknowledgement: INSTALL_DIRECT_PRIVATE_PBX_POC_CARRIER_GATEWAY
     carrier_gateway_firewall_contract_acknowledged: false
-    carrier_gateway_twilio_enabled: false
-    carrier_gateway_twilio_secrets: {}
+    carrier_gateway_provider_enabled: false
+    carrier_gateway_provider_secrets: {}
+    # To test Twilio, copy provider-profiles/twilio.example.yml into protected
+    # inventory and replace its placeholders. Other customers supply their own
+    # profile against the same Generic SIP Trunk Leg contract.
+    # Public ACME issuance is bound to CP1's managed identity. Replace only the
+    # principal/contact values in a protected inventory; never add a secret.
+    carrier_certificate_azure_subscription_id: a806949c-240f-4541-8c61-fd97f6d1f953
+    carrier_certificate_azure_tenant_id: efc3bcaa-8879-4366-a452-2b8efa76b16a
+    carrier_certificate_expected_cp1_principal_id: REPLACE_CP1_MANAGED_IDENTITY_PRINCIPAL_ID
+    carrier_certificate_expected_public_ipv4: 40.123.208.212
+    carrier_certificate_acme_email: replace@example.invalid
+    # Generate these together from a fresh read-only, whole-subscription RBAC
+    # reconciliation immediately before every install or renewal playbook.
+    carrier_certificate_rbac_receipt_controller_path: /absolute/protected/path/carrier-acme-rbac-receipt.json
+    carrier_certificate_rbac_signer_public_key_controller_path: /absolute/protected/path/carrier-acme-rbac-signer.pem
+    carrier_certificate_rbac_signing_key_id: carrier-acme-rbac-2026-08
+    # This is SHA-256 of canonical SubjectPublicKeyInfo DER, reported as
+    # signingPublicKeySha256 by receipt issuance (not the PEM file digest).
+    carrier_certificate_rbac_signer_public_key_sha256: REPLACE_64_LOWERCASE_HEX

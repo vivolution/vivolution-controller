@@ -1,0 +1,17 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<h1>Enrollment grant issued</h1>
+<p>
+  This grant is shown once. Copy it directly into the Edge installer’s protected prompt.
+  Do not place it in argv, URLs, shell history, environment variables, logs, or reusable images.
+</p>
+<dl>
+  <dt>Controller shared URL</dt><dd><code>{{ controller_origin }}</code></dd>
+  <dt>Node</dt><dd>{{ node }}</dd>
+  <dt>Generation</dt><dd>{{ node.generation }}</dd>
+  <dt>Expires</dt><dd>{{ grant.expires_at }}</dd>
+  <dt>Grant</dt><dd><textarea readonly rows="3" cols="90">{{ grant_token }}</textarea></dd>
+</dl>
+<p><a href="{% url 'admin:core_edgenode_changelist' %}">Return to Edge nodes</a></p>
+{% endblock %}

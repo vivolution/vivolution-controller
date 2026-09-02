@@ -123,12 +123,42 @@ suffix comparison. If an ETag changes or execution stops, rerun plan mode,
 review the smaller plan and approve its new digest. Restart the VMs only after
 the no-action reconciled status.
 
+For each carrier-certificate install or renewal, issue a short-lived signed
+receipt from the same fresh read-only whole-subscription discovery. Receipt
+mode refuses apply arguments and performs no Azure mutation. The 32-byte
+Ed25519 seed and both outputs must be owner-only paths outside Git:
+
+```bash
+python3 reconcile_root_direct_dns_acme_authority.py \
+  --mode carrier-rbac-receipt \
+  --expected-subscription-id '<subscription-uuid>' \
+  --expected-tenant-id '<tenant-uuid>' \
+  --expected-carrier-public-ipv4 '<cp1-public-ipv4>' \
+  --expected-sbc1-public-ipv4 '<g3-sbc1-public-ipv4>' \
+  --expected-sbc2-public-ipv4 '<g3-sbc2-public-ipv4>' \
+  --expected-cp1-principal-id '<cp1-principal-uuid>' \
+  --expected-sbc1-principal-id '<g3-sbc1-principal-uuid>' \
+  --expected-sbc2-principal-id '<g3-sbc2-principal-uuid>' \
+  --receipt-signing-seed /protected/carrier-acme-rbac-ed25519.seed \
+  --receipt-signing-key-id carrier-acme-rbac-2026-08 \
+  --receipt-output /protected/carrier-acme-rbac-receipt.json \
+  --receipt-public-key-output /protected/carrier-acme-rbac-signer.pem \
+  --receipt-lifetime-seconds 900
+```
+
+Transfer only the receipt and public key through the protected Ansible
+inventory paths. Pin the reported `signingPublicKeySha256`, which hashes the
+canonical SubjectPublicKeyInfo DER. Never transfer the signing seed to CP1.
+
 ## Qualification inventory boundary
 
 For this profile the protected controller inventory must define exactly:
 
 ```yaml
 cp_azure_poc_direct_replacement_runtime_profile: DIRECT_ROUTING_PRIVATE_PBX_POC
+# Select TWILIO_ENABLED only after its separately reviewed three-rule overlay
+# has been applied. Generation 3 cannot qualify with ABSENT authority.
+cp_azure_poc_cp1_carrier_overlay_mode: TWILIO_DISABLED
 cp_azure_poc_direct_dns_resource_group: DNS_Zones
 cp_azure_poc_direct_dns_parent_zone: vivolution.ae
 cp_azure_poc_direct_certificate_fqdns:
@@ -153,8 +183,10 @@ preserved generation-2 rollback fleet. The qualifier continues to prove that
 fleet's legacy voice ACME authority, and independently uses the root plan only
 to satisfy `cp_azure_poc_direct_replacement_runtime_profile`. Legacy voice
 evidence therefore cannot satisfy the g3 root-DNS gate. The qualifier re-reads
-the g3 VM principals and PIPs and passes those plus CP1's live
-identity/address into the independent contract.
+the g3 VM principals, PIPs, and both complete 19-rule NSGs and passes those
+plus CP1's live identity/address into the independent contract. The selected
+CP1 mode proves 20 total custom rules with Twilio disabled or 23 with Twilio
+enabled; `ABSENT` is accepted only while generation 3 is not deployed.
 
 ## Bounded teardown
 

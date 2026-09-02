@@ -911,6 +911,22 @@ print(
         self.assertIn("globally routable Direct Routing PBX source CIDRs", tasks)
         self.assertIn("TRANSITION_TO_DIRECT_ROUTING_REPLACEMENT_FLEET", transition)
         self.assertIn(
+            "['DIRECT_ROUTING', 'DIRECT_ROUTING_PRIVATE_PBX_POC']",
+            transition,
+        )
+        self.assertIn(
+            "INSTALL_DIRECT_ROUTING_PRIVATE_PBX_POC_REPLACEMENT_GENERATION",
+            transition,
+        )
+        self.assertIn(
+            "ACTIVATE_DIRECT_ROUTING_PRIVATE_PBX_POC_REPLACEMENT_GENERATION",
+            transition,
+        )
+        self.assertGreaterEqual(
+            transition.count(".profile == edge_runtime_profile"),
+            2,
+        )
+        self.assertIn(
             "PRESERVE_SYNTHETIC_PREDECESSOR_UNTIL_SEPARATE_CUTOVER",
             transition,
         )
@@ -965,6 +981,7 @@ print(
         )
         self.assertIn("predecessorSyntheticCallsBeforeAndAfter", transition)
         self.assertIn("replacementLiveInteroperability", transition)
+        self.assertIn("'profile': edge_runtime_profile", transition)
         self.assertIn("NOT_ASSERTED", transition)
         self.assertIn("import_playbook: install-edge.yml", transition)
         self.assertIn("import_playbook: activate-edge.yml", transition)

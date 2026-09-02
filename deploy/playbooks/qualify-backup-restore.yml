@@ -120,6 +120,9 @@
           ansible.builtin.assert:
             that:
               - "'TABLE public core_tenantcontext' in cp_restore_archive_list.stdout"
+              - "'TABLE public core_enrollmentgrant' in cp_restore_archive_list.stdout"
+              - "'TABLE public core_enrollmentclaim' in cp_restore_archive_list.stdout"
+              - "'TABLE public core_enrollmentchallenge' in cp_restore_archive_list.stdout"
               - "'TABLE DATA public auth_user' in cp_restore_archive_list.stdout"
               - "'TABLE cp_security rls_signing_key' in cp_restore_archive_list.stdout"
             fail_msg: Qualification dump is missing required controller schema or operator data.

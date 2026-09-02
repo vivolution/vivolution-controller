@@ -1,0 +1,150 @@
+#!/bin/sh
+set -eu
+
+PATH={{ carrier_certificate_libexec_root }}:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
+
+acme_root={{ carrier_certificate_acme_root | quote }}
+certificate_name={{ carrier_certificate_server_name | quote }}
+certificate_source="$acme_root/certificates/$certificate_name.crt"
+issuer_source="$acme_root/certificates/$certificate_name.issuer.crt"
+key_source="$acme_root/certificates/$certificate_name.key"
+incoming_root={{ (carrier_certificate_rotation_root + '/incoming') | quote }}
+certificate_tmp="$incoming_root/.carrier.fullchain.pem.$$"
+key_tmp="$incoming_root/.carrier.key.$$"
+
+reconcile_challenge() {
+    {{ carrier_certificate_libexec_root }}/reconcile-carrier-acme-challenge \
+        --subscription-id {{ carrier_certificate_azure_subscription_id | quote }} \
+        --tenant-id {{ carrier_certificate_azure_tenant_id | quote }} \
+        --expected-principal-id {{ carrier_certificate_expected_cp1_principal_id | quote }} \
+        --resource-group {{ carrier_certificate_dns_resource_group | quote }} \
+        --zone {{ carrier_certificate_acme_zone | quote }} \
+        --mode reconcile
+}
+
+cleanup_exit() {
+    original_status=$?
+    trap - EXIT HUP INT TERM
+    set +e
+    reconcile_challenge
+    cleanup_status=$?
+    /bin/rm -f "$certificate_tmp" "$key_tmp"
+    set -e
+    if [ "$cleanup_status" -ne 0 ]; then
+        original_status=$cleanup_status
+    fi
+    exit "$original_status"
+}
+
+exec 9>"$acme_root/renew.lock"
+if ! /usr/bin/flock -n 9; then
+    # A lock loser has no ownership of the winner's ACME TXT lifecycle and
+    # therefore must not arm cleanup or perform reconciliation.
+    exit 75
+fi
+
+# The rollback/teardown gate is created before their quiescence checks. A
+# renewal that won the file lock afterward must still refuse before any Azure
+# discovery, TXT cleanup, ACME state change, or live-PKI activation.
+{{ carrier_certificate_operation_guard_path }} assert-available
+
+{{ carrier_certificate_libexec_root }}/verify-carrier-acme-rbac-receipt \
+    --receipt {{ carrier_certificate_rbac_receipt_path | quote }} \
+    --public-key {{ carrier_certificate_rbac_signer_public_key_path | quote }} \
+    --expected-subscription-id {{ carrier_certificate_azure_subscription_id | quote }} \
+    --expected-tenant-id {{ carrier_certificate_azure_tenant_id | quote }} \
+    --expected-cp1-principal-id {{ carrier_certificate_expected_cp1_principal_id | quote }} \
+    --expected-resource-group {{ carrier_certificate_dns_resource_group | quote }} \
+    --expected-zone {{ carrier_certificate_acme_zone | quote }} \
+    --expected-signing-key-id {{ carrier_certificate_rbac_signing_key_id | quote }} \
+    --expected-public-key-sha256 {{ carrier_certificate_rbac_signer_public_key_sha256 | quote }} \
+    --maximum-lifetime-seconds {{ carrier_certificate_rbac_receipt_maximum_lifetime_seconds | int }} \
+    --minimum-remaining-seconds {{ carrier_certificate_rbac_receipt_minimum_remaining_seconds | int }}
+
+trap cleanup_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# A prior hard interruption may leave only Lego-shaped TXT data in this
+# dedicated, CP1-only zone. Reconcile it conditionally before new discovery.
+reconcile_challenge
+
+{{ carrier_certificate_libexec_root }}/verify-carrier-acme-authority \
+    --subscription-id {{ carrier_certificate_azure_subscription_id | quote }} \
+    --tenant-id {{ carrier_certificate_azure_tenant_id | quote }} \
+    --expected-principal-id {{ carrier_certificate_expected_cp1_principal_id | quote }} \
+    --resource-group {{ carrier_certificate_dns_resource_group | quote }} \
+    --zone {{ carrier_certificate_acme_zone | quote }} \
+    --certificate-name {{ carrier_certificate_server_name | quote }} \
+    --challenge-alias {{ carrier_certificate_acme_challenge_alias | quote }} \
+    --challenge-target {{ carrier_certificate_acme_challenge_target | quote }} \
+    --expected-public-ipv4 {{ carrier_certificate_expected_public_ipv4 | quote }} \
+    --resolver {{ carrier_certificate_azure_dns_resolver_ipv4 | quote }}
+
+{{ carrier_certificate_libexec_root }}/validate-carrier-acme-state \
+    --root "$acme_root" \
+    --certificate-name "$certificate_name"
+
+if [ -s "$certificate_source" ] && [ -s "$key_source" ]; then
+    {{ carrier_certificate_libexec_root }}/lego \
+        run \
+        --accept-tos \
+        --email {{ carrier_certificate_acme_email | quote }} \
+        --server https://acme-v02.api.letsencrypt.org/directory \
+        --dns azuredns \
+        --dns.resolvers {{ (carrier_certificate_azure_dns_resolver_ipv4 + ':53') | quote }} \
+        --dns.propagation.disable-ans \
+        --domains {{ carrier_certificate_server_name | quote }} \
+        --key-type {{ carrier_certificate_key_type | quote }} \
+        --path "$acme_root" \
+        --renew-days {{ carrier_certificate_renew_days | int }} \
+        --no-random-sleep
+else
+    {{ carrier_certificate_libexec_root }}/lego \
+        run \
+        --accept-tos \
+        --email {{ carrier_certificate_acme_email | quote }} \
+        --server https://acme-v02.api.letsencrypt.org/directory \
+        --dns azuredns \
+        --dns.resolvers {{ (carrier_certificate_azure_dns_resolver_ipv4 + ':53') | quote }} \
+        --dns.propagation.disable-ans \
+        --domains {{ carrier_certificate_server_name | quote }} \
+        --key-type {{ carrier_certificate_key_type | quote }} \
+        --path "$acme_root"
+fi
+
+# Activation is forbidden until the dedicated challenge is absent again.
+reconcile_challenge
+
+{{ carrier_certificate_libexec_root }}/validate-carrier-acme-state \
+    --root "$acme_root" \
+    --certificate-name "$certificate_name" \
+    --require-account \
+    --require-certificate
+
+test -s "$certificate_source"
+test -s "$issuer_source"
+test -s "$key_source"
+
+# Lego 5 writes leaf plus issuer(s) to .crt. Appending .issuer.crt would
+# duplicate the issuer and violate the ordered full-chain contract.
+/bin/cat "$certificate_source" >"$certificate_tmp"
+/usr/bin/install -o root -g root -m 0400 "$key_source" "$key_tmp"
+/bin/chown root:root "$certificate_tmp"
+/bin/chmod 0400 "$certificate_tmp"
+
+{{ carrier_certificate_libexec_root }}/validate-carrier-certificate \
+    --certificate "$certificate_tmp" \
+    --private-key "$key_tmp" \
+    --expected-san {{ carrier_certificate_server_name | quote }} \
+    --trust-bundle {{ carrier_certificate_public_ca_bundle_path | quote }} \
+    --minimum-valid-seconds {{ carrier_certificate_minimum_valid_seconds | int }}
+
+/bin/mv -f "$certificate_tmp" "$incoming_root/carrier.fullchain.pem"
+/bin/mv -f "$key_tmp" "$incoming_root/carrier.key"
+/bin/sync -f "$incoming_root"
+
+{{ carrier_certificate_libexec_root }}/rotate-carrier-certificate

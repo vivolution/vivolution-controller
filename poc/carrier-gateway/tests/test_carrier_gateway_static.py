@@ -38,7 +38,9 @@ class CarrierGatewayStaticTests(unittest.TestCase):
     def test_exact_private_generation_three_contract(self) -> None:
         defaults = read("roles/carrier_gateway/defaults/main.yml")
         pjsip = read("roles/carrier_gateway/templates/pjsip.conf.j2")
+        provider_pjsip = read("roles/carrier_gateway/templates/pjsip-egress.conf.j2")
         self.assertIn("carrier_gateway_controller_ipv4: 10.20.1.4", defaults)
+        self.assertIn("carrier_gateway_controller_public_ipv4: 40.123.208.212", defaults)
         self.assertIn("carrier_gateway_sbc1_ipv4: 10.20.2.6", defaults)
         self.assertIn("carrier_gateway_sbc2_ipv4: 10.20.2.7", defaults)
         self.assertIn("carrier_gateway_sbc1_server_name: sbc1.vivolution.ae", defaults)
@@ -49,12 +51,27 @@ class CarrierGatewayStaticTests(unittest.TestCase):
         self.assertIn("carrier_gateway_rtp_end: 30127", defaults)
         self.assertIn("carrier_gateway_edge_listener_port: 15061", defaults)
         self.assertIn("method=tlsv1_2", pjsip)
+        self.assertIn("max_forwards=70", pjsip)
+        self.assertNotIn("max_forwards=20", pjsip)
+        self.assertIn("local_net=10.20.0.0/16", pjsip)
+        self.assertIn(
+            "external_signaling_address={{ carrier_gateway_controller_public_ipv4 }}",
+            provider_pjsip,
+        )
+        self.assertIn(
+            "external_media_address={{ carrier_gateway_controller_public_ipv4 }}",
+            provider_pjsip,
+        )
         self.assertIn("verify_client=yes", pjsip)
         self.assertIn("require_client_cert=yes", pjsip)
         self.assertIn("verify_server=yes", pjsip)
-        # Edge ingress, both generation-three Edge peers, and the disabled-by-
-        # default Twilio endpoint each require SDES when their branch exists.
-        self.assertEqual(pjsip.count("media_encryption=sdes"), 4)
+        # The Common Teams Leg keeps three fixed SDES endpoints. The provider
+        # profile controls only the isolated Generic SIP Trunk Leg.
+        self.assertEqual(pjsip.count("media_encryption=sdes"), 3)
+        self.assertIn(
+            "media_encryption={{ carrier_gateway_provider_media_encryption }}",
+            provider_pjsip,
+        )
         self.assertNotIn("fixture-pki", pjsip)
         self.assertNotIn("pbx-fixture.invalid", pjsip)
 
@@ -68,32 +85,55 @@ class CarrierGatewayStaticTests(unittest.TestCase):
         self.assertLess(dialplan.index("@sbc1,5"), dialplan.index("@sbc2,5"))
         runner = read("roles/carrier_gateway/templates/vivolution-carrier-gateway-test.j2")
         self.assertIn("NON_BILLABLE_EDGE_SIGNALING_ONLY", runner)
-        self.assertNotIn("@twilio", runner.lower())
-        self.assertNotIn("PJSIP/twilio", runner)
+        self.assertNotIn("@provider", runner.lower())
+        self.assertNotIn("PJSIP/provider", runner)
 
-    def test_twilio_is_absent_by_default_and_one_shot_when_enabled(self) -> None:
+    def test_provider_is_absent_by_default_and_one_shot_when_enabled(self) -> None:
         defaults = read("roles/carrier_gateway/defaults/main.yml")
         tasks = read("roles/carrier_gateway/tasks/main.yml")
         pjsip = read("roles/carrier_gateway/templates/pjsip.conf.j2")
-        dialplan = read("roles/carrier_gateway/templates/extensions.conf.j2")
+        provider_pjsip = read("roles/carrier_gateway/templates/pjsip-egress.conf.j2")
+        dialplan = read("roles/carrier_gateway/templates/extensions-egress.conf.j2")
         authorize = read("roles/carrier_gateway_authorize/tasks/main.yml")
-        agi = read("roles/carrier_gateway/templates/vivolution-twilio-authorize.agi.j2")
-        self.assertIn("carrier_gateway_twilio_enabled: false", defaults)
-        self.assertIn("carrier_gateway_twilio_secrets: {}", defaults)
-        self.assertIn("ENABLE_ONE_SHOT_TWILIO_OUTBOUND_POC", tasks)
-        self.assertIn("{% if carrier_gateway_twilio_enabled | bool %}", pjsip)
+        agi = read("roles/carrier_gateway/templates/vivolution-provider-authorize.agi.j2")
+        self.assertIn("carrier_gateway_provider_enabled: false", defaults)
+        self.assertIn("carrier_gateway_provider_secrets: {}", defaults)
+        self.assertIn("ENABLE_ONE_SHOT_SIP_PROVIDER_OUTBOUND_POC", tasks)
+        self.assertIn("{% if carrier_gateway_provider_enabled | bool %}", pjsip)
         self.assertIn("media_encryption=sdes", pjsip)
         self.assertIn("AUTHORIZE_EXACTLY_ONE_BILLABLE_PSTN_CALL", authorize)
-        self.assertIn("force: false", authorize)
+        self.assertIn("Arm one root-owned exact-destination authority without overwrite", authorize)
+        self.assertIn("/usr/local/libexec/vivolution-carrier-authority-broker", authorize)
         self.assertIn("maximum_calls=1", authorize)
-        self.assertIn("AGI(vivolution-twilio-authorize.agi,${EXTEN})", dialplan)
-        self.assertIn('mv "$pending"', agi)
-        self.assertIn(".claimed", agi)
+        self.assertIn("AGI(vivolution-provider-authorize.agi,${EXTEN})", dialplan)
+        self.assertIn(
+            "Set(CALLERID(num)={{ carrier_gateway_provider_permitted_caller_id }})",
+            dialplan,
+        )
+        self.assertIn(
+            "Set(CALLERID(ani)={{ carrier_gateway_provider_permitted_caller_id }})",
+            dialplan,
+        )
+        self.assertIn(
+            "from_user={{ carrier_gateway_provider_permitted_caller_id }}",
+            provider_pjsip,
+        )
+        self.assertIn(
+            "callerid={{ carrier_gateway_provider_permitted_caller_id }}",
+            provider_pjsip,
+        )
+        self.assertIn("user_eq_phone=yes", provider_pjsip)
+        self.assertNotIn("regex_replace('^\\\\+', '')", provider_pjsip)
+        self.assertNotIn("type=registration", provider_pjsip)
+        self.assertIn("/usr/local/libexec/vivolution-authority-client", agi)
         self.assertGreaterEqual(tasks.count("no_log: true"), 6)
 
     def test_runtime_is_true_rootless_read_only_and_capability_free(self) -> None:
         defaults = read("roles/carrier_gateway/defaults/main.yml")
         quadlet = read("roles/carrier_gateway/templates/vivolution-carrier-gateway.container.j2")
+        provider_quadlet = read(
+            "roles/carrier_gateway/templates/vivolution-carrier-egress.container.j2"
+        )
         tasks = read("roles/carrier_gateway/tasks/main.yml")
         policy = read("roles/carrier_gateway/templates/10-vivolution-carrier-gateway-policy.conf.j2")
         self.assertIn("rootless-home/.config/containers/systemd", defaults)
@@ -105,14 +145,73 @@ class CarrierGatewayStaticTests(unittest.TestCase):
         self.assertIn("ReadOnly=true", quadlet)
         self.assertIn("DropCapability=all", quadlet)
         self.assertIn("NoNewPrivileges=true", quadlet)
-        self.assertIn("AddHost={{ carrier_gateway_twilio_termination_fqdn }}", quadlet)
+        self.assertNotIn("carrier_gateway_provider_signaling_fqdn", quadlet)
+        self.assertIn("AddHost={{ carrier_gateway_provider_signaling_fqdn }}", provider_quadlet)
         self.assertIn("SocketBindDeny=any", policy)
         self.assertIn("SocketBindAllow=ipv4:tcp:{{ carrier_gateway_tls_port }}", policy)
         self.assertIn("IPAddressDeny=any", policy)
+        self.assertNotIn("carrier_gateway_provider_", policy)
+        self.assertIn(
+            "Volume={{ carrier_gateway_egress_pki_root }}:/run/carrier-pki:ro",
+            provider_quadlet,
+        )
+        self.assertNotIn(
+            "Volume={{ carrier_gateway_pki_root }}:/run/carrier-pki:ro",
+            provider_quadlet,
+        )
 
         readiness = read("roles/carrier_gateway/templates/vivolution-carrier-gateway-readiness.j2")
         self.assertIn("--property=IPAddressDeny", readiness)
-        self.assertIn("actual_twilio_hosts", readiness)
+        self.assertIn("actual_provider_hosts", readiness)
+        self.assertIn("external_signaling_address=40.123.208.212", readiness)
+        self.assertIn("external_media_address=40.123.208.212", readiness)
+        self.assertIn("pjsip show registrations", readiness)
+        self.assertIn("Objects found:[[:space:]]*0", readiness)
+        self.assertIn("169.254.169.254/metadata/instance/network", readiness)
+        self.assertIn("vivolution-nftables-semantic-guard verify-profile", readiness)
+        self.assertIn(
+            "/var/lib/vivolution/host-firewall/active-profile.json", readiness
+        )
+        self.assertIn("--fixture-enabled true", readiness)
+        self.assertIn("--carrier-enabled true", readiness)
+        self.assertIn("0:10004:440:1", readiness)
+        self.assertIn("pjsip show transport provider-egress-tls", readiness)
+        self.assertIn("Edge-facing UID can read the isolated provider TLS key", readiness)
+
+    def test_generic_provider_contract_and_twilio_example_are_separate(self) -> None:
+        defaults = read("roles/carrier_gateway/defaults/main.yml")
+        tasks = read("roles/carrier_gateway/tasks/main.yml")
+        provider_pjsip = read("roles/carrier_gateway/templates/pjsip-egress.conf.j2")
+        twilio = read("provider-profiles/twilio.example.yml")
+        readiness = read(
+            "roles/carrier_gateway/templates/vivolution-carrier-gateway-readiness.j2"
+        )
+
+        self.assertNotIn("carrier_gateway_twilio_", defaults + tasks + provider_pjsip)
+        self.assertIn("carrier_gateway_provider_profile: ''", defaults)
+        self.assertIn("carrier_gateway_provider_profile: twilio", twilio)
+        for signaling_range in (
+            "54.172.60.0/30",
+            "54.244.51.0/30",
+            "54.171.127.192/30",
+            "35.156.191.128/30",
+            "54.65.63.192/30",
+            "54.169.127.128/30",
+            "54.252.254.64/30",
+            "177.71.206.192/30",
+        ):
+            self.assertIn(signaling_range, twilio)
+        self.assertIn("carrier_gateway_provider_media_ipv4_cidrs: &twilio_media_authority", twilio)
+        self.assertIn("carrier_gateway_provider_remote_media_port_range: 10000-60000", twilio)
+        self.assertIn("net.subnet_of(authority)", tasks)
+        self.assertIn("carrier_gateway_provider_destination_ipv4_cidrs", tasks)
+        self.assertIn("carrier_gateway_provider_azure_public_ipv4", tasks)
+        self.assertIn("media_encryption={{ carrier_gateway_provider_media_encryption }}", provider_pjsip)
+        self.assertIn("method=tlsv1_2", provider_pjsip)
+        self.assertIn("--provider-enabled", readiness)
+        self.assertIn("--provider-destinations-json", readiness)
+        self.assertNotIn("nft list chain", readiness)
+        self.assertNotIn("vivolution-carrier-provider-media-in", readiness)
 
     def test_host_firewall_is_separate_from_synthetic_fixture(self) -> None:
         defaults = (PROJECT / "deploy/roles/host_firewall/defaults/main.yml").read_text()
@@ -130,12 +229,18 @@ class CarrierGatewayStaticTests(unittest.TestCase):
         teardown = read("roles/carrier_gateway_teardown/tasks/main.yml")
         self.assertIn("podman, image, exists", tasks)
         self.assertIn("pending-config.tar", tasks)
+        broker_proof = tasks[
+            tasks.index("- name: Prove the active broker PID executes the installed v4 broker") :
+            tasks.index("- name: Require no conflicting root Edge host authority")
+        ]
+        self.assertIn("version != 'v4'", broker_proof)
+        self.assertNotIn("version != 'v3'", broker_proof)
         self.assertIn("Refuse to overwrite an interrupted rollback authority", tasks)
         self.assertIn("previous-config.tar", tasks)
         self.assertIn("ROLLBACK_CARRIER_GATEWAY_TO_PROTECTED_PREVIOUS_CONFIG", rollback)
-        self.assertIn("Validate bounded archive members before extraction", rollback)
+        self.assertIn("Validate exact digest-bound members and reject duplicates", rollback)
         self.assertIn("rescue:", rollback)
-        self.assertIn("Remove any unconsumed billable-call authority", teardown)
+        self.assertIn("Invalidate unconsumed authority before service stop", teardown)
         self.assertIn("HOST_FIREWALL_CARRIER_RULES_REMOVED", teardown)
 
     def test_no_inbound_did_or_production_claim(self) -> None:

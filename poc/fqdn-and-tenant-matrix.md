@@ -1,69 +1,72 @@
-# POC FQDN and Microsoft 365 Tenant Matrix
+# POC FQDN and Microsoft 365 tenant matrix
 
-Status: Template only. Replace `.example` after Jay approves a lab domain and POC execution.
+Status: selected single-tenant first POC as of 2026-08-31. Multi-tenant derived
+trunks are deferred and must not be inferred from this acceptance run.
 
-## Required tenants
+## Microsoft 365 tenant
 
-### Vivolution/provider tenant
+- Organization: Vivolution Technologies LLC.
+- Tenant ID: `151cd01a-1e81-40a9-b898-d8646e1a8760`.
+- Administrator/test identity: `jay@vivolution.ae`.
+- Domain: `vivolution.ae`; live verified-domain status must be rechecked after
+  normal browser authorization.
+- Entitlement: Jay reports Microsoft 365 E5 with Teams Phone. The live preflight
+  must confirm license, Teams upgrade mode, enterprise voice, and user policy.
+- Support boundary: OpenSIPS/RTPengine is accepted for this non-certified POC.
 
-- Owns and activates the two base SBC domains.
-- Contains only the two carrier/base Direct Routing gateways.
-- Does not need Microsoft Calling Plan.
+## Selected live FQDNs
 
-### Customer Tenant A
-
-- Activates its two derived subdomains.
-- Adds the derived trunks to its voice routes.
-- Contains at least two Teams + Teams Phone test users.
-
-### Customer Tenant B
-
-- Same structure as Customer A but in an independent Entra/Microsoft 365 tenant.
-- Uses deliberately overlapping synthetic numbers/extensions to prove isolation.
-
-All three tenants must be in the same Microsoft cloud.
-
-## FQDN template
-
-| Role | Node 1 | Node 2 |
+| Role | FQDN | Target |
 | --- | --- | --- |
-| Provider/base | `sbc1.lab.voice.vivolution.example` | `sbc2.lab.voice.vivolution.example` |
-| Customer A derived | `customer-a.sbc1.lab.voice.vivolution.example` | `customer-a.sbc2.lab.voice.vivolution.example` |
-| Customer B derived | `customer-b.sbc1.lab.voice.vivolution.example` | `customer-b.sbc2.lab.voice.vivolution.example` |
+| Direct Routing node 1 | `sbc1.vivolution.ae` | generation-3 SBC1 public IP |
+| Direct Routing node 2 | `sbc2.vivolution.ae` | generation-3 SBC2 public IP |
+| CP1 carrier gateway | `carrier.vivolution.ae` | replacement CP1 public IP |
+| Controller after cutover | `controller.voice.vivolution.ae` | replacement CP1 public IP |
 
-- Every Node 1 name resolves to Edge 1's single static public IP.
-- Every Node 2 name resolves to Edge 2's single static public IP.
-- Do not place several public IPs behind one SBC FQDN; use the two distinct node FQDNs for failover.
+Each name has one static public IPv4 address. The two node FQDNs remain distinct
+so Microsoft 365 can perform gateway selection and failover.
 
-## Certificate template
+## DNS-01 authority
 
-Node 1 RSA certificate:
+- `acme-sbc1.vivolution.ae` is delegated only to SBC1's isolated ACME zone.
+- `acme-sbc2.vivolution.ae` is delegated only to SBC2's isolated ACME zone.
+- `acme-carrier.vivolution.ae` is delegated only to CP1's isolated carrier ACME
+  zone.
+- Managed identities receive TXT mutation rights only in their matching child
+  zone. Parent records, unrelated zones, and other nodes' challenges remain out
+  of scope.
 
-- `sbc1.lab.voice.vivolution.example`
-- `*.sbc1.lab.voice.vivolution.example`
+The public certificates use complete trusted chains and Server Authentication
+EKU. Issuance, renewal, TXT cleanup, atomic installation, and dependent-service
+reload are acceptance gates rather than manual runbook assumptions.
 
-Node 2 RSA certificate:
+## Preserved generation-2 rollback names
 
-- `sbc2.lab.voice.vivolution.example`
-- `*.sbc2.lab.voice.vivolution.example`
+- `sbc1.voice.vivolution.ae`
+- `sbc2.voice.vivolution.ae`
+- existing tenant wildcard names beneath those nodes
 
-Use DNS-01, a complete trusted chain, Server Authentication EKU, automated validation, and staged replacement. Let’s Encrypt is a lab assumption only because Microsoft's future Client Authentication EKU requirement may require another certificate profile.
+These identify the signed synthetic last-known-good environment. They are not
+the selected Microsoft 365 Direct Routing gateways and stay intact until the
+generation-3 path is accepted.
 
-## Microsoft configuration behavior to prove
+## Call fixtures
 
-1. Register and activate the two base domains in the Vivolution/provider tenant.
-2. Create only the two provider gateways there.
-3. Register and activate each customer-derived subdomain in the appropriate customer tenant.
-4. Add the derived FQDNs directly to that customer's voice routes; do not create separate customer gateways for them.
-5. Put both derived node FQDNs in each customer's routes.
-6. For SBC-to-Teams calls, present the exact customer-derived FQDN in Contact so Microsoft selects the intended customer tenant.
-7. Capture the Teams-to-SBC INVITE/TLS behavior and document the stable trusted tenant selector before enabling Customer B.
-8. Remember that base-trunk number translation rules do not automatically apply to derived trunks; generate any required customer-tenant translation policy explicitly.
+- `+9710000002001`: CP1 carrier tone probe; explicitly admitted by the exact
+  nonbillable test route.
+- `+9710000002002`: CP1 carrier echo probe; explicitly admitted by the exact
+  nonbillable test route.
+- Normal user assignments remain restricted to valid UAE E.164 numbers and do
+  not admit the probe fixtures.
+- A real Teams-to-PSTN call is outbound-only through Twilio. It requires a
+  Twilio-owned or verified caller ID and immediate approval of destination,
+  count, and maximum spend. No inbound call is claimed because there is no DID.
 
-## Example synthetic number fixtures
+## Deferred hosted multi-tenant model
 
-- Both Customer A and Customer B may use extension `1001` internally.
-- Both may use the same non-routable lab E.164-like fixture.
-- No route may reach a real PSTN carrier or emergency destination.
-
-The overlapping fixtures are deliberate. Correct calls must depend on derived-trunk/peer identity, not digits.
+Future customer tenants may use derived node names and overlapping internal
+extensions only after a separate-tenant Microsoft procedure is proven. That
+work requires independent tenant/domain activation, exact Contact-based tenant
+selection, customer-specific voice routes, certificate SAN policy, isolation,
+and negative cross-tenant tests. None of those claims belongs to this
+single-tenant POC.

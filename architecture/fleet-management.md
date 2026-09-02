@@ -2,6 +2,32 @@
 
 Status: v0.1 design baseline; no infrastructure deployment is authorized.
 
+## Current installer boundary
+
+The accepted rc6 launcher displays the neutral top-level option **Deploy an
+Edge Appliance (SBC)**, but it is visibly unavailable. This is deliberate:
+
+- the public Ubuntu 24.04 Edge artifact is a bounded enrollment/fleet-visibility
+  client only; it does not install OpenSIPS, RTPengine, Teams Direct Routing,
+  provider SIP, media policy, CDR processing, or remote desired-state control;
+- the complete private OpenSIPS/RTPengine POC currently declares Debian 13
+  AMD64, while the rc6 beta launcher and Controller declare Ubuntu 24.04;
+  and
+- neither artifact has passed a complete fresh-host Ubuntu Edge, live Teams/
+  provider call, capacity, failover, or lifecycle qualification.
+
+The menu must not dispatch the enrollment-only package while calling it an SBC,
+and must not bypass the voice POC's Debian host contract. The Edge path can be
+enabled only after one role-specific OS contract, signed package, port matrix,
+failure matrix, and live-call acceptance are published. Until then it explains
+the boundary and returns safely.
+
+The rc6 launcher's non-mutating diagnostics report installer state, OS,
+multi-source outbound public-IP observations, system time, the current
+Controller network contract, and optional system-resolver A/AAAA results. They
+do not create installer state or claim Edge voice readiness. Edge-specific CAA,
+listener, firewall, NAT/SIP ALG, and media-path diagnostics remain future work.
+
 ## Decision
 
 The control plane manages **Edge Clusters**, not Azure VMs. A production-capable Edge Cluster is a two-node signaling/media pair with a declared service mode, capacity policy, software baseline, network policy, and lifecycle state. The staged POC may temporarily contain one node while `DRAFT`, `ENROLLING`, or `VALIDATING`, but it can never become available for customers until both required slots pass validation.
@@ -139,6 +165,27 @@ The installer experience should be simple without weakening the trust bootstrap:
 
 The portal may generate a copy/paste sequence that downloads a fixed-version package plus signature/TUF metadata, verifies it against a pre-established signing key, and only then installs. Production does not use an unchecked `curl | sh`. Also provide signed APT/RPM and offline-bundle paths. Start with one exact supported Linux baseline; add distributions only after their complete preflight/update/rollback matrix passes.
 
+The eventual unified Edge workflow uses the same accepted operator experience
+as the Controller launcher without sharing role assumptions:
+
+- discover the outbound public IPv4 through multiple short-timeout HTTPS
+  sources, label NAT/load-balancer ambiguity, and require confirmation/manual
+  override;
+- retain validated answers while DNS offers Retry, timed wait, change values,
+  diagnostics, or safe exit;
+- explicitly select `Infrastructure-managed` firewall ownership (no UFW reset)
+  or `Installer-managed` host nftables/UFW ownership with preview and
+  lockout-safe administrator handling;
+- choose an IANA timezone from a searchable list and configure Chrony with
+  automatic/provider or validated custom NTP sources before identity, TLS, SIP,
+  media, or CDR activation; and
+- print the exact, current Microsoft-side, provider-side, management, DNS, NTP,
+  and package egress contract before mutation.
+
+An echo service reports observed egress only. It is not evidence that SIP/RTP
+can reach the same address, and it never receives enrollment grants, inventory,
+internal addresses, or other installation answers.
+
 The main agent runs unprivileged. A small local root helper exposes only fixed, schema-validated operations over a root-owned Unix socket. It independently verifies manifest signature, node/generation target, scope, monotonic sequence, and artifact digest; authenticates the caller with Unix peer credentials; and maps typed resource IDs to internal Vivolution-owned paths, users, service units, and one dedicated nftables table/chains. It never flushes the host firewall, changes customer SSH/access, or accepts raw paths, unit names, package URLs, nftables fragments, arbitrary commands, free-form packages, unrelated file access, or uploaded scripts.
 
 Named diagnostics are tenant-scoped, duration/size-bounded, redacted, approval/audit controlled, and absolutely deny private keys/secrets. SIP/packet capture is an incident-only separately approved workflow, not a routine helper verb.
@@ -157,6 +204,61 @@ An existing node must first pass a support preflight: approved distro/kernel, ro
 Agents bootstrap through one stable control URL, then receive a signed endpoint set for Controller 1 and Controller 2 and reconnect to either. They never bind permanently to one controller. See [Control Plane High Availability](control-plane-ha.md).
 
 Use step-ca behind the control plane as the lean POC CA and evaluate SPIFFE/SPIRE for production workload identity/attestation plugins. Cosign can sign artifacts; TUF-style metadata supplies update roles, freshness, threshold trust, and rollback/freeze protection. A POC may use signed manifests plus protected monotonic state, but production update security must not assume artifact signatures alone solve rollback/freeze attacks.
+
+### Bounded enrollment v1 implementation note
+
+The same-day v1 implementation stops deliberately before the full protocol
+above. It uses the shared Controller HTTPS origin plus short-lived,
+single-use Controller challenges and a node-local Ed25519 key for signed claim,
+status, and heartbeat requests. The display-once grant is accepted only from an
+echo-disabled terminal, stdin, or a root-owned `0600` tmpfs file and is never
+persisted. mTLS/CA issuance remains deferred and must not be claimed for v1.
+
+This increment proves provider-neutral join, Pending approval, fingerprint
+approval/revocation, exact lost-response replay, and outbound fleet visibility
+for node scope, agent/link health, boot/sequence, and inventory/release digests.
+It does not yet upload detailed capabilities, deliver desired state or secrets,
+or make the node fully manageable from the Controller. The exact implemented
+boundary is documented in `edge/enrollment/API_CONTRACT.md`.
+
+### Edge filesystem, evidence, and removal contract
+
+The future voice appliance uses the same secured Vivolution FHS namespace as
+other roles, with role-scoped ownership beneath it:
+
+```text
+/opt/vivolution/releases/  immutable signed/digest-pinned releases
+/etc/vivolution/           configuration, trust and protected secret references
+/var/lib/vivolution/       identity, desired/LKG state, ledger and ownership manifest
+/var/log/vivolution/       redacted runtime, command and lifecycle audit evidence
+/var/cache/vivolution/     disposable verified staging
+/run/vivolution/           volatile sockets, locks and process state
+```
+
+The required mature design records integration files and dedicated Vivolution
+firewall table/chains individually. rc6 begins scoped ownership evidence but
+does not yet provide post-mutation Edge removal. No cleanup routine may use a
+broad filesystem or firewall flush.
+
+Installer and agent logs use RFC 3339 UTC timestamps, correlation and node/run
+IDs, component/tenant scope where safe, phase/step/attempt, severity
+`TRACE|DEBUG|INFO|WARN|ERROR|FATAL`, and a separate `AUDIT` event class. The
+bootstrap and Ansible execution runner records sanitized semantic command
+descriptions, working directory, effective numeric identity where known,
+duration, exit status, and ordered redacted output. There is
+no unredacted/debug-secret mode. Grants, keys, authorization headers, provider
+credentials, phone numbers, database URLs, and SIP payloads are excluded or
+irreversibly minimized. Rotation, compression, disk quotas, retention, and
+support-bundle allowlists prevent verbose evidence from becoming a secret or
+availability risk.
+
+Failed pre-mutation setup may be discarded only when its ledger/ownership
+manifest proves no host change. Once identity, packages, firewall, SIP/media,
+certificates, or desired state may have changed, removal becomes an audited
+decommission workflow: drain calls where safe, revoke node identity and secret
+leases, remove routing/placement, preserve required CDR/audit evidence, rotate
+affected credentials, and delete only exact owned resources. The rc6 launcher
+does not implement that post-mutation Edge removal and must not claim it does.
 
 ## Reconciliation and rollback
 
